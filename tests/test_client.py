@@ -192,6 +192,7 @@ async def test_aclose_closes_and_allows_reopening(mock_warehouse, warehouse_host
 
     await client.execute_json_statement("SELECT 1")
     first = client._http
+    assert first is not None
     await client.aclose()
     assert client._http is None
     assert first.is_closed
@@ -211,6 +212,7 @@ async def test_async_context_manager_closes_on_exit(mock_warehouse, warehouse_ho
         await client.execute_json_statement("SELECT 1")
         http_client = client._http
 
+    assert http_client is not None
     assert http_client.is_closed
     assert client._http is None
 
