@@ -82,6 +82,7 @@ class DatabricksClient:
         wait_timeout: str = "30s",
         chunk_fetch_concurrency: int = 6,
         warehouse_start_timeout: float = 300.0,
+        warehouse_confirmed_running_ttl_s: float = 30.0,
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
@@ -101,6 +102,40 @@ class DatabricksClient:
         # slow consumer.
         self.chunk_fetch_concurrency = chunk_fetch_concurrency
         self.warehouse_start_timeout = warehouse_start_timeout
+        # See _ensure_warehouse_running: a warm warehouse doesn't need its
+        # RUNNING state re-verified on every single statement -- one round
+        # trip saved per query once confirmed within this window.
+        self._warehouse_confirmed_running_ttl_s = warehouse_confirmed_running_ttl_s
+        self._warehouse_confirmed_running_at: float | None = None
+        # One shared connection pool for this client's whole lifetime instead
+        # of a fresh httpx.AsyncClient() (and its own TCP+TLS handshake) per
+        # call -- every method below hits the same Databricks host repeatedly,
+        # so keep-alive/pooling actually pays off across calls. Presigned
+        # external-link downloads (a different host: blob storage) still each
+        # get their own connection from this same pool as needed; httpx pools
+        # per-host internally, so sharing one client across hosts is safe.
+        self._http: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            async with self._http_lock:
+                if self._http is None:
+                    self._http = httpx.AsyncClient()
+        return self._http
+
+    async def aclose(self) -> None:
+        """Closes the shared connection pool. Safe to call even if no request
+        was ever made (no-op) or more than once."""
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+    async def __aenter__(self) -> DatabricksClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
 
     async def _bearer_token(self) -> str:
         if self._token is not None:
@@ -135,12 +170,23 @@ class DatabricksClient:
         implicit auto-start. A cold warehouse's catalog credential cache needs
         a moment to catch up right after startup -- submitting straight into
         that window is a common source of transient, identity-scoped 403s.
-        Fast path: a single GET when already RUNNING, so this adds no
-        meaningful overhead once warm."""
+
+        Skips the check entirely if RUNNING was already confirmed within
+        `_warehouse_confirmed_running_ttl_s` -- a warm, always-on warehouse
+        doesn't need re-verifying on every single statement; that GET is a
+        full round trip that buys nothing once already known-good."""
+        now = time.monotonic()
+        if (
+            self._warehouse_confirmed_running_at is not None
+            and now - self._warehouse_confirmed_running_at < self._warehouse_confirmed_running_ttl_s
+        ):
+            return
+
         url = f"{self._host}/api/2.0/sql/warehouses/{self.warehouse_id}"
         resp = await self._authed_request(client, "GET", url)
         state = resp.json().get("state")
         if state == "RUNNING":
+            self._warehouse_confirmed_running_at = time.monotonic()
             return
 
         if state == "STOPPED":
@@ -152,6 +198,7 @@ class DatabricksClient:
             resp = await self._authed_request(client, "GET", url)
             state = resp.json().get("state")
             if state == "RUNNING":
+                self._warehouse_confirmed_running_at = time.monotonic()
                 return
         # Falls through and lets the statement submission itself surface
         # whatever's actually wrong -- proceeding anyway rather than raising
@@ -187,21 +234,21 @@ class DatabricksClient:
         if parameters:
             body["parameters"] = parameters
 
-        async with httpx.AsyncClient() as client:
-            await self._ensure_warehouse_running(client)
-            resp = await self._authed_request(client, "POST", f"{self._host}/api/2.0/sql/statements", json=body)
+        client = await self._get_http_client()
+        await self._ensure_warehouse_running(client)
+        resp = await self._authed_request(client, "POST", f"{self._host}/api/2.0/sql/statements", json=body)
+        data = resp.json()
+
+        status = data.get("status", {})
+        while status.get("state") not in _TERMINAL_STATES:
+            statement_id = data["statement_id"]
+            await asyncio.sleep(_POLL_INTERVAL_S)
+            resp = await self._authed_request(client, "GET", f"{self._host}/api/2.0/sql/statements/{statement_id}")
             data = resp.json()
-
             status = data.get("status", {})
-            while status.get("state") not in _TERMINAL_STATES:
-                statement_id = data["statement_id"]
-                await asyncio.sleep(_POLL_INTERVAL_S)
-                resp = await self._authed_request(client, "GET", f"{self._host}/api/2.0/sql/statements/{statement_id}")
-                data = resp.json()
-                status = data.get("status", {})
 
-            _raise_for_failed(status)
-            return data["statement_id"], data.get("manifest") or {}
+        _raise_for_failed(status)
+        return data["statement_id"], data.get("manifest") or {}
 
     async def execute_arrow_statement(
         self,
@@ -249,26 +296,26 @@ class DatabricksClient:
         overwriting anything already there. `volume_path` is caller-supplied
         in full (e.g. `/Volumes/my_catalog/my_schema/my_volume/some/file.parquet`)
         -- this package has no knowledge of any specific catalog/schema/volume."""
-        async with httpx.AsyncClient() as client:
-            await self._authed_request(
-                client,
-                "PUT",
-                f"{self._host}/api/2.0/fs/files{volume_path}",
-                params={"overwrite": "true"},
-                content_type="application/octet-stream",
-                content=data,
-            )
+        client = await self._get_http_client()
+        await self._authed_request(
+            client,
+            "PUT",
+            f"{self._host}/api/2.0/fs/files{volume_path}",
+            params={"overwrite": "true"},
+            content_type="application/octet-stream",
+            content=data,
+        )
 
     async def delete_volume_file(self, volume_path: str) -> None:
         """Deletes a file at `volume_path` (see upload_volume_file). A 404 is
         treated as success -- the file is already gone, which is fine for
         idempotent staging cleanup."""
-        async with httpx.AsyncClient() as client:
-            try:
-                await self._authed_request(client, "DELETE", f"{self._host}/api/2.0/fs/files{volume_path}")
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 404:
-                    raise
+        client = await self._get_http_client()
+        try:
+            await self._authed_request(client, "DELETE", f"{self._host}/api/2.0/fs/files{volume_path}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
 
     async def stream_chunks_by_index(
         self, statement_id: str, chunk_metas: list[dict[str, Any]]
@@ -281,11 +328,11 @@ class DatabricksClient:
         manifest didn't carry one) and its own chunk_index, so a caller that
         cares about the original row order (e.g. a query with ORDER BY) can
         restore it even though chunks can complete out of order."""
-        async with httpx.AsyncClient() as client:
-            async for blob, row_count, chunk_index in self._fetch_chunks_with_backpressure(
-                client, statement_id, chunk_metas
-            ):
-                yield blob, row_count, chunk_index
+        client = await self._get_http_client()
+        async for blob, row_count, chunk_index in self._fetch_chunks_with_backpressure(
+            client, statement_id, chunk_metas
+        ):
+            yield blob, row_count, chunk_index
 
     async def _fetch_link_bytes(self, client: httpx.AsyncClient, url: str) -> bytes:
         async def _do() -> bytes:

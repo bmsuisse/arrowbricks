@@ -163,3 +163,82 @@ def test_requires_token_or_provider(warehouse_host_id):
     host, warehouse_id = warehouse_host_id
     with pytest.raises(ValueError, match="token"):
         DatabricksClient(host, warehouse_id)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_shares_one_http_client_across_calls(mock_warehouse, warehouse_host_id):
+    """A DatabricksClient should reuse one httpx.AsyncClient (and its
+    connection pool) across statements and chunk fetches, not open a fresh
+    one per call -- see client.py's _get_http_client."""
+    host, warehouse_id = warehouse_host_id
+    mock_warehouse(respx.mock, n_chunks=2, rows_per_chunk=2)
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+
+    assert client._http is None
+    await client.execute_json_statement("SELECT 1")
+    first = client._http
+    assert first is not None
+    await client.execute_json_statement("SELECT 2")
+    assert client._http is first  # same instance reused, not recreated
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_aclose_closes_and_allows_reopening(mock_warehouse, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=1)
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+
+    await client.execute_json_statement("SELECT 1")
+    first = client._http
+    await client.aclose()
+    assert client._http is None
+    assert first.is_closed
+
+    await client.execute_json_statement("SELECT 1")  # still usable after close
+    assert client._http is not None
+    assert client._http is not first
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_async_context_manager_closes_on_exit(mock_warehouse, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=1)
+
+    async with DatabricksClient(host, warehouse_id, token="test-token") as client:
+        await client.execute_json_statement("SELECT 1")
+        http_client = client._http
+
+    assert http_client.is_closed
+    assert client._http is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warehouse_running_check_is_cached_across_statements(mock_warehouse, warehouse_host_id):
+    """Once RUNNING is confirmed, a second statement within the TTL window
+    shouldn't re-GET the warehouse status -- that round trip buys nothing on
+    an already-known-warm warehouse (see _ensure_warehouse_running)."""
+    host, warehouse_id = warehouse_host_id
+    warehouse_route = mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=1)
+    client = DatabricksClient(host, warehouse_id, token="test-token", warehouse_confirmed_running_ttl_s=60.0)
+
+    await client.execute_json_statement("SELECT 1")
+    assert warehouse_route.call_count == 1
+    await client.execute_json_statement("SELECT 2")
+    assert warehouse_route.call_count == 1  # still 1 -- cached, no second GET
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warehouse_running_check_re_verifies_after_ttl_expires(mock_warehouse, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    warehouse_route = mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=1)
+    client = DatabricksClient(host, warehouse_id, token="test-token", warehouse_confirmed_running_ttl_s=0.0)
+
+    await client.execute_json_statement("SELECT 1")
+    assert warehouse_route.call_count == 1
+    await client.execute_json_statement("SELECT 2")
+    assert warehouse_route.call_count == 2  # TTL is 0 -- re-verified every time

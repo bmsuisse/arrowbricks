@@ -47,12 +47,14 @@ def mock_warehouse():
     Callers configure it via mock_warehouse(...) inside a `with respx.mock:`
     block (or use the `respx_router` param)."""
 
-    def _install(router: respx.Router, n_chunks: int, rows_per_chunk: int, *, reverse_arrival: bool = False) -> None:
+    def _install(
+        router: respx.Router, n_chunks: int, rows_per_chunk: int, *, reverse_arrival: bool = False
+    ) -> respx.Route:
         statement_id = "stmt-abc"
         chunks = [{"chunk_index": i, "row_count": rows_per_chunk} for i in range(n_chunks)]
         chunk_bytes = {i: build_chunk_bytes(i * rows_per_chunk, (i + 1) * rows_per_chunk) for i in range(n_chunks)}
 
-        router.get(f"{HOST}/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(
+        warehouse_route = router.get(f"{HOST}/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(
             return_value=httpx.Response(200, json={"state": "RUNNING"})
         )
         router.post(f"{HOST}/api/2.0/sql/statements").mock(
@@ -89,6 +91,7 @@ def mock_warehouse():
             return httpx.Response(200, content=chunk_bytes[idx])
 
         router.get(url__regex=rf"{HOST}/_data/chunk-\d+").mock(side_effect=serve_chunk_bytes)
+        return warehouse_route
 
     return _install
 
