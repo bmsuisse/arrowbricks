@@ -55,6 +55,13 @@ async for item in stream_query_json(client, "SELECT * FROM my_catalog.my_schema.
     print(item)  # one ready-to-send JSON string per row
 ```
 
+See [`examples/basic.py`](examples/basic.py) for a runnable version,
+[`examples/cursor_paging.py`](examples/cursor_paging.py) for paging a large
+result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront,
+[`examples/fastapi_sse.py`](examples/fastapi_sse.py) for streaming a query to
+a client as Server-Sent Events, or [`examples/azure_auth.py`](examples/azure_auth.py)
+for a caching `token_provider` built on Azure AD (`DefaultAzureCredential`).
+
 ## Why not `databricks-sql-connector`?
 
 The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility over Databricks' Thrift/ODBC-style protocol. If you just want a query result as Arrow/JSON in your own async app, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies. arrowbricks talks to the plain REST Statement Execution API instead, and its whole dependency tree is `httpx` + `arro3-core` + `arro3-io`. The `Cursor` API is deliberately shaped like the official driver's so switching between them is mostly a constructor change, but arrowbricks is async throughout (`execute`, `fetchone`, etc. are all coroutines) -- there's no sync escape hatch.
@@ -80,6 +87,7 @@ conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 
 - `connect(host, warehouse_id, *, token=None, token_provider=None, ...) -> Connection`
 - `Connection.cursor() -> Cursor`
+- `Connection.client -> DatabricksClient` -- the same client `cursor()` uses, for lower-level access (e.g. `stream_query_json`, `execute_json_statement`, `upload_volume_file`).
 - `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`.
 - `Cursor.execute_streamed(...)` -- same args, but an async generator yielding `HEARTBEAT` while waiting on a slow cold start, then the ready `Cursor` -- for bridging e.g. an SSE connection.
 - `Cursor.fetchone() -> tuple | None`, `Cursor.fetchmany(size) -> list[tuple]`, `Cursor.fetchall() -> list[tuple]`

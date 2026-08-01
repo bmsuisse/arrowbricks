@@ -240,10 +240,10 @@ class Connection:
     context-manager parity with a real DB-API connection."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._client = DatabricksClient(*args, **kwargs)
+        self.client = DatabricksClient(*args, **kwargs)
 
     def cursor(self) -> Cursor:
-        return Cursor(self._client)
+        return Cursor(self.client)
 
     async def close(self) -> None:
         pass
