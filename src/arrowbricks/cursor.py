@@ -140,7 +140,18 @@ class Cursor:
     def __init__(self, client: DatabricksClient) -> None:
         self._client = client
         self._result: _ResultSet | None = None
-        self.description: list[Description] | None = None
+        self._manifest_description: list[Description] | None = None
+
+    @property
+    def description(self) -> list[Description] | None:
+        """Prefers the *actual* Arrow schema off the first fetched chunk
+        (`_result.schema`) once one has been pulled -- the manifest's own
+        `schema.columns` (if Databricks included it; not every manifest does)
+        is only a pre-fetch estimate, used as a fallback so `description` is
+        still available immediately after `execute()`, before any fetch."""
+        if self._result is not None and self._result.schema is not None:
+            return [(f.name, str(f.type), None, None, None, None, None) for f in self._result.schema]
+        return self._manifest_description
 
     def execute_streamed(
         self,
@@ -168,7 +179,7 @@ class Cursor:
                     yield HEARTBEAT
                     continue
                 _statement_id, manifest, chunk_iter = item
-                self.description = _description_from_manifest(manifest)
+                self._manifest_description = _description_from_manifest(manifest)
                 self._result = _ResultSet(schema=None, chunk_aiter=chunk_iter.__aiter__())
                 yield self
 

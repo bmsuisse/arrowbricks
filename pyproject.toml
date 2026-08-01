@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "0.1.1"
+version = "0.1.2"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Single Arrow engine (arro3), no DuckDB."
 readme = "README.md"
 license = "MIT"

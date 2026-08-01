@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 import respx
 
@@ -159,3 +160,42 @@ async def test_fetch_before_execute_raises():
 
     with pytest.raises(RuntimeError, match="execute"):
         await cursor.fetchall()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_description_falls_back_to_real_arrow_schema_when_manifest_omits_it(
+    chunk_bytes_builder, warehouse_host_id
+):
+    """Not every manifest carries `schema.columns` -- description must still
+    resolve correctly once a chunk has actually been fetched, from that
+    chunk's real Arrow schema, rather than staying empty forever."""
+    host, warehouse_id = warehouse_host_id
+    respx.mock.get(f"{host}/api/2.0/sql/warehouses/{warehouse_id}").mock(
+        return_value=httpx.Response(200, json={"state": "RUNNING"})
+    )
+    respx.mock.post(f"{host}/api/2.0/sql/statements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "statement_id": "stmt-no-schema",
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": [{"chunk_index": 0, "row_count": 3}]},  # no "schema" key
+            },
+        )
+    )
+    respx.mock.get(url__regex=rf"{host}/api/2\.0/sql/statements/stmt-no-schema/result/chunks/\d+").mock(
+        return_value=httpx.Response(200, json={"external_links": [{"external_link": f"{host}/_data/chunk-0"}]})
+    )
+    respx.mock.get(f"{host}/_data/chunk-0").mock(return_value=httpx.Response(200, content=chunk_bytes_builder(0, 3)))
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+    cursor = Cursor(client)
+
+    await cursor.execute("SELECT * FROM whatever")
+    assert cursor.description == []  # manifest had no schema, and nothing fetched yet
+
+    rows = await cursor.fetchall()
+
+    assert [r[0] for r in rows] == [0, 1, 2]
+    assert cursor.description is not None
+    assert cursor.description[0][0] == "id"
