@@ -85,8 +85,10 @@ async def _run_n_warm(host: str, warehouse_id: str, token: str, sql: str, n: int
 
 
 def _report(label: str, times: list[float]) -> None:
-    print(f"{label}: n={len(times)} mean={statistics.mean(times):.3f}s median={statistics.median(times):.3f}s "
-          f"min={min(times):.3f}s max={max(times):.3f}s total={sum(times):.3f}s")
+    print(
+        f"{label}: n={len(times)} mean={statistics.mean(times):.3f}s median={statistics.median(times):.3f}s "
+        f"min={min(times):.3f}s max={max(times):.3f}s total={sum(times):.3f}s"
+    )
 
 
 async def main() -> None:

@@ -132,8 +132,10 @@ async def main() -> None:
     args = parser.parse_args()
 
     print("*** SIMULATED benchmark -- respx-mocked transport, no real Databricks call. ***")
-    print(f"Injected costs: fresh-connection handshake={_HANDSHAKE_COST_S * 1000:.0f}ms, "
-          f"warehouse-status round-trip={_WAREHOUSE_CHECK_COST_S * 1000:.0f}ms\n")
+    print(
+        f"Injected costs: fresh-connection handshake={_HANDSHAKE_COST_S * 1000:.0f}ms, "
+        f"warehouse-status round-trip={_WAREHOUSE_CHECK_COST_S * 1000:.0f}ms\n"
+    )
 
     cold = await _run_cold(args.n, "SELECT 1")
     _report("cold (old behavior: fresh client + warehouse-check per query)", cold)

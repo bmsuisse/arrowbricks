@@ -20,7 +20,7 @@ WAREHOUSE_ID = "wh-test-123"
 def build_chunk_bytes(lo: int, hi: int) -> bytes:
     """Synthesizes one chunk's Arrow-IPC bytes via arro3 directly -- an id
     column running lo..hi-1 plus a label column -- so tests exercise the real
-    Arrow IPC round trip without a live Databricks connection or DuckDB."""
+    Arrow IPC round trip without a live Databricks connection."""
     ids = list(range(lo, hi))
     id_col = core.Array(ids, type=core.DataType.int64())
     label_col = core.Array([f"row_{i}" for i in ids], type=core.DataType.string())

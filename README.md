@@ -106,7 +106,7 @@ conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 
 ## A note on Arrow IPC compression
 
-`write_ipc_stream` (and everything in this package that serializes Arrow-IPC bytes) always writes **uncompressed** bodies. arro3's own default (`compression="LZ4"`) is transparently decompressed by DuckDB's Arrow reader, but not necessarily by every other Arrow IPC reader -- notably, `duckdb-wasm`'s browser-side decoder silently fails to parse LZ4-compressed bodies. If you're producing bytes that might be consumed by something other than a Python DuckDB connection, this default matters.
+`write_ipc_stream` (and everything in this package that serializes Arrow-IPC bytes) always writes **uncompressed** bodies. arro3's own default (`compression="LZ4"`) is transparently decompressed by some Arrow readers (e.g. DuckDB's) but not necessarily by every other Arrow IPC reader -- notably, `duckdb-wasm`'s browser-side decoder silently fails to parse LZ4-compressed bodies. Since arrowbricks' bytes might end up read by anything, plain uncompressed is the safe default.
 
 ## License
 
