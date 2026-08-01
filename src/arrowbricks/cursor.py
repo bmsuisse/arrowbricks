@@ -54,32 +54,57 @@ class _ResultSet:
     def __init__(self, schema: core.Schema | None, chunk_aiter: AsyncIterator[ReplayableArrowChunk]) -> None:
         self.schema = schema
         self._chunk_aiter = chunk_aiter
-        self._pending: dict[int, ReplayableArrowChunk] = {}
+        # A list per index, not a single chunk -- a chunk_index can have more
+        # than one blob (DatabricksClient._fetch_chunk_index gathers over
+        # possibly-multiple `external_links` per chunk, "usually exactly one"
+        # but not guaranteed to be), and a dict keyed by index alone would
+        # silently overwrite/lose the first blob when a second one for the
+        # same index arrives.
+        self._pending: dict[int, list[ReplayableArrowChunk]] = {}
         self._next_idx = 0
         self._exhausted = False
         self._buffer: core.Table | None = None
         self.rownumber = 0
 
+    def _pop_pending(self, idx: int) -> ReplayableArrowChunk:
+        blobs = self._pending[idx]
+        chunk = blobs.pop(0)
+        if not blobs:
+            del self._pending[idx]
+        return chunk
+
     async def _pull_one_chunk_table(self) -> core.Table | None:
-        """Returns the next expected chunk's Table, in order -- checking
-        `_pending` FIRST, since a single earlier call can have pulled several
-        chunks off `_chunk_aiter` before the one it actually needed showed up
-        (arrival order is completion order, not chunk_index order), leaving
-        the rest already-fetched-and-buffered here. Only touches the network
-        (`_chunk_aiter.__anext__()`) once `_pending` has nothing more to give."""
+        """Returns one chunk's Table, preferring the next expected index --
+        checking `_pending` FIRST, since a single earlier call can have pulled
+        several chunks off `_chunk_aiter` before the one it actually needed
+        showed up (arrival order is completion order, not chunk_index order),
+        leaving the rest already-fetched-and-buffered here. Only touches the
+        network (`_chunk_aiter.__anext__()`) once `_pending` has nothing more
+        to give for the current index.
+
+        Once the source is exhausted, `_next_idx` reaching that exact value is
+        no longer required: if some index was skipped entirely (e.g. a chunk
+        whose bytes came back empty, see fetch_arrow_chunks_for_statement),
+        waiting for it forever would silently strand every higher-indexed
+        chunk already sitting in `_pending`. Draining the lowest remaining
+        index instead means a genuine gap costs row *order* past that point,
+        never lost rows."""
         while True:
             if self._next_idx in self._pending:
-                ready = self._pending.pop(self._next_idx)
-                self._next_idx += 1
-                return ready.to_table()
+                chunk = self._pop_pending(self._next_idx)
+                if self._next_idx not in self._pending:
+                    self._next_idx += 1
+                return chunk.to_table()
             if self._exhausted:
+                if self._pending:
+                    return self._pop_pending(min(self._pending)).to_table()
                 return None
             try:
                 chunk = await self._chunk_aiter.__anext__()
             except StopAsyncIteration:
                 self._exhausted = True
                 continue
-            self._pending[chunk.chunk_index] = chunk
+            self._pending.setdefault(chunk.chunk_index, []).append(chunk)
 
     async def _ensure_buffer(self, want: int) -> None:
         while (self._buffer is None or self._buffer.num_rows < want) and not self._exhausted:
@@ -232,6 +257,31 @@ class Cursor:
 
     async def fetchall_arrow(self) -> core.Table:
         return await self._require_result().fetchall_arrow()
+
+    def fetchall_streamed(self, *, total_timeout_s: float | None = None) -> AsyncIterator[Any]:
+        """Like fetchall(), but yields HEARTBEAT while pulling chunks instead
+        of blocking silently -- for a caller bridging e.g. an SSE connection
+        through the full download, not just the initial `execute_streamed`
+        wait for the statement to complete. Downloading many chunks for a
+        large result can itself take a while; `execute_streamed`'s own
+        heartbeats stop the moment the statement is ready, before any chunk
+        has actually been fetched. Yields HEARTBEAT zero or more times, then
+        the final `list[Row]`."""
+
+        async def _gen() -> AsyncIterator[Any]:
+            async for item in await_with_heartbeat(self.fetchall(), total_timeout_s=total_timeout_s):
+                yield item
+
+        return _gen()
+
+    def fetchall_arrow_streamed(self, *, total_timeout_s: float | None = None) -> AsyncIterator[Any]:
+        """Arrow-`Table` counterpart to fetchall_streamed -- see its docstring."""
+
+        async def _gen() -> AsyncIterator[Any]:
+            async for item in await_with_heartbeat(self.fetchall_arrow(), total_timeout_s=total_timeout_s):
+                yield item
+
+        return _gen()
 
     def __aiter__(self) -> Cursor:
         return self

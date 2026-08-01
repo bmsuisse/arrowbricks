@@ -236,7 +236,11 @@ async def stream_query_json(
     O(whole result). Chunks can arrive out of order, so out-of-order arrivals
     sit in a small `pending` buffer until the next expected chunk_index shows
     up -- that buffer stays bounded by concurrency, it never grows to the full
-    result.
+    result. `pending` holds a *list* per index, not a single chunk, since a
+    chunk_index can have more than one blob (DatabricksClient._fetch_chunk_index
+    gathers over possibly-multiple `external_links` per chunk); once the
+    source is exhausted, any index that never showed up at all is skipped
+    rather than stranding everything buffered past it forever.
 
     Note this yields a whole chunk's rows at once (write_ndjson has no
     incremental/row-at-a-time mode) -- Databricks' own chunk sizing already
@@ -247,17 +251,31 @@ async def stream_query_json(
         client, sql, catalog=catalog, schema=schema, parameters=params
     )
 
-    pending: dict[int, ReplayableArrowChunk] = {}
+    pending: dict[int, list[ReplayableArrowChunk]] = {}
     next_idx = 0
     loop = asyncio.get_running_loop()
+
+    async def _emit_lines(chunk: ReplayableArrowChunk) -> AsyncIterator[str]:
+        blob = await loop.run_in_executor(None, _write_ndjson, chunk)
+        for line in blob.splitlines():
+            yield line.decode()
+
     async for item in heartbeat_over_stream(chunk_iter, total_timeout_s=total_timeout_s):
         if item is HEARTBEAT:
             yield HEARTBEAT
             continue
-        pending[item.chunk_index] = item
+        pending.setdefault(item.chunk_index, []).append(item)
         while next_idx in pending:
-            chunk = pending.pop(next_idx)
-            blob = await loop.run_in_executor(None, _write_ndjson, chunk)
-            for line in blob.splitlines():
-                yield line.decode()
-            next_idx += 1
+            chunk = pending[next_idx].pop(0)
+            if not pending[next_idx]:
+                del pending[next_idx]
+                next_idx += 1
+            async for line in _emit_lines(chunk):
+                yield line
+
+    # A genuine gap (an index that never arrived) must not strand chunks
+    # buffered past it -- drain whatever's left, in ascending index order.
+    for idx in sorted(pending):
+        for chunk in pending[idx]:
+            async for line in _emit_lines(chunk):
+                yield line

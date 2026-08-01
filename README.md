@@ -59,8 +59,11 @@ See [`examples/basic.py`](examples/basic.py) for a runnable version,
 [`examples/cursor_paging.py`](examples/cursor_paging.py) for paging a large
 result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront,
 [`examples/fastapi_sse.py`](examples/fastapi_sse.py) for streaming a query to
-a client as Server-Sent Events, or [`examples/azure_auth.py`](examples/azure_auth.py)
-for a caching `token_provider` built on Azure AD (`DefaultAzureCredential`).
+a client as Server-Sent Events, [`examples/fastapi_sse_pivot.py`](examples/fastapi_sse_pivot.py)
+for the same over a buffered `Cursor.fetchall_streamed` result with one
+combined heartbeat/timeout budget across both the wait and the download, or
+[`examples/azure_auth.py`](examples/azure_auth.py) for a caching
+`token_provider` built on Azure AD (`DefaultAzureCredential`).
 
 ## Why not `databricks-sql-connector`?
 
@@ -89,9 +92,10 @@ conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 - `Connection.cursor() -> Cursor`
 - `Connection.client -> DatabricksClient` -- the same client `cursor()` uses, for lower-level access (e.g. `stream_query_json`, `execute_json_statement`, `upload_volume_file`).
 - `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`.
-- `Cursor.execute_streamed(...)` -- same args, but an async generator yielding `HEARTBEAT` while waiting on a slow cold start, then the ready `Cursor` -- for bridging e.g. an SSE connection.
+- `Cursor.execute_streamed(...)` -- same args, but an async generator yielding `HEARTBEAT` while waiting on a slow cold start, then the ready `Cursor` -- for bridging e.g. an SSE connection. Its timeout/heartbeats stop the moment the statement is ready, *before* any chunk has been downloaded -- see `fetchall_streamed` below for the download phase itself.
 - `Cursor.fetchone() -> tuple | None`, `Cursor.fetchmany(size) -> list[tuple]`, `Cursor.fetchall() -> list[tuple]`
 - `Cursor.fetchmany_arrow(size) -> arro3.core.Table`, `Cursor.fetchall_arrow() -> arro3.core.Table`
+- `Cursor.fetchall_streamed(*, total_timeout_s=None)` / `Cursor.fetchall_arrow_streamed(*, total_timeout_s=None)` -- like `fetchall()`/`fetchall_arrow()`, but yield `HEARTBEAT` while pulling chunks instead of blocking silently, then the final rows/Table -- for a caller downloading a large result over SSE who needs heartbeats (and a timeout) through the *download*, not just the initial wait. Compose with `execute_streamed` and a shared deadline if you want one combined budget across both phases (see `examples/fastapi_sse_pivot.py`).
 - `Cursor` is an async iterator, yielding one row (tuple) at a time.
 - `Cursor.description` -- DB-API-style `[(name, type_name, None, None, None, None, None), ...]` after `execute()`.
 - `stream_query_json(client, sql, **kwargs)` -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives. Timestamps come out as full ISO-8601, every column key is always present (`"col":null` for a null value, never an omitted key).

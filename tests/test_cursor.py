@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
 
-from arrowbricks import HEARTBEAT, DatabricksClient
+from arrowbricks import HEARTBEAT, DatabricksClient, QueryTimeout
 from arrowbricks.cursor import Cursor
 
 
@@ -151,6 +153,60 @@ async def test_execute_streamed_emits_heartbeat_before_cursor_ready(mock_warehou
     assert all(item is HEARTBEAT for item in items[:-1])
     assert items[-1] is cursor
     assert len(await cursor.fetchall()) == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetchall_streamed_times_out_on_a_slow_chunk_download(warehouse_host_id):
+    """execute_streamed's own timeout only covers the wait for the statement
+    to become ready -- it stops the moment chunks are available to fetch,
+    before any chunk has actually been downloaded. A slow chunk download must
+    still be bounded, which is exactly what fetchall_streamed adds."""
+    host, warehouse_id = warehouse_host_id
+    respx.mock.get(f"{host}/api/2.0/sql/warehouses/{warehouse_id}").mock(
+        return_value=httpx.Response(200, json={"state": "RUNNING"})
+    )
+    respx.mock.post(f"{host}/api/2.0/sql/statements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "statement_id": "stmt-slow",
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": [{"chunk_index": 0, "row_count": 3}]},
+            },
+        )
+    )
+    respx.mock.get(f"{host}/api/2.0/sql/statements/stmt-slow/result/chunks/0").mock(
+        return_value=httpx.Response(200, json={"external_links": [{"external_link": f"{host}/_data/slow-chunk"}]})
+    )
+
+    async def _slow_chunk(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(10)
+        raise AssertionError("unreachable -- test should time out first")
+
+    respx.mock.get(f"{host}/_data/slow-chunk").mock(side_effect=_slow_chunk)
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+    cursor = Cursor(client)
+    await cursor.execute("SELECT * FROM whatever")
+
+    with pytest.raises(QueryTimeout):
+        async for _ in cursor.fetchall_streamed(total_timeout_s=0.05):
+            pass
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetchall_streamed_yields_result_after_zero_or_more_heartbeats(mock_warehouse, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=3)
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+    cursor = Cursor(client)
+    await cursor.execute("SELECT * FROM whatever")
+
+    items = [item async for item in cursor.fetchall_streamed(total_timeout_s=5)]
+
+    assert all(item is HEARTBEAT for item in items[:-1])
+    assert [r[0] for r in items[-1]] == [0, 1, 2]
 
 
 @pytest.mark.asyncio
