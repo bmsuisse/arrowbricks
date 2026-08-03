@@ -107,6 +107,15 @@ impl ApiError {
     }
 }
 
+/// Converts a `JoinError` (a spawned task panicked, or was cancelled) into an
+/// `ApiError` instead of letting it be silently dropped. Shared by both the
+/// fetch-worker join in `fetch_chunks_with_backpressure` and the decode
+/// `spawn_blocking` join in `pipeline.rs` -- a panicking task must surface as
+/// an error, not as a quietly-truncated result set.
+pub(crate) fn join_error(e: tokio::task::JoinError) -> ApiError {
+    ApiError { message: format!("task panicked: {e}"), transient: false }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChunkMeta {
     pub chunk_index: i64,
@@ -179,13 +188,16 @@ impl DbClient {
             wait_timeout: "30s".to_string(),
             // Python's DatabricksClient defaults to 6, tuned for asyncio+GIL
             // where higher concurrency stops paying off past single digits
-            // (see its own comment). Benchmarked here (bench_tricks.py):
-            // this Rust core, with real OS-thread parallelism, keeps
-            // improving up to ~64 (80 chunks: 8ms delay -> 119ms@8,
-            // 70ms@16, 48ms@32, 42ms@64, regressing slightly at 128 once
-            // concurrency exceeds the chunk count). 32 is a reasonable
-            // default headroom below that peak without chasing a number
-            // that's workload-shaped; callers with very large chunk counts
+            // (see its own comment). Ad hoc benchmarking against a mocked
+            // warehouse (80 chunks, 8ms simulated per-chunk latency) showed
+            // this Rust core's real OS-thread parallelism keeps improving up
+            // to ~64 concurrent fetches (119ms@8, 70ms@16, 48ms@32, 42ms@64),
+            // regressing slightly at 128 once concurrency exceeds the chunk
+            // count -- not reproducible from a script in this repo, so take
+            // the specific numbers as directional, not a checked-in
+            // benchmark. 32 is a reasonable default headroom below that peak
+            // without chasing a number that's workload-shaped; callers with
+            // very large chunk counts
             // may still want to raise it further.
             chunk_fetch_concurrency: 32,
             warehouse_start_timeout: Duration::from_secs(300),
@@ -391,19 +403,74 @@ impl DbClient {
             // `tx` itself (not a clone) stays alive across the join below, so
             // the channel can't close until we've had a chance to deliver a
             // terminal error -- dropped implicitly at the end of this block.
-            let mut first_err = None;
-            for h in handles {
-                if let Ok(Err(e)) = h.await {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-            }
-            if let Some(e) = first_err {
+            if let Some(e) = join_first_error(handles).await {
                 let _ = tx.send(Err(e)).await;
             }
         });
 
         rx
+    }
+}
+
+/// Joins every handle, returning the first error -- whether the task
+/// returned `Err(ApiError)` or the task itself panicked (`Err(JoinError)`,
+/// e.g. from a poisoned mutex after a sibling panicked first). Missing the
+/// panic case would let that worker's unfetched work vanish with no error at
+/// all: the channel closing normally looks to the consumer exactly like a
+/// complete, successful result instead of a truncated one.
+async fn join_first_error(handles: Vec<tokio::task::JoinHandle<Result<(), ApiError>>>) -> Option<ApiError> {
+    let mut first_err = None;
+    for h in handles {
+        let outcome = match h.await {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(join_err) => Some(join_error(join_err)),
+        };
+        if first_err.is_none() {
+            first_err = outcome;
+        }
+    }
+    first_err
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {
+        tokio::spawn(async { Ok(()) })
+    }
+
+    fn err_task(msg: &'static str) -> tokio::task::JoinHandle<Result<(), ApiError>> {
+        tokio::spawn(async move { Err(ApiError { message: msg.to_string(), transient: false }) })
+    }
+
+    fn panicking_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {
+        tokio::spawn(async { panic!("simulated worker panic (e.g. poisoned mutex)") })
+    }
+
+    #[tokio::test]
+    async fn join_first_error_none_when_all_succeed() {
+        let handles = vec![ok_task(), ok_task(), ok_task()];
+        assert!(join_first_error(handles).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn join_first_error_surfaces_returned_error() {
+        let handles = vec![ok_task(), err_task("boom"), ok_task()];
+        let err = join_first_error(handles).await.expect("expected an error");
+        assert_eq!(err.message, "boom");
+    }
+
+    /// Regression test for the bug found in code review: a worker task that
+    /// *panics* (not returns Err) must still surface as an error, not vanish
+    /// silently. Before the fix, `Err(JoinError)` matched neither `Ok(Err(_))`
+    /// nor anything else and was dropped -- the caller would have gotten a
+    /// clean, silently-truncated result instead of an error.
+    #[tokio::test]
+    async fn join_first_error_surfaces_panic_not_silence() {
+        let handles = vec![ok_task(), panicking_task(), ok_task()];
+        let err = join_first_error(handles).await.expect("a panicking task must surface as an error, not vanish");
+        assert!(err.message.contains("panicked"), "error message should mention the panic: {}", err.message);
     }
 }

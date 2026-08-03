@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::client::{ApiError, ChunkItem, DbClient};
+use crate::client::{join_error, ApiError, ChunkItem, DbClient};
 
 /// Same dict-of-lists-keyed-by-index shape as `_ResultSet._pending`: a
 /// `chunk_index` can carry more than one blob (multiple `external_links` per
@@ -92,10 +92,6 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
     reader
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ApiError { message: format!("Arrow IPC decode error: {e}"), transient: false })
-}
-
-fn join_error(e: tokio::task::JoinError) -> ApiError {
-    ApiError { message: format!("decode task panicked: {e}"), transient: false }
 }
 
 /// Full submit -> poll -> fetch -> reorder -> decode pipeline. Returns the
