@@ -9,6 +9,7 @@ Runs SQL against a Databricks SQL warehouse via the Statement Execution API and 
 - `src/arrowbricks/cursor.py` -- `Connection`/`Cursor`, the DB-API-ish surface (`execute`/`execute_streamed`, `fetchone`/`fetchmany`/`fetchall`, `fetchall_arrow`/`fetchmany_arrow`, `fetchall_streamed`/`fetchall_arrow_streamed`). `_ResultSet` buffers at the Arrow-Table level (not materialized Python rows) so the Arrow-native fetch methods stay zero-copy; row-based fetches materialize lazily off that buffer.
 - `tests/` -- respx mocks the Databricks REST endpoints (warehouse status, statement submit, chunk-link resolution, external-link byte download); no real warehouse or credentials needed to run the suite.
 - `examples/` -- `basic.py` (static token), `cursor_paging.py` (fetchmany/fetchmany_arrow over a large result), `fastapi_sse.py` (streaming NDJSON as SSE), `fastapi_sse_pivot.py` (buffered fetchall_streamed with one combined heartbeat/timeout budget across the wait+download phases), `azure_auth.py` (Azure AD `token_provider` via `azure-identity`, kept out of core deps on purpose -- don't widen `ty check`'s scope to include it).
+- `rust/arrowbricks_core/` -- experimental PyO3+arrow-rs reimplementation of the hot path above (eager full-table fetch only, no lazy fetchmany/token_provider/JSON format/streaming yet). Not wired into the Python package, not published. See its own `README.md`.
 
 ## Commands
 
