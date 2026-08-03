@@ -204,6 +204,27 @@ impl PyDbClient {
             Ok(result.rows)
         })
     }
+
+    /// Uploads `data` to a Unity Catalog volume path via the Files API,
+    /// overwriting anything already there.
+    #[pyo3(signature = (volume_path, data))]
+    fn upload_volume_file<'py>(&self, py: Python<'py>, volume_path: String, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.inner.clone();
+        let data = bytes::Bytes::from(data);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.upload_volume_file(&volume_path, data).await.map_err(|e| PyRuntimeError::new_err(e.message))
+        })
+    }
+
+    /// Deletes a file at `volume_path` (see `upload_volume_file`). A 404 is
+    /// treated as success -- the file is already gone, fine for idempotent
+    /// staging cleanup.
+    fn delete_volume_file<'py>(&self, py: Python<'py>, volume_path: String) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.delete_volume_file(&volume_path).await.map_err(|e| PyRuntimeError::new_err(e.message))
+        })
+    }
 }
 
 /// One statement's worth of lazily-fetched result. `fetchmany_arrow`/
