@@ -27,6 +27,13 @@ the migration.
 uvx maturin develop --uv --release
 ```
 
+`maturin develop` builds this as a mixed Python/Rust project (see
+`pyproject.toml`'s `python-source = "python"`): the compiled extension lands
+in `python/arrowbricks_core/`, alongside a hand-written `__init__.pyi` and a
+`py.typed` marker (PEP 561), so `Client`/`ResultSet`/etc. get real
+autocomplete and type-checking in editors and under `mypy`/`pyright`/`ty` --
+a compiled PyO3 extension has no type info of its own without them.
+
 ## Quickstart
 
 ```python
