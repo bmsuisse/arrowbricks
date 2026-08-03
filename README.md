@@ -69,25 +69,26 @@ combined heartbeat/timeout budget across both the wait and the download, or
 
 A [PyO3](https://pyo3.rs)-based reimplementation of the hot path -- statement
 submit/poll, bounded-concurrency chunk fetch, the reorder buffer, and
-Arrow-IPC decode via [arrow-rs](https://github.com/apache/arrow-rs) -- is
-being built in [`rust/arrowbricks_core`](rust/arrowbricks_core). This is the
-committed direction, not a side experiment: once it reaches feature parity
-with the pure-Python implementation below, `arrowbricks`'s build switches to
-it and the Python implementation is deleted, not kept as a permanent
-alternative. Benchmarked so far at 1.3x-8x over the pure-Python path,
-depending on concurrency and chunk count: Python's asyncio+GIL plateaus past
-a handful of concurrent chunk fetches, while the Rust core keeps scaling on
-real OS threads.
+Arrow-IPC decode via [arrow-rs](https://github.com/apache/arrow-rs) -- lives
+in [`rust/arrowbricks_core`](rust/arrowbricks_core) and has now reached full
+feature parity with the pure-Python implementation below: lazy `fetchmany`,
+`token_provider` callback, JSON result format, volume-file operations, and
+`execute_streamed` heartbeats are all ported. This is the committed
+direction, not a side experiment -- `arrowbricks`'s build switches to it next
+and the Python implementation gets deleted, not kept as a permanent
+alternative. Benchmarked at 1.3x-8x over the pure-Python path, depending on
+concurrency and chunk count: Python's asyncio+GIL plateaus past a handful of
+concurrent chunk fetches, while the Rust core keeps scaling on real OS
+threads.
 
 **Nothing above changes because of this yet.** `pip install arrowbricks`
 still gets you exactly the pure-Python/arro3 implementation described in
-this README until parity is reached -- the Rust core is a separate,
-unpublished crate you'd have to clone this repo and build yourself
-(`uvx maturin develop --uv --release` inside `rust/arrowbricks_core`). Ported
-so far: lazy `fetchmany`, `token_provider` callback, JSON result format,
-volume-file operations. One gap left: `execute_streamed` heartbeats during a
-slow warehouse cold start. See [its own README](rust/arrowbricks_core/README.md)
-for what's actually there today, including DuckDB and FastAPI SSE usage.
+this README -- the Rust core is a separate, unpublished crate you'd have to
+clone this repo and build yourself (`uvx maturin develop --uv --release`
+inside `rust/arrowbricks_core`). The actual cutover (swap this package's
+build to the Rust crate behind the same public API, then delete the Python
+implementation) is the next step. See [its own README](rust/arrowbricks_core/README.md)
+for what's there today, including DuckDB and FastAPI SSE usage.
 
 ## Why not `databricks-sql-connector`?
 

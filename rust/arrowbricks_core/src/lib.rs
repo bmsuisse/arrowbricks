@@ -1,16 +1,20 @@
 pub mod client;
+pub mod heartbeat;
 pub mod pipeline;
 
 use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::Schema;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use arrow::datatypes::{Schema, SchemaRef};
+use arrow::record_batch::RecordBatch;
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3_arrow::PyTable;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
 use client::{ApiError, DbClient, TokenFuture, TokenProvider};
+use heartbeat::{HeartbeatWait, Tick};
 use pipeline::ResultStream;
 
 #[pyfunction]
@@ -23,6 +27,28 @@ fn py_err_to_api_error(e: PyErr) -> ApiError {
         message: e.to_string(),
         transient: false,
     }
+}
+
+/// Marker type for the `HEARTBEAT` sentinel -- matches Python's own
+/// `_streaming.py` (`class _Heartbeat: ...; HEARTBEAT = _Heartbeat()`): one
+/// singleton instance, so a caller's `item is HEARTBEAT` identity check
+/// works. `PyOnceLock` lazily creates that single instance on first use and
+/// hands out clones of the *same* underlying object thereafter.
+#[pyclass(name = "_Heartbeat")]
+struct PyHeartbeat;
+
+#[pymethods]
+impl PyHeartbeat {
+    fn __repr__(&self) -> &'static str {
+        "HEARTBEAT"
+    }
+}
+
+static HEARTBEAT_SINGLETON: PyOnceLock<Py<PyHeartbeat>> = PyOnceLock::new();
+
+fn heartbeat_singleton(py: Python<'_>) -> PyResult<Py<PyHeartbeat>> {
+    let cell: &Py<PyHeartbeat> = HEARTBEAT_SINGLETON.get_or_try_init(py, || Py::new(py, PyHeartbeat))?;
+    Ok(cell.clone_ref(py))
 }
 
 /// Bridges a Python `token_provider` callable (sync or async, matching
@@ -191,6 +217,30 @@ impl PyDbClient {
         })
     }
 
+    /// Like `execute()`, but yields `HEARTBEAT` while waiting on Databricks
+    /// instead of blocking silently -- for bridging e.g. an SSE connection
+    /// during a possible multi-minute cold warehouse start. Yields
+    /// `HEARTBEAT` zero or more times, then a `ResultSet` once ready to
+    /// fetch. Not async itself (matches `cursor.py`'s own `execute_streamed`,
+    /// a sync method returning an async generator) -- the submit/poll starts
+    /// running immediately in the background regardless of when the caller
+    /// starts iterating.
+    #[pyo3(signature = (statement, catalog=None, schema=None, total_timeout_s=None))]
+    fn execute_streamed(
+        &self,
+        statement: String,
+        catalog: Option<String>,
+        schema: Option<String>,
+        total_timeout_s: Option<f64>,
+    ) -> PyExecuteStreamedIter {
+        let client = self.inner.clone();
+        let fut =
+            async move { pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref()).await };
+        PyExecuteStreamedIter {
+            wait: Arc::new(AsyncMutex::new(Some(HeartbeatWait::new(fut, total_timeout_s)))),
+        }
+    }
+
     /// Full submit->poll->fetch->reorder pipeline for one JSON_ARRAY
     /// statement -- no Arrow parse at all. Returns a plain list of rows,
     /// each row a list of values where every non-null value is a *string*
@@ -289,6 +339,102 @@ impl PyResultSet {
             PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })
     }
+
+    /// Like `fetchall_arrow()`, but yields `HEARTBEAT` while pulling chunks
+    /// instead of blocking silently -- for a caller bridging e.g. an SSE
+    /// connection through the full download, not just `execute_streamed`'s
+    /// initial wait for the statement to become ready. Downloading many
+    /// chunks for a large result can itself take a while.
+    #[pyo3(signature = (total_timeout_s=None))]
+    fn fetchall_arrow_streamed(&self, total_timeout_s: Option<f64>) -> PyFetchallArrowStreamedIter {
+        let inner = self.inner.clone();
+        let fut = async move { inner.lock().await.fetchall_arrow().await };
+        PyFetchallArrowStreamedIter {
+            wait: Arc::new(AsyncMutex::new(Some(HeartbeatWait::new(fut, total_timeout_s)))),
+        }
+    }
+}
+
+/// Async iterator returned by `Client.execute_streamed`: yields the
+/// `HEARTBEAT` singleton zero or more times, then a `ResultSet` exactly
+/// once, then stops.
+#[pyclass(name = "ExecuteStreamedIter")]
+struct PyExecuteStreamedIter {
+    wait: Arc<AsyncMutex<Option<HeartbeatWait<ResultStream>>>>,
+}
+
+#[pymethods]
+impl PyExecuteStreamedIter {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let wait = self.wait.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = wait.lock().await;
+            let Some(w) = guard.as_mut() else {
+                return Err(PyStopAsyncIteration::new_err(()));
+            };
+            match w.tick().await {
+                Ok(Some(Tick::Heartbeat)) => Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any())),
+                Ok(Some(Tick::Ready(stream))) => {
+                    *guard = None;
+                    let result_set = PyResultSet {
+                        statement_id: stream.statement_id.clone(),
+                        num_chunks: stream.num_chunks,
+                        inner: Arc::new(AsyncMutex::new(stream)),
+                    };
+                    Python::attach(|py| Py::new(py, result_set).map(|rs| rs.into_any()))
+                }
+                Ok(None) => Err(PyStopAsyncIteration::new_err(())),
+                Err(e) => {
+                    *guard = None;
+                    Err(PyRuntimeError::new_err(e.message))
+                }
+            }
+        })
+    }
+}
+
+/// Async iterator returned by `ResultSet.fetchall_arrow_streamed`: yields
+/// the `HEARTBEAT` singleton zero or more times, then a `Table` exactly
+/// once, then stops.
+#[pyclass(name = "FetchallArrowStreamedIter")]
+struct PyFetchallArrowStreamedIter {
+    wait: Arc<AsyncMutex<Option<HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)>>>>,
+}
+
+#[pymethods]
+impl PyFetchallArrowStreamedIter {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let wait = self.wait.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = wait.lock().await;
+            let Some(w) = guard.as_mut() else {
+                return Err(PyStopAsyncIteration::new_err(()));
+            };
+            match w.tick().await {
+                Ok(Some(Tick::Heartbeat)) => Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any())),
+                Ok(Some(Tick::Ready((batches, schema)))) => {
+                    *guard = None;
+                    let arrow_schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
+                    let table =
+                        PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    Python::attach(|py| Py::new(py, table).map(|t| t.into_any()))
+                }
+                Ok(None) => Err(PyStopAsyncIteration::new_err(())),
+                Err(e) => {
+                    *guard = None;
+                    Err(PyRuntimeError::new_err(e.message))
+                }
+            }
+        })
+    }
 }
 
 #[pymodule]
@@ -296,5 +442,9 @@ fn arrowbricks_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ping, m)?)?;
     m.add_class::<PyDbClient>()?;
     m.add_class::<PyResultSet>()?;
+    m.add_class::<PyHeartbeat>()?;
+    m.add_class::<PyExecuteStreamedIter>()?;
+    m.add_class::<PyFetchallArrowStreamedIter>()?;
+    m.add("HEARTBEAT", heartbeat_singleton(m.py())?)?;
     Ok(())
 }

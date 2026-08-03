@@ -10,14 +10,16 @@ current pure-Python/arro3 implementation, `arrowbricks`'s build switches to
 this crate and the Python implementation is deleted -- not kept as a
 permanent second option.
 
-**Not there yet.** Ported so far: lazy `fetchmany_arrow`/`fetchall_arrow`
-(`execute()` + `ResultSet`), `token_provider` callback (sync or async), JSON
-result format (`execute_json`), volume-file operations
-(`upload_volume_file`/`delete_volume_file`). One parity gap left before
-`arrowbricks`'s build can switch to this crate: `execute_streamed`/heartbeats
-during a slow warehouse cold start. Not wired into `arrowbricks` itself and
-not published to PyPI until that closes. See the parent repo's
-[AGENTS.md](../../AGENTS.md) for the state of the migration.
+**Feature parity with the pure-Python implementation is done.** Ported: lazy
+`fetchmany_arrow`/`fetchall_arrow` (`execute()` + `ResultSet`), `token_provider`
+callback (sync or async), JSON result format (`execute_json`), volume-file
+operations (`upload_volume_file`/`delete_volume_file`), and
+`execute_streamed`/`fetchall_arrow_streamed` heartbeats during a slow
+warehouse cold start. Not wired into `arrowbricks` itself yet and not
+published to PyPI -- that cutover (swap `arrowbricks`'s build to this crate
+behind the same public API, delete the Python implementation) is the next
+step. See the parent repo's [AGENTS.md](../../AGENTS.md) for the state of
+the migration.
 
 ## Build
 
@@ -59,6 +61,9 @@ protocol (DuckDB, pyarrow, arro3) can import it with zero copies.
   - `ResultSet.statement_id`, `ResultSet.num_chunks`.
 - `Client.execute_json(statement, *, catalog=None, schema=None) -> list[list[str | None]]` -- JSON_ARRAY format, no Arrow parse. Every non-null value comes back as a string regardless of real column type (Databricks' own contract) -- cast by the manifest's column type yourself if you want native Python types.
 - `Client.upload_volume_file(volume_path, data: bytes)` / `Client.delete_volume_file(volume_path)` -- Unity Catalog volume files via the Files API. Delete treats a 404 as success (idempotent).
+- `Client.execute_streamed(statement, *, catalog=None, schema=None, total_timeout_s=None)` -- like `execute()`, but an async iterator yielding the `HEARTBEAT` singleton while waiting on Databricks instead of blocking silently (bridge e.g. an SSE connection through a slow warehouse cold start), then a `ResultSet` exactly once. Raises if `total_timeout_s` elapses first.
+  - `ResultSet.fetchall_arrow_streamed(*, total_timeout_s=None)` -- same idea for the chunk-download phase: yields `HEARTBEAT` while pulling chunks, then a `Table` exactly once.
+- `HEARTBEAT` -- module-level singleton; compare with `is`, e.g. `if item is arrowbricks_core.HEARTBEAT: ...`.
 
 ## With DuckDB
 
@@ -99,6 +104,23 @@ async def _sse(sql: str):
 ```
 
 Runnable version: [`examples/fastapi_sse.py`](examples/fastapi_sse.py).
+
+For a connection that also needs to survive a slow warehouse cold start
+without going silent, use `execute_streamed` and forward `HEARTBEAT` as an
+SSE keep-alive comment:
+
+```python
+from arrowbricks_core import HEARTBEAT
+
+async def _sse_with_heartbeats(sql: str):
+    async for item in client.execute_streamed(sql, total_timeout_s=300):
+        if item is HEARTBEAT:
+            yield ": keep-alive\n\n"
+            continue
+        table = await item.fetchall_arrow()  # item is a ResultSet here
+        for row in _rows(table):
+            yield f"data: {json.dumps(row)}\n\n"
+```
 
 ## Testing
 
