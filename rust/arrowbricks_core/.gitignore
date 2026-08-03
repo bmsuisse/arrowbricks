@@ -1,0 +1,5 @@
+# Reference skill docs installed locally via `npx skills add` -- dev tooling,
+# not project source.
+.agents/
+.claude/
+skills-lock.json

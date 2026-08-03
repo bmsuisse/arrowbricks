@@ -1,0 +1,53 @@
+[package]
+name = "arrowbricks_core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "arrowbricks_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# default-features off: arrow's defaults are csv+ipc+json, and we only ever
+# decode Arrow-IPC chunks -- csv/json parsing (plus their transitive deps)
+# would just be dead weight in the shipped .so.
+arrow = { version = "59.1.0", default-features = false, features = ["ipc"] }
+bytes = "1.12.1"
+pyo3 = { version = "0.29.1", features = ["abi3-py311"] }
+# pyo3-arrow's only optional feature is buffer_protocol (on by default),
+# which we don't use -- numpy/chrono/chrono-tz/arrow-cast(prettyprint) below
+# it are unconditional dependencies of the crate itself, not features, so
+# they ship regardless; not worth dropping pyo3-arrow over that (reimplementing
+# the Arrow C Data Interface ourselves is a much bigger risk than the MBs saved).
+pyo3-arrow = { version = "0.19.0", default-features = false }
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = ["extension-module"]
+# `extension-module` skips linking against libpython -- correct for the
+# cdylib maturin actually ships (Python provides those symbols at import
+# time), but it breaks a plain `cargo test`/`cargo bench` binary, which does
+# need to link libpython itself. Tests/benches build with
+# `--no-default-features` to get a normal link.
+extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "test-util"] }
+wiremock = "0.6.5"
+
+[profile.release]
+# opt-level stays at the implicit default (3, speed) rather than "s"/"z" --
+# perf was the original ask and the benchmarks were run against opt-level 3;
+# trading hot-path speed for a smaller .so wasn't asked for. strip + lto +
+# codegen-units=1 are pure wins with no such tradeoff: less debuginfo and
+# better cross-crate dead-code elimination, not slower code.
+# panic = "abort" is NOT an option here even though it'd shrink the binary --
+# pyo3 relies on unwinding (catch_unwind) to turn a Rust panic into a Python
+# exception at the FFI boundary instead of aborting the whole interpreter.
+strip = true
+lto = true
+codegen-units = 1
