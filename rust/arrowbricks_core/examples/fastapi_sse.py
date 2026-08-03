@@ -32,10 +32,9 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
+import arrowbricks_core
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-
-import arrowbricks_core
 
 app = FastAPI()
 
