@@ -122,34 +122,39 @@ pub struct ResultStream {
 
 impl ResultStream {
     /// Pulls/decodes chunks until at least `want_rows` are buffered (or the
-    /// source is exhausted). Chunks are pulled a batch at a time -- using
+    /// source is exhausted). Chunks are pulled in bounded batches -- using
     /// each chunk's manifest `row_count` estimate to decide how many to pull
-    /// before decoding, capped at `MAX_CHUNKS_PER_FETCH_BATCH` -- and their
-    /// `spawn_blocking` decode handles are awaited together, same
-    /// fetch/decode overlap reasoning as `run_pipeline`. `want_rows =
-    /// usize::MAX` drains the whole result (used by `fetchall_arrow`).
+    /// before decoding, capped per batch at `MAX_CHUNKS_PER_FETCH_BATCH` --
+    /// and each batch's `spawn_blocking` decode handles are awaited
+    /// together, same fetch/decode overlap reasoning as `run_pipeline`. The
+    /// outer loop repeats batches until `want_rows` is actually met (not
+    /// just one bounded batch -- `want_rows = usize::MAX` must still drain a
+    /// result with more than `MAX_CHUNKS_PER_FETCH_BATCH` chunks, so a
+    /// single capped batch isn't enough).
     async fn fetch_at_least(&mut self, want_rows: usize) -> Result<(), ApiError> {
-        let mut decode_handles = Vec::new();
-        let mut estimated_new_rows = 0usize;
-        while self.pending_rows + estimated_new_rows < want_rows
-            && !self.exhausted
-            && decode_handles.len() < MAX_CHUNKS_PER_FETCH_BATCH
-        {
-            match self.reorder.next().await? {
-                Some(item) => {
-                    estimated_new_rows += item.row_count.unwrap_or(0).max(0) as usize;
-                    decode_handles.push(tokio::task::spawn_blocking(move || decode_chunk(&item.blob)));
+        while self.pending_rows < want_rows && !self.exhausted {
+            let mut decode_handles = Vec::new();
+            let mut estimated_new_rows = 0usize;
+            while self.pending_rows + estimated_new_rows < want_rows
+                && !self.exhausted
+                && decode_handles.len() < MAX_CHUNKS_PER_FETCH_BATCH
+            {
+                match self.reorder.next().await? {
+                    Some(item) => {
+                        estimated_new_rows += item.row_count.unwrap_or(0).max(0) as usize;
+                        decode_handles.push(tokio::task::spawn_blocking(move || decode_chunk(&item.blob)));
+                    }
+                    None => self.exhausted = true,
                 }
-                None => self.exhausted = true,
             }
-        }
-        for handle in decode_handles {
-            for batch in handle.await.map_err(join_error)?? {
-                if self.schema.is_none() {
-                    self.schema = Some(batch.schema());
+            for handle in decode_handles {
+                for batch in handle.await.map_err(join_error)?? {
+                    if self.schema.is_none() {
+                        self.schema = Some(batch.schema());
+                    }
+                    self.pending_rows += batch.num_rows();
+                    self.pending.push_back(batch);
                 }
-                self.pending_rows += batch.num_rows();
-                self.pending.push_back(batch);
             }
         }
         Ok(())

@@ -154,6 +154,27 @@ async fn lazy_fetchmany_never_pulls_more_chunks_than_consumed() {
 }
 
 #[tokio::test]
+async fn lazy_fetchall_drains_beyond_the_per_batch_chunk_cap() {
+    // Regression test: fetch_at_least pulls chunks in bounded batches
+    // (MAX_CHUNKS_PER_FETCH_BATCH = 32 per round) -- a single round isn't
+    // enough to satisfy a request spanning more chunks than that. An
+    // earlier version of this code only ran one bounded batch per
+    // fetch_at_least call, so fetchall_arrow() on a result with more than
+    // 32 chunks silently returned just the first 32 chunks' worth of rows
+    // instead of everything. 50 chunks here deliberately exceeds that cap.
+    let server = MockServer::start().await;
+    install_mock_warehouse(&server, 50, 3, false).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None).await.unwrap();
+
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 150, "fetchall_arrow must drain all 50 chunks, not just the first batch-cap's worth");
+    assert_ids_in_order(&batches, 150);
+}
+
+#[tokio::test]
 async fn lazy_fetchmany_survives_reverse_arrival() {
     let server = MockServer::start().await;
     install_mock_warehouse(&server, 5, 4, true).await;
