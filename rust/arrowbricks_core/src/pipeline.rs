@@ -283,6 +283,66 @@ pub async fn run_pipeline(
     })
 }
 
+/// Chunk-granularity (not row-count-granularity) counterpart to
+/// `ResultStream`: pulls and decodes exactly one reordered chunk per
+/// `next_chunk()` call rather than buffering ahead to satisfy a row count.
+/// Backs `stream_query_json`'s Rust side -- Python still owns turning each
+/// chunk's Arrow batches into NDJSON text via arro3 (`write_ndjson`), same as
+/// today; this only replaces the submit/poll/fetch/reorder/decode beneath
+/// it.
+pub struct ChunkStream {
+    pub statement_id: String,
+    pub num_chunks: usize,
+    pub schema: Option<SchemaRef>,
+    reorder: ReorderBuffer,
+}
+
+impl ChunkStream {
+    /// Pulls the next chunk in logical (chunk_index) order and decodes it on
+    /// a blocking thread -- `None` once the source is exhausted. One network
+    /// chunk in, one `Vec<RecordBatch>` out (usually a single batch),
+    /// matching `fetch_arrow_chunks_for_statement`'s per-chunk yield.
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<RecordBatch>>, ApiError> {
+        match self.reorder.next().await? {
+            Some(item) => {
+                let batches = tokio::task::spawn_blocking(move || decode_chunk(&item.blob))
+                    .await
+                    .map_err(join_error)??;
+                if self.schema.is_none() {
+                    if let Some(b) = batches.first() {
+                        self.schema = Some(b.schema());
+                    }
+                }
+                Ok(Some(batches))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// Submit -> poll -> start background chunk fetching for the chunk-at-a-time
+/// stream above. Matches Python's `fetch_arrow_chunks_with_manifest`: this
+/// await itself is never heartbeat-wrapped (only the per-chunk pulls that
+/// follow are) -- `stream_query_json` only wraps its chunk iterator, not
+/// this initial submit/poll wait, so this crate preserves that same gap
+/// rather than "fixing" it during the port.
+pub async fn execute_chunk_stream(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+) -> Result<ChunkStream, ApiError> {
+    let submitted = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let num_chunks = submitted.chunk_metas.len();
+    let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
+    Ok(ChunkStream {
+        statement_id: submitted.statement_id,
+        num_chunks,
+        schema: None,
+        reorder: ReorderBuffer::new(rx),
+    })
+}
+
 pub struct JsonResult {
     pub statement_id: String,
     pub num_chunks: usize,

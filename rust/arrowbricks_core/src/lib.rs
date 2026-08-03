@@ -14,8 +14,8 @@ use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
 use client::{ApiError, DbClient, TokenFuture, TokenProvider};
-use heartbeat::{HeartbeatWait, Tick};
-use pipeline::ResultStream;
+use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
+use pipeline::{ChunkStream, ResultStream};
 
 #[pyfunction]
 fn ping() -> &'static str {
@@ -296,6 +296,32 @@ impl PyDbClient {
                 .map_err(|e| PyRuntimeError::new_err(e.message))
         })
     }
+
+    /// Chunk-at-a-time counterpart to `execute_arrow`, backing
+    /// `stream_query_json`: yields `HEARTBEAT` while waiting on each
+    /// still-in-flight chunk (not just the initial statement wait), then a
+    /// `Table` per chunk as it arrives in logical order, one chunk's rows at
+    /// a time rather than the whole result upfront. Not async itself, same
+    /// as `execute_streamed` -- the returned iterator's `__anext__` does the
+    /// real work, including the initial submit/poll on its very first call.
+    #[pyo3(signature = (statement, catalog=None, schema=None, total_timeout_s=None))]
+    fn stream_chunks_arrow(
+        &self,
+        statement: String,
+        catalog: Option<String>,
+        schema: Option<String>,
+        total_timeout_s: Option<f64>,
+    ) -> PyChunkStreamIter {
+        PyChunkStreamIter {
+            state: Arc::new(AsyncMutex::new(PyChunkStreamState::Pending {
+                client: self.inner.clone(),
+                statement,
+                catalog,
+                schema,
+                total_timeout_s,
+            })),
+        }
+    }
 }
 
 /// One statement's worth of lazily-fetched result. `fetchmany_arrow`/
@@ -449,6 +475,107 @@ impl PyFetchallArrowStreamedIter {
     }
 }
 
+/// Not-yet-started vs. running state for `PyChunkStreamIter`. The
+/// submit/poll/spawn-workers step (`Pending` -> `Running`) happens on the
+/// iterator's first `__anext__` call, un-heartbeated -- matching Python's
+/// `stream_query_json`, which awaits `fetch_arrow_chunks_with_manifest`
+/// directly before entering its heartbeat-wrapped chunk loop. The
+/// `total_timeout_s` budget starts counting from `Running`, not from
+/// construction, for the same reason.
+enum PyChunkStreamState {
+    Pending {
+        client: Arc<DbClient>,
+        statement: String,
+        catalog: Option<String>,
+        schema: Option<String>,
+        total_timeout_s: Option<f64>,
+    },
+    Running {
+        stream: Arc<AsyncMutex<ChunkStream>>,
+        heartbeat: HeartbeatStream<Vec<RecordBatch>>,
+    },
+    Done,
+}
+
+/// Async iterator returned by `Client.stream_chunks_arrow`: yields the
+/// `HEARTBEAT` singleton while waiting on the statement or any individual
+/// chunk, and a `Table` per chunk (in logical order) as each arrives, until
+/// the result is exhausted.
+#[pyclass(name = "ChunkStreamIter")]
+struct PyChunkStreamIter {
+    state: Arc<AsyncMutex<PyChunkStreamState>>,
+}
+
+#[pymethods]
+impl PyChunkStreamIter {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = state.lock().await;
+            loop {
+                match &mut *guard {
+                    PyChunkStreamState::Done => return Err(PyStopAsyncIteration::new_err(())),
+                    PyChunkStreamState::Pending { .. } => {
+                        let PyChunkStreamState::Pending {
+                            client,
+                            statement,
+                            catalog,
+                            schema,
+                            total_timeout_s,
+                        } = std::mem::replace(&mut *guard, PyChunkStreamState::Done)
+                        else {
+                            unreachable!()
+                        };
+                        let stream =
+                            pipeline::execute_chunk_stream(client, &statement, catalog.as_deref(), schema.as_deref())
+                                .await
+                                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+                        *guard = PyChunkStreamState::Running {
+                            stream: Arc::new(AsyncMutex::new(stream)),
+                            heartbeat: HeartbeatStream::new(total_timeout_s),
+                        };
+                        // Loop back around to the now-`Running` arm below.
+                    }
+                    PyChunkStreamState::Running { stream, heartbeat } => {
+                        let stream_for_pull = stream.clone();
+                        let tick_result = heartbeat
+                            .tick(move || Box::pin(async move { stream_for_pull.lock().await.next_chunk().await }))
+                            .await;
+                        return match tick_result {
+                            Ok(Some(Tick::Heartbeat)) => {
+                                Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any()))
+                            }
+                            Ok(Some(Tick::Ready(batches))) => {
+                                let arrow_schema = stream
+                                    .lock()
+                                    .await
+                                    .schema
+                                    .clone()
+                                    .unwrap_or_else(|| Arc::new(Schema::empty()));
+                                let table = PyTable::try_new(batches, arrow_schema)
+                                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                                Python::attach(|py| Py::new(py, table).map(|t| t.into_any()))
+                            }
+                            Ok(None) => {
+                                *guard = PyChunkStreamState::Done;
+                                Err(PyStopAsyncIteration::new_err(()))
+                            }
+                            Err(e) => {
+                                *guard = PyChunkStreamState::Done;
+                                Err(PyRuntimeError::new_err(e.message))
+                            }
+                        };
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[pymodule]
 fn arrowbricks_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ping, m)?)?;
@@ -457,6 +584,7 @@ fn arrowbricks_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHeartbeat>()?;
     m.add_class::<PyExecuteStreamedIter>()?;
     m.add_class::<PyFetchallArrowStreamedIter>()?;
+    m.add_class::<PyChunkStreamIter>()?;
     m.add("HEARTBEAT", heartbeat_singleton(m.py())?)?;
     Ok(())
 }

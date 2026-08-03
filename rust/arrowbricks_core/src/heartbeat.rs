@@ -6,6 +6,8 @@
 //! download) -- same as the Python original, where both are thin wrappers
 //! around one shared function.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
@@ -105,6 +107,85 @@ impl<T: Send + 'static> HeartbeatWait<T> {
     }
 }
 
+/// Future factory for `HeartbeatStream::tick` -- produces the future that
+/// pulls the next item, boxed so it can be spawned onto the shared runtime.
+type NextItemFuture<T> = Pin<Box<dyn Future<Output = Result<Option<T>, ApiError>> + Send>>;
+
+/// Port of `_streaming.py`'s `heartbeat_over_stream`: like `HeartbeatWait`,
+/// but for a *stream* of items rather than one final result. Ticks
+/// repeatedly, sharing ONE `total_timeout_s` deadline across the whole
+/// stream (computed once at construction) rather than restarting it on every
+/// item -- a pathological sequence of individually-fast-enough items must
+/// still trip the overall budget, matching Python's single shared `deadline`
+/// variable rather than per-item timeouts.
+pub struct HeartbeatStream<T> {
+    current: Option<JoinHandle<Result<Option<T>, ApiError>>>,
+    deadline: Option<Instant>,
+    total_timeout_s: Option<f64>,
+    heartbeat_interval: Duration,
+}
+
+impl<T: Send + 'static> HeartbeatStream<T> {
+    pub fn new(total_timeout_s: Option<f64>) -> Self {
+        Self::with_interval(total_timeout_s, HEARTBEAT_INTERVAL)
+    }
+
+    pub fn with_interval(total_timeout_s: Option<f64>, heartbeat_interval: Duration) -> Self {
+        Self {
+            current: None,
+            deadline: total_timeout_s.map(|s| Instant::now() + Duration::from_secs_f64(s)),
+            total_timeout_s,
+            heartbeat_interval,
+        }
+    }
+
+    /// One step: `Ok(Some(Tick::Heartbeat))` while still waiting on the
+    /// current item, `Ok(Some(Tick::Ready(item)))` once it arrives,
+    /// `Ok(None)` once the source itself is exhausted (caller should raise
+    /// StopAsyncIteration, matching Python's `except StopAsyncIteration:
+    /// return`), `Err` on the source's own error or a `total_timeout_s`
+    /// overrun. `spawn_next` is only called to start a *new* pull when none
+    /// is already in flight -- a tick that only heartbeated resumes the same
+    /// in-flight pull on the next call rather than starting a redundant one.
+    pub async fn tick<F>(&mut self, spawn_next: F) -> Result<Option<Tick<T>>, ApiError>
+    where
+        F: FnOnce() -> NextItemFuture<T>,
+    {
+        if self.current.is_none() {
+            self.current = Some(pyo3_async_runtimes::tokio::get_runtime().spawn(spawn_next()));
+        }
+        let handle = self.current.as_mut().expect("just set above if it was None");
+
+        let wait_for = match self.deadline {
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    handle.abort();
+                    self.current = None;
+                    let secs = self.total_timeout_s.unwrap_or(0.0);
+                    return Err(ApiError {
+                        message: format!("Query exceeded {secs}s timeout"),
+                        transient: false,
+                    });
+                }
+                self.heartbeat_interval.min(deadline - now)
+            }
+            None => self.heartbeat_interval,
+        };
+
+        tokio::select! {
+            res = handle => {
+                self.current = None;
+                match res {
+                    Ok(inner) => inner.map(|opt| opt.map(Tick::Ready)),
+                    Err(join_err) => Err(join_error(join_err)),
+                }
+            }
+            _ = tokio::time::sleep(wait_for) => Ok(Some(Tick::Heartbeat)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +268,94 @@ mod tests {
         );
         let err = wait.tick().await.unwrap_err();
         assert_eq!(err.message, "boom");
+    }
+
+    /// A source of items, each optionally preceded by a delay -- `spawn_next`
+    /// closures below pop off the front of this to simulate a slow chunk
+    /// arriving mid-stream, not just a slow first item.
+    type QueueItem = (Duration, Option<u32>);
+
+    fn spawn_next_from(
+        queue: std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<QueueItem>>>,
+    ) -> NextItemFuture<u32> {
+        Box::pin(async move {
+            let (delay, value) = queue.lock().await.pop_front().expect("test queue exhausted");
+            tokio::time::sleep(delay).await;
+            Ok(value)
+        })
+    }
+
+    #[tokio::test]
+    async fn heartbeat_stream_heartbeats_then_yields_each_item_in_turn() {
+        let queue = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::from([
+            (Duration::from_millis(70), Some(1)),
+            (Duration::from_millis(5), Some(2)),
+            (Duration::from_millis(0), None),
+        ])));
+        let mut stream: HeartbeatStream<u32> = HeartbeatStream::with_interval(None, TEST_INTERVAL);
+
+        // First item is slow (~70ms against a 20ms interval) -- must
+        // heartbeat a few times before it's ready, not skip ahead.
+        let mut heartbeats = 0;
+        let first = loop {
+            let q = queue.clone();
+            match stream.tick(move || spawn_next_from(q)).await.unwrap() {
+                Some(Tick::Heartbeat) => heartbeats += 1,
+                Some(Tick::Ready(v)) => break v,
+                None => panic!("exhausted before first item"),
+            }
+        };
+        assert_eq!(first, 1);
+        assert!(heartbeats >= 2, "expected several heartbeats, got {heartbeats}");
+
+        // Second item resolves fast -- a fresh pull must still be started
+        // (not stuck replaying the first, already-consumed handle).
+        let q = queue.clone();
+        match stream.tick(move || spawn_next_from(q)).await.unwrap() {
+            Some(Tick::Ready(v)) => assert_eq!(v, 2),
+            other => panic!("expected Ready(2), got {other:?}"),
+        }
+
+        // Source signals exhaustion (Ok(None)) -- must surface as `Ok(None)`
+        // (StopAsyncIteration equivalent), not an error.
+        let q = queue.clone();
+        assert!(stream.tick(move || spawn_next_from(q)).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_stream_timeout_is_shared_across_items_not_reset_per_item() {
+        // Each item individually resolves in 15ms (under a naive per-item
+        // timeout), but a 45ms *shared* budget must still trip by the 4th
+        // pull -- proves the deadline is computed once at construction, not
+        // restarted on every `tick` call.
+        let queue = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::from([
+            (Duration::from_millis(15), Some(1)),
+            (Duration::from_millis(15), Some(2)),
+            (Duration::from_millis(15), Some(3)),
+            (Duration::from_millis(15), Some(4)),
+        ])));
+        let mut stream: HeartbeatStream<u32> = HeartbeatStream::with_interval(Some(0.045), TEST_INTERVAL);
+
+        let mut last_err = None;
+        'outer: for _ in 0..4 {
+            loop {
+                let q = queue.clone();
+                match stream.tick(move || spawn_next_from(q)).await {
+                    Ok(Some(Tick::Heartbeat)) => continue,
+                    Ok(Some(Tick::Ready(_))) => continue 'outer,
+                    Ok(None) => panic!("must not exhaust before the shared timeout fires"),
+                    Err(e) => {
+                        last_err = Some(e);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let err = last_err.expect("shared 45ms timeout must fire within 4 items of 15ms each");
+        assert!(
+            err.message.contains("0.045"),
+            "error should mention the configured timeout: {}",
+            err.message
+        );
     }
 }

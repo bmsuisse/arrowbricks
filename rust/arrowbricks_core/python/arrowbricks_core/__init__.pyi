@@ -27,6 +27,10 @@ class FetchallArrowStreamedIter:
     def __aiter__(self) -> FetchallArrowStreamedIter: ...
     async def __anext__(self) -> Any: ...  # Arrow table (__arrow_c_stream__) | _Heartbeat
 
+class ChunkStreamIter:
+    def __aiter__(self) -> ChunkStreamIter: ...
+    async def __anext__(self) -> Any: ...  # Arrow table (__arrow_c_stream__) | _Heartbeat
+
 class Client:
     def __init__(
         self,
@@ -52,3 +56,10 @@ class Client:
     ) -> list[list[Any]]: ...
     async def upload_volume_file(self, volume_path: str, data: bytes) -> None: ...
     async def delete_volume_file(self, volume_path: str) -> None: ...
+    def stream_chunks_arrow(
+        self,
+        statement: str,
+        catalog: str | None = None,
+        schema: str | None = None,
+        total_timeout_s: float | None = None,
+    ) -> ChunkStreamIter: ...
