@@ -1,17 +1,21 @@
 # arrowbricks_core
 
-Experimental Rust reimplementation of [arrowbricks](https://github.com/bmsuisse/arrowbricks)'
+Rust reimplementation of [arrowbricks](https://github.com/bmsuisse/arrowbricks)'
 hot path -- statement submit/poll, bounded-concurrency chunk fetch, the
 `chunk_index` reorder buffer, and Arrow-IPC decode via
 [arrow-rs](https://github.com/apache/arrow-rs) -- exposed to Python as an
-async `Client` via [PyO3](https://pyo3.rs).
+async `Client` via [PyO3](https://pyo3.rs). This is the committed direction
+for arrowbricks itself: once this crate reaches feature parity with the
+current pure-Python/arro3 implementation, `arrowbricks`'s build switches to
+this crate and the Python implementation is deleted -- not kept as a
+permanent second option.
 
-**Not yet wired into `arrowbricks` itself, and not yet published to PyPI.**
-This is only the eager full-table-fetch path: it has no lazy `fetchmany`
-(the whole result is fetched and assembled before `execute_arrow` returns),
-no `token_provider` callback, no JSON result format, no `execute_streamed`
-heartbeats, and no volume-file operations. See the parent repo's
-[AGENTS.md](../../AGENTS.md) for the state of the wider migration.
+**Not there yet.** Parity gaps being ported now: no lazy `fetchmany` (the
+whole result is fetched and assembled before `execute_arrow` returns), no
+`token_provider` callback, no JSON result format, no `execute_streamed`
+heartbeats, no volume-file operations. Not wired into `arrowbricks` itself
+and not published to PyPI until those close. See the parent repo's
+[AGENTS.md](../../AGENTS.md) for the state of the migration.
 
 ## Build
 
