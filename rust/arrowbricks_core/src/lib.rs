@@ -19,7 +19,10 @@ fn ping() -> &'static str {
 }
 
 fn py_err_to_api_error(e: PyErr) -> ApiError {
-    ApiError { message: e.to_string(), transient: false }
+    ApiError {
+        message: e.to_string(),
+        transient: false,
+    }
 }
 
 /// Bridges a Python `token_provider` callable (sync or async, matching
@@ -75,7 +78,8 @@ impl TokenProvider for PyTokenProvider {
             // Mirrors Python's own `inspect.isawaitable(result)` check in
             // `_bearer_token`: a plain sync callable's return value has no
             // `__await__`, an async callable's coroutine/Future does.
-            let is_awaitable = Python::attach(|py| called.bind(py).hasattr("__await__")).map_err(py_err_to_api_error)?;
+            let is_awaitable =
+                Python::attach(|py| called.bind(py).hasattr("__await__")).map_err(py_err_to_api_error)?;
 
             let result_obj: Py<PyAny> = if is_awaitable {
                 let awaited = async move {
@@ -124,12 +128,17 @@ impl PyDbClient {
         let db_client = match (token, token_provider) {
             (Some(t), _) => DbClient::new(&host, &warehouse_id, &t),
             (None, Some(callable)) => {
-                let provider: Arc<dyn TokenProvider> = Arc::new(PyTokenProvider { callable, locals: Mutex::new(None) });
+                let provider: Arc<dyn TokenProvider> = Arc::new(PyTokenProvider {
+                    callable,
+                    locals: Mutex::new(None),
+                });
                 DbClient::with_token_provider(&host, &warehouse_id, provider)
             }
             (None, None) => return Err(PyValueError::new_err("Client needs either `token` or `token_provider`")),
         };
-        Ok(Self { inner: Arc::new(db_client.with_concurrency(chunk_fetch_concurrency)) })
+        Ok(Self {
+            inner: Arc::new(db_client.with_concurrency(chunk_fetch_concurrency)),
+        })
     }
 
     /// Full submit->poll->fetch->reorder->decode pipeline for one
@@ -208,11 +217,19 @@ impl PyDbClient {
     /// Uploads `data` to a Unity Catalog volume path via the Files API,
     /// overwriting anything already there.
     #[pyo3(signature = (volume_path, data))]
-    fn upload_volume_file<'py>(&self, py: Python<'py>, volume_path: String, data: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+    fn upload_volume_file<'py>(
+        &self,
+        py: Python<'py>,
+        volume_path: String,
+        data: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
         let data = bytes::Bytes::from(data);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.upload_volume_file(&volume_path, data).await.map_err(|e| PyRuntimeError::new_err(e.message))
+            client
+                .upload_volume_file(&volume_path, data)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.message))
         })
     }
 
@@ -222,7 +239,10 @@ impl PyDbClient {
     fn delete_volume_file<'py>(&self, py: Python<'py>, volume_path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.delete_volume_file(&volume_path).await.map_err(|e| PyRuntimeError::new_err(e.message))
+            client
+                .delete_volume_file(&volume_path)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.message))
         })
     }
 }
@@ -247,8 +267,10 @@ impl PyResultSet {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut stream = inner.lock().await;
-            let (batches, schema) =
-                stream.fetchmany_arrow(n).await.map_err(|e| PyRuntimeError::new_err(e.message))?;
+            let (batches, schema) = stream
+                .fetchmany_arrow(n)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.message))?;
             let arrow_schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
             PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })
@@ -259,7 +281,10 @@ impl PyResultSet {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut stream = inner.lock().await;
-            let (batches, schema) = stream.fetchall_arrow().await.map_err(|e| PyRuntimeError::new_err(e.message))?;
+            let (batches, schema) = stream
+                .fetchall_arrow()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.message))?;
             let arrow_schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
             PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })

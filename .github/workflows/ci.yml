@@ -26,9 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/arrowbricks_core
+      - working-directory: rust/arrowbricks_core
+        run: cargo fmt --check
       - working-directory: rust/arrowbricks_core
         # --no-default-features: skips the `extension-module` feature, which
         # disables linking against libpython -- correct for the cdylib

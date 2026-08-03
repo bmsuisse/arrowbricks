@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
-use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::de::{DeserializeOwned, IgnoredAny};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 /// Typed response shapes -- replaces navigating a dynamic `serde_json::Value`
@@ -117,16 +117,25 @@ impl std::error::Error for ApiError {}
 
 impl ApiError {
     fn permanent(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), transient: false }
+        Self {
+            message: msg.into(),
+            transient: false,
+        }
     }
 
     fn from_reqwest(e: reqwest::Error) -> Self {
-        Self { message: e.to_string(), transient: false }
+        Self {
+            message: e.to_string(),
+            transient: false,
+        }
     }
 
     fn from_status(status: StatusCode, body: &str) -> Self {
         let transient = matches!(status.as_u16(), 401 | 403 | 408 | 429) || status.is_server_error();
-        Self { message: format!("HTTP {status}: {body}"), transient }
+        Self {
+            message: format!("HTTP {status}: {body}"),
+            transient,
+        }
     }
 }
 
@@ -136,7 +145,10 @@ impl ApiError {
 /// `spawn_blocking` join in `pipeline.rs` -- a panicking task must surface as
 /// an error, not as a quietly-truncated result set.
 pub(crate) fn join_error(e: tokio::task::JoinError) -> ApiError {
-    ApiError { message: format!("task panicked: {e}"), transient: false }
+    ApiError {
+        message: format!("task panicked: {e}"),
+        transient: false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -273,7 +285,13 @@ impl DbClient {
     /// same as `_fetch_link_bytes` in the Python client.
     async fn fetch_link_bytes(&self, url: &str) -> Result<Bytes, ApiError> {
         retry_call(|| async {
-            let resp = self.http.get(url).timeout(self.http_timeout).send().await.map_err(ApiError::from_reqwest)?;
+            let resp = self
+                .http
+                .get(url)
+                .timeout(self.http_timeout)
+                .send()
+                .await
+                .map_err(ApiError::from_reqwest)?;
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
@@ -301,7 +319,8 @@ impl DbClient {
             return Ok(());
         }
         if data.state == "STOPPED" {
-            self.authed_json::<IgnoredAny>(reqwest::Method::POST, &format!("{url}/start"), None).await?;
+            self.authed_json::<IgnoredAny>(reqwest::Method::POST, &format!("{url}/start"), None)
+                .await?;
         }
 
         let deadline = Instant::now() + self.warehouse_start_timeout;
@@ -373,7 +392,10 @@ impl DbClient {
         let url = format!("{}/api/2.0/sql/statements", self.host);
         let mut data: StatementResponseBody = self.authed_json(reqwest::Method::POST, &url, Some(&body)).await?;
 
-        while !matches!(data.status.state.as_str(), "SUCCEEDED" | "FAILED" | "CANCELED" | "CLOSED") {
+        while !matches!(
+            data.status.state.as_str(),
+            "SUCCEEDED" | "FAILED" | "CANCELED" | "CLOSED"
+        ) {
             tokio::time::sleep(POLL_INTERVAL).await;
             let poll_url = format!("{}/api/2.0/sql/statements/{}", self.host, data.statement_id);
             data = self.authed_json(reqwest::Method::GET, &poll_url, None).await?;
@@ -381,7 +403,10 @@ impl DbClient {
 
         match data.status.state.as_str() {
             "FAILED" => {
-                let err = data.status.error.unwrap_or(StatementErrorBody { error_code: None, message: None });
+                let err = data.status.error.unwrap_or(StatementErrorBody {
+                    error_code: None,
+                    message: None,
+                });
                 return Err(ApiError::permanent(format!(
                     "Databricks statement failed [{}]: {}",
                     err.error_code.as_deref().unwrap_or(""),
@@ -397,13 +422,19 @@ impl DbClient {
             .unwrap_or_default()
             .chunks
             .into_iter()
-            .map(|c| ChunkMeta { chunk_index: c.chunk_index, row_count: c.row_count })
+            .map(|c| ChunkMeta {
+                chunk_index: c.chunk_index,
+                row_count: c.row_count,
+            })
             .collect();
         Ok((data.statement_id, chunk_metas))
     }
 
     async fn fetch_chunk_index(&self, statement_id: &str, chunk_index: i64) -> Result<Vec<Bytes>, ApiError> {
-        let url = format!("{}/api/2.0/sql/statements/{}/result/chunks/{}", self.host, statement_id, chunk_index);
+        let url = format!(
+            "{}/api/2.0/sql/statements/{}/result/chunks/{}",
+            self.host, statement_id, chunk_index
+        );
         let data: ChunkLinksBody = self.authed_json(reqwest::Method::GET, &url, None).await?;
 
         let mut blobs = Vec::with_capacity(data.external_links.len());
@@ -446,7 +477,11 @@ impl DbClient {
                         match client.fetch_chunk_index(&statement_id, meta.chunk_index).await {
                             Ok(blobs) => {
                                 for blob in blobs {
-                                    let item = ChunkItem { blob, row_count: meta.row_count, chunk_index: meta.chunk_index };
+                                    let item = ChunkItem {
+                                        blob,
+                                        row_count: meta.row_count,
+                                        chunk_index: meta.chunk_index,
+                                    };
                                     if worker_tx.send(Ok(item)).await.is_err() {
                                         return Ok(());
                                     }
@@ -556,7 +591,12 @@ mod tests {
     }
 
     fn err_task(msg: &'static str) -> tokio::task::JoinHandle<Result<(), ApiError>> {
-        tokio::spawn(async move { Err(ApiError { message: msg.to_string(), transient: false }) })
+        tokio::spawn(async move {
+            Err(ApiError {
+                message: msg.to_string(),
+                transient: false,
+            })
+        })
     }
 
     fn panicking_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {
@@ -584,7 +624,13 @@ mod tests {
     #[tokio::test]
     async fn join_first_error_surfaces_panic_not_silence() {
         let handles = vec![ok_task(), panicking_task(), ok_task()];
-        let err = join_first_error(handles).await.expect("a panicking task must surface as an error, not vanish");
-        assert!(err.message.contains("panicked"), "error message should mention the panic: {}", err.message);
+        let err = join_first_error(handles)
+            .await
+            .expect("a panicking task must surface as an error, not vanish");
+        assert!(
+            err.message.contains("panicked"),
+            "error message should mention the panic: {}",
+            err.message
+        );
     }
 }

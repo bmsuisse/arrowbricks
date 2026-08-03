@@ -48,7 +48,9 @@ async fn install_mock_warehouse(server: &MockServer, n_chunks: i64, rows_per_chu
         .mount(server)
         .await;
 
-    let chunks: Vec<_> = (0..n_chunks).map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk})).collect();
+    let chunks: Vec<_> = (0..n_chunks)
+        .map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk}))
+        .collect();
     Mock::given(method("POST"))
         .and(path("/api/2.0/sql/statements"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -68,7 +70,9 @@ async fn install_mock_warehouse(server: &MockServer, n_chunks: i64, rows_per_chu
     for i in 0..n_chunks {
         let uri = server.uri();
         Mock::given(method("GET"))
-            .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}")))
+            .and(path(format!(
+                "/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "external_links": [{"external_link": format!("{uri}/_data/chunk-{i}")}]
             })))
@@ -170,7 +174,10 @@ async fn lazy_fetchall_drains_beyond_the_per_batch_chunk_cap() {
 
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 150, "fetchall_arrow must drain all 50 chunks, not just the first batch-cap's worth");
+    assert_eq!(
+        total_rows, 150,
+        "fetchall_arrow must drain all 50 chunks, not just the first batch-cap's worth"
+    );
     assert_ids_in_order(&batches, 150);
 }
 
@@ -195,7 +202,9 @@ async fn install_mock_warehouse_json(server: &MockServer, n_chunks: i64, rows_pe
         .mount(server)
         .await;
 
-    let chunks: Vec<_> = (0..n_chunks).map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk})).collect();
+    let chunks: Vec<_> = (0..n_chunks)
+        .map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk}))
+        .collect();
     Mock::given(method("POST"))
         .and(path("/api/2.0/sql/statements"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -209,7 +218,9 @@ async fn install_mock_warehouse_json(server: &MockServer, n_chunks: i64, rows_pe
     for i in 0..n_chunks {
         let uri = server.uri();
         Mock::given(method("GET"))
-            .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}")))
+            .and(path(format!(
+                "/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "external_links": [{"external_link": format!("{uri}/_data/chunk-{i}")}]
             })))
@@ -225,7 +236,11 @@ async fn install_mock_warehouse_json(server: &MockServer, n_chunks: i64, rows_pe
         let delay_ms = if delay_reverse { ((n_chunks - i) * 10) as u64 } else { 0 };
         Mock::given(method("GET"))
             .and(path_regex(format!(r"^/_data/chunk-{i}$")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(rows).set_delay(std::time::Duration::from_millis(delay_ms)))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(rows)
+                    .set_delay(std::time::Duration::from_millis(delay_ms)),
+            )
             .mount(server)
             .await;
     }
@@ -242,7 +257,11 @@ async fn json_pipeline_happy_path() {
     assert_eq!(result.statement_id, STATEMENT_ID);
     assert_eq!(result.num_chunks, 3);
     assert_eq!(result.rows.len(), 15);
-    let ids: Vec<i64> = result.rows.iter().map(|r| r[0].as_ref().unwrap().parse().unwrap()).collect();
+    let ids: Vec<i64> = result
+        .rows
+        .iter()
+        .map(|r| r[0].as_ref().unwrap().parse().unwrap())
+        .collect();
     assert_eq!(ids, (0..15).collect::<Vec<_>>());
 }
 
@@ -255,8 +274,16 @@ async fn json_pipeline_survives_reverse_arrival() {
     let result = run_json_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
 
     assert_eq!(result.rows.len(), 20);
-    let ids: Vec<i64> = result.rows.iter().map(|r| r[0].as_ref().unwrap().parse().unwrap()).collect();
-    assert_eq!(ids, (0..20).collect::<Vec<_>>(), "row order must survive out-of-order chunk arrival for JSON too");
+    let ids: Vec<i64> = result
+        .rows
+        .iter()
+        .map(|r| r[0].as_ref().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        (0..20).collect::<Vec<_>>(),
+        "row order must survive out-of-order chunk arrival for JSON too"
+    );
 }
 
 /// Concatenates every batch's `id` column and checks it runs 0..n_rows in
@@ -265,7 +292,12 @@ async fn json_pipeline_survives_reverse_arrival() {
 fn assert_ids_in_order(batches: &[RecordBatch], n_rows: i64) {
     let mut ids = Vec::with_capacity(n_rows as usize);
     for batch in batches {
-        let col = batch.column_by_name("id").unwrap().as_any().downcast_ref::<Int64Array>().unwrap();
+        let col = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         ids.extend(col.values().iter().copied());
     }
     assert_eq!(ids, (0..n_rows).collect::<Vec<_>>());

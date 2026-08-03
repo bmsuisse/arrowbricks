@@ -83,12 +83,11 @@ real OS threads.
 still gets you exactly the pure-Python/arro3 implementation described in
 this README until parity is reached -- the Rust core is a separate,
 unpublished crate you'd have to clone this repo and build yourself
-(`uvx maturin develop --uv --release` inside `rust/arrowbricks_core`), and it
-only covers eager full-table Arrow fetch with a static token so far: no lazy
-`fetchmany`, `token_provider` callback, JSON result format,
-`execute_streamed` heartbeats, or volume-file operations yet -- all actively
-being ported. See [its own README](rust/arrowbricks_core/README.md) for
-what's actually there today, including DuckDB and FastAPI SSE usage.
+(`uvx maturin develop --uv --release` inside `rust/arrowbricks_core`). Ported
+so far: lazy `fetchmany`, `token_provider` callback, JSON result format,
+volume-file operations. One gap left: `execute_streamed` heartbeats during a
+slow warehouse cold start. See [its own README](rust/arrowbricks_core/README.md)
+for what's actually there today, including DuckDB and FastAPI SSE usage.
 
 ## Why not `databricks-sql-connector`?
 

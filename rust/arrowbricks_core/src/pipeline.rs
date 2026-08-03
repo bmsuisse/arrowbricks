@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::client::{join_error, ApiError, ChunkItem, DbClient};
+use crate::client::{ApiError, ChunkItem, DbClient, join_error};
 
 /// Same dict-of-lists-keyed-by-index shape as `_ResultSet._pending`: a
 /// `chunk_index` can carry more than one blob (multiple `external_links` per
@@ -26,11 +26,19 @@ struct ReorderBuffer {
 
 impl ReorderBuffer {
     fn new(rx: mpsc::Receiver<Result<ChunkItem, ApiError>>) -> Self {
-        Self { rx, pending: HashMap::new(), next_idx: 0, exhausted: false }
+        Self {
+            rx,
+            pending: HashMap::new(),
+            next_idx: 0,
+            exhausted: false,
+        }
     }
 
     fn pop_pending(&mut self, idx: i64) -> ChunkItem {
-        let items = self.pending.get_mut(&idx).expect("pop_pending called with missing index");
+        let items = self
+            .pending
+            .get_mut(&idx)
+            .expect("pop_pending called with missing index");
         let item = items.pop_front().expect("pop_pending called on empty deque");
         if items.is_empty() {
             self.pending.remove(&idx);
@@ -87,11 +95,14 @@ impl ExecuteResult {
 }
 
 fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
-    let reader = StreamReader::try_new(IoCursor::new(&blob[..]), None)
-        .map_err(|e| ApiError { message: format!("bad Arrow IPC stream: {e}"), transient: false })?;
-    reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError { message: format!("Arrow IPC decode error: {e}"), transient: false })
+    let reader = StreamReader::try_new(IoCursor::new(&blob[..]), None).map_err(|e| ApiError {
+        message: format!("bad Arrow IPC stream: {e}"),
+        transient: false,
+    })?;
+    reader.collect::<Result<Vec<_>, _>>().map_err(|e| ApiError {
+        message: format!("Arrow IPC decode error: {e}"),
+        transient: false,
+    })
 }
 
 /// Caps how many chunks `ResultStream::fetch_at_least` will pull/decode
@@ -244,7 +255,9 @@ pub async fn run_pipeline(
     let (statement_id, chunk_metas) = client.execute_arrow_statement(statement, catalog, schema).await?;
     let num_chunks = chunk_metas.len();
 
-    let rx = client.clone().fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+    let rx = client
+        .clone()
+        .fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
     let mut reorder = ReorderBuffer::new(rx);
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
@@ -258,7 +271,12 @@ pub async fn run_pipeline(
     }
     let schema = batches.first().map(|b| b.schema());
 
-    Ok(ExecuteResult { statement_id, num_chunks, batches, schema })
+    Ok(ExecuteResult {
+        statement_id,
+        num_chunks,
+        batches,
+        schema,
+    })
 }
 
 pub struct JsonResult {
@@ -274,7 +292,10 @@ pub struct JsonResult {
 /// caller -- same pass-through the Python original leaves to its own
 /// caller.
 fn decode_json_chunk(blob: &Bytes) -> Result<Vec<Vec<Option<String>>>, ApiError> {
-    serde_json::from_slice(&blob[..]).map_err(|e| ApiError { message: format!("bad JSON_ARRAY chunk: {e}"), transient: false })
+    serde_json::from_slice(&blob[..]).map_err(|e| ApiError {
+        message: format!("bad JSON_ARRAY chunk: {e}"),
+        transient: false,
+    })
 }
 
 /// JSON_ARRAY counterpart to `run_pipeline` -- same submit/poll/fetch/
@@ -289,7 +310,9 @@ pub async fn run_json_pipeline(
     let (statement_id, chunk_metas) = client.execute_json_statement(statement, catalog, schema).await?;
     let num_chunks = chunk_metas.len();
 
-    let rx = client.clone().fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+    let rx = client
+        .clone()
+        .fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
     let mut reorder = ReorderBuffer::new(rx);
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
@@ -302,7 +325,11 @@ pub async fn run_json_pipeline(
         rows.extend(handle.await.map_err(join_error)??);
     }
 
-    Ok(JsonResult { statement_id, num_chunks, rows })
+    Ok(JsonResult {
+        statement_id,
+        num_chunks,
+        rows,
+    })
 }
 
 #[cfg(test)]
@@ -310,7 +337,11 @@ mod tests {
     use super::*;
 
     fn item(idx: i64) -> ChunkItem {
-        ChunkItem { blob: Bytes::new(), row_count: None, chunk_index: idx }
+        ChunkItem {
+            blob: Bytes::new(),
+            row_count: None,
+            chunk_index: idx,
+        }
     }
 
     async fn drain_indices(sent: Vec<Result<ChunkItem, ApiError>>) -> Result<Vec<i64>, String> {
@@ -348,8 +379,16 @@ mod tests {
         // (_ResultSet._pull_one_chunk_table), not a Rust-specific quirk.
         let sent = vec![Ok(item(0)), Ok(item(0)), Ok(item(1))];
         let out = drain_indices(sent).await.unwrap();
-        assert_eq!(out.iter().filter(|&&i| i == 0).count(), 2, "both index-0 blobs must survive: {out:?}");
-        assert_eq!(out.iter().filter(|&&i| i == 1).count(), 1, "index-1 blob must survive: {out:?}");
+        assert_eq!(
+            out.iter().filter(|&&i| i == 0).count(),
+            2,
+            "both index-0 blobs must survive: {out:?}"
+        );
+        assert_eq!(
+            out.iter().filter(|&&i| i == 1).count(),
+            1,
+            "index-1 blob must survive: {out:?}"
+        );
         assert_eq!(out.len(), 3, "no extra/lost items: {out:?}");
     }
 
@@ -363,7 +402,14 @@ mod tests {
 
     #[tokio::test]
     async fn error_surfaces_after_already_yielded_items() {
-        let sent = vec![Ok(item(0)), Ok(item(1)), Err(ApiError { message: "boom".into(), transient: false })];
+        let sent = vec![
+            Ok(item(0)),
+            Ok(item(1)),
+            Err(ApiError {
+                message: "boom".into(),
+                transient: false,
+            }),
+        ];
         let (tx, rx) = mpsc::channel(sent.len());
         for r in sent {
             tx.send(r).await.unwrap();

@@ -39,7 +39,10 @@ async fn delete_volume_file_succeeds_on_204() {
         .await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
-    client.delete_volume_file("/Volumes/cat/schema/vol/file.bin").await.unwrap();
+    client
+        .delete_volume_file("/Volumes/cat/schema/vol/file.bin")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -73,6 +76,12 @@ async fn delete_volume_file_surfaces_other_errors() {
         .await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
-    let err = client.delete_volume_file("/Volumes/cat/schema/vol/file.bin").await.unwrap_err();
-    assert!(!err.transient, "400 is not transient, should surface immediately without retrying");
+    let err = client
+        .delete_volume_file("/Volumes/cat/schema/vol/file.bin")
+        .await
+        .unwrap_err();
+    assert!(
+        !err.transient,
+        "400 is not transient, should surface immediately without retrying"
+    );
 }

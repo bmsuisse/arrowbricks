@@ -10,11 +10,13 @@ current pure-Python/arro3 implementation, `arrowbricks`'s build switches to
 this crate and the Python implementation is deleted -- not kept as a
 permanent second option.
 
-**Not there yet.** Parity gaps being ported now: no lazy `fetchmany` (the
-whole result is fetched and assembled before `execute_arrow` returns), no
-`token_provider` callback, no JSON result format, no `execute_streamed`
-heartbeats, no volume-file operations. Not wired into `arrowbricks` itself
-and not published to PyPI until those close. See the parent repo's
+**Not there yet.** Ported so far: lazy `fetchmany_arrow`/`fetchall_arrow`
+(`execute()` + `ResultSet`), `token_provider` callback (sync or async), JSON
+result format (`execute_json`), volume-file operations
+(`upload_volume_file`/`delete_volume_file`). One parity gap left before
+`arrowbricks`'s build can switch to this crate: `execute_streamed`/heartbeats
+during a slow warehouse cold start. Not wired into `arrowbricks` itself and
+not published to PyPI until that closes. See the parent repo's
 [AGENTS.md](../../AGENTS.md) for the state of the migration.
 
 ## Build
@@ -47,6 +49,17 @@ asyncio.run(main())
 (`__arrow_c_stream__`/`__arrow_c_array__`) -- any consumer that speaks that
 protocol (DuckDB, pyarrow, arro3) can import it with zero copies.
 
+## API
+
+- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=32)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching.
+- `Client.execute_arrow(statement, *, catalog=None, schema=None) -> Table` -- eager: fetches and assembles the whole result before returning.
+- `Client.execute(statement, *, catalog=None, schema=None) -> ResultSet` -- submits and starts background chunk fetching without pulling anything yet.
+  - `ResultSet.fetchmany_arrow(n) -> Table` -- pulls/decodes only as many chunks as needed for `n` rows, buffering the rest; may return fewer than `n` once exhausted.
+  - `ResultSet.fetchall_arrow() -> Table` -- drains everything remaining.
+  - `ResultSet.statement_id`, `ResultSet.num_chunks`.
+- `Client.execute_json(statement, *, catalog=None, schema=None) -> list[list[str | None]]` -- JSON_ARRAY format, no Arrow parse. Every non-null value comes back as a string regardless of real column type (Databricks' own contract) -- cast by the manifest's column type yourself if you want native Python types.
+- `Client.upload_volume_file(volume_path, data: bytes)` / `Client.delete_volume_file(volume_path)` -- Unity Catalog volume files via the Files API. Delete treats a 404 as success (idempotent).
+
 ## With DuckDB
 
 DuckDB's `duckdb.sql()` resolves an unrecognized table name against local
@@ -64,12 +77,11 @@ Runnable version: [`examples/duckdb_query.py`](examples/duckdb_query.py).
 
 ## With FastAPI (Server-Sent Events)
 
-Because `execute_arrow` fetches the whole result eagerly (no lazy per-chunk
-pull yet, unlike arrowbricks' own `stream_query_json`), streaming here means
-sending the *already-fetched* result to the HTTP client in per-row chunks --
-bounding client-side memory/parse latency on a large result -- not hiding a
-slow Databricks warehouse cold start the way arrowbricks' `HEARTBEAT`-based
-streaming does:
+`execute_arrow` fetches the whole result eagerly by design (it's the
+one-call convenience method) -- streaming its result means sending the
+*already-fetched* table to the HTTP client in per-row chunks, bounding
+client-side memory/parse latency on a large result, not hiding a slow
+Databricks warehouse cold start:
 
 ```python
 import json
