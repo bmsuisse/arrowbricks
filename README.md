@@ -65,6 +65,27 @@ combined heartbeat/timeout budget across both the wait and the download, or
 [`examples/azure_auth.py`](examples/azure_auth.py) for a caching
 `token_provider` built on Azure AD (`DefaultAzureCredential`).
 
+## Rust core (in progress, not yet part of this package)
+
+A [PyO3](https://pyo3.rs)-based reimplementation of the hot path -- statement
+submit/poll, bounded-concurrency chunk fetch, the reorder buffer, and
+Arrow-IPC decode via [arrow-rs](https://github.com/apache/arrow-rs) -- is
+being built in [`rust/arrowbricks_core`](rust/arrowbricks_core), aiming to
+eventually replace this path for callers who want it. Benchmarked so far at
+1.3x-8x over the pure-Python path above, depending on concurrency and chunk
+count: Python's asyncio+GIL plateaus past a handful of concurrent chunk
+fetches, while the Rust core keeps scaling on real OS threads.
+
+**Nothing above changes because of this yet.** `pip install arrowbricks`
+still gets you exactly the pure-Python/arro3 implementation described in
+this README -- the Rust core is a separate, unpublished crate you'd have to
+clone this repo and build yourself (`uvx maturin develop --uv --release`
+inside `rust/arrowbricks_core`), and it only covers eager full-table Arrow
+fetch with a static token so far: no lazy `fetchmany`, `token_provider`
+callback, JSON result format, `execute_streamed` heartbeats, or volume-file
+operations yet. See [its own README](rust/arrowbricks_core/README.md) for
+what's actually there today, including DuckDB and FastAPI SSE usage.
+
 ## Why not `databricks-sql-connector`?
 
 The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility over Databricks' Thrift/ODBC-style protocol. If you just want a query result as Arrow/JSON in your own async app, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies. arrowbricks talks to the plain REST Statement Execution API instead, and its whole dependency tree is `httpx` + `arro3-core` + `arro3-io`. The `Cursor` API is deliberately shaped like the official driver's so switching between them is mostly a constructor change, but arrowbricks is async throughout (`execute`, `fetchone`, etc. are all coroutines) -- there's no sync escape hatch.
