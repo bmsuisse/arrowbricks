@@ -143,13 +143,28 @@ impl PyDbClient {
     /// request, no caching here) -- exactly one of the two, matching
     /// `DatabricksClient`'s own `__init__` validation.
     #[new]
-    #[pyo3(signature = (host, warehouse_id, token=None, token_provider=None, chunk_fetch_concurrency=32))]
+    #[pyo3(signature = (
+        host,
+        warehouse_id,
+        token=None,
+        token_provider=None,
+        chunk_fetch_concurrency=32,
+        http_timeout=60.0,
+        wait_timeout="30s".to_string(),
+        warehouse_start_timeout=300.0,
+        warehouse_confirmed_running_ttl_s=30.0,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         host: String,
         warehouse_id: String,
         token: Option<String>,
         token_provider: Option<Py<PyAny>>,
         chunk_fetch_concurrency: usize,
+        http_timeout: f64,
+        wait_timeout: String,
+        warehouse_start_timeout: f64,
+        warehouse_confirmed_running_ttl_s: f64,
     ) -> PyResult<Self> {
         let db_client = match (token, token_provider) {
             (Some(t), _) => DbClient::new(&host, &warehouse_id, &t),
@@ -163,7 +178,14 @@ impl PyDbClient {
             (None, None) => return Err(PyValueError::new_err("Client needs either `token` or `token_provider`")),
         };
         Ok(Self {
-            inner: Arc::new(db_client.with_concurrency(chunk_fetch_concurrency)),
+            inner: Arc::new(
+                db_client
+                    .with_concurrency(chunk_fetch_concurrency)
+                    .with_http_timeout(http_timeout)
+                    .with_wait_timeout(wait_timeout)
+                    .with_warehouse_start_timeout(warehouse_start_timeout)
+                    .with_warehouse_confirmed_running_ttl(warehouse_confirmed_running_ttl_s),
+            ),
         })
     }
 

@@ -39,6 +39,10 @@ class Client:
         token: str | None = None,
         token_provider: Callable[[], str | Awaitable[str]] | None = None,
         chunk_fetch_concurrency: int = 32,
+        http_timeout: float = 60.0,
+        wait_timeout: str = "30s",
+        warehouse_start_timeout: float = 300.0,
+        warehouse_confirmed_running_ttl_s: float = 30.0,
     ) -> None: ...
     async def execute_arrow(
         self, statement: str, catalog: str | None = None, schema: str | None = None

@@ -282,6 +282,41 @@ impl DbClient {
         self
     }
 
+    /// Matches Python's `DatabricksClient(..., http_timeout=60.0)` -- the
+    /// per-request timeout passed to every `reqwest` call (statement submit/
+    /// poll, chunk-index resolution, external-link download, volume file
+    /// ops).
+    pub fn with_http_timeout(mut self, seconds: f64) -> Self {
+        self.http_timeout = Duration::from_secs_f64(seconds);
+        self
+    }
+
+    /// Matches Python's `wait_timeout="30s"` -- Databricks' own
+    /// synchronous-wait budget on the initial statement submit, passed
+    /// through verbatim as the API's `wait_timeout` field (its own string
+    /// format, e.g. `"10s"`..`"50s"`, not a `Duration`).
+    pub fn with_wait_timeout(mut self, wait_timeout: impl Into<String>) -> Self {
+        self.wait_timeout = wait_timeout.into();
+        self
+    }
+
+    /// Matches Python's `warehouse_start_timeout=300.0` -- how long
+    /// `ensure_warehouse_running` polls a STOPPED warehouse before giving up
+    /// and letting statement submission itself surface whatever's wrong.
+    pub fn with_warehouse_start_timeout(mut self, seconds: f64) -> Self {
+        self.warehouse_start_timeout = Duration::from_secs_f64(seconds);
+        self
+    }
+
+    /// Matches Python's `warehouse_confirmed_running_ttl_s=30.0` -- how long
+    /// a confirmed-RUNNING result is trusted before `ensure_warehouse_running`
+    /// re-checks, so a warm/always-on warehouse doesn't pay a round trip on
+    /// every single statement.
+    pub fn with_warehouse_confirmed_running_ttl(mut self, seconds: f64) -> Self {
+        self.warehouse_confirmed_running_ttl = Duration::from_secs_f64(seconds);
+        self
+    }
+
     async fn authed_json<T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
