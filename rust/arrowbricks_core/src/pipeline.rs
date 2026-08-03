@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::client::{ApiError, ChunkItem, DbClient, join_error};
+use crate::client::{ApiError, ChunkItem, ColumnDescription, DbClient, join_error};
 
 /// Same dict-of-lists-keyed-by-index shape as `_ResultSet._pending`: a
 /// `chunk_index` can carry more than one blob (multiple `external_links` per
@@ -82,6 +82,7 @@ pub struct ExecuteResult {
     pub num_chunks: usize,
     pub batches: Vec<RecordBatch>,
     pub schema: Option<SchemaRef>,
+    pub columns: Vec<ColumnDescription>,
 }
 
 impl ExecuteResult {
@@ -125,6 +126,7 @@ pub struct ResultStream {
     pub statement_id: String,
     pub num_chunks: usize,
     pub schema: Option<SchemaRef>,
+    pub columns: Vec<ColumnDescription>,
     reorder: ReorderBuffer,
     pending: VecDeque<RecordBatch>,
     pending_rows: usize,
@@ -218,13 +220,14 @@ pub async fn execute_lazy(
     catalog: Option<&str>,
     schema: Option<&str>,
 ) -> Result<ResultStream, ApiError> {
-    let (statement_id, chunk_metas) = client.execute_arrow_statement(statement, catalog, schema).await?;
-    let num_chunks = chunk_metas.len();
-    let rx = client.fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+    let submitted = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let num_chunks = submitted.chunk_metas.len();
+    let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
     Ok(ResultStream {
-        statement_id,
+        statement_id: submitted.statement_id,
         num_chunks,
         schema: None,
+        columns: submitted.columns,
         reorder: ReorderBuffer::new(rx),
         pending: VecDeque::new(),
         pending_rows: 0,
@@ -252,12 +255,12 @@ pub async fn run_pipeline(
     catalog: Option<&str>,
     schema: Option<&str>,
 ) -> Result<ExecuteResult, ApiError> {
-    let (statement_id, chunk_metas) = client.execute_arrow_statement(statement, catalog, schema).await?;
-    let num_chunks = chunk_metas.len();
+    let submitted = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let num_chunks = submitted.chunk_metas.len();
 
     let rx = client
         .clone()
-        .fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+        .fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
     let mut reorder = ReorderBuffer::new(rx);
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
@@ -272,10 +275,11 @@ pub async fn run_pipeline(
     let schema = batches.first().map(|b| b.schema());
 
     Ok(ExecuteResult {
-        statement_id,
+        statement_id: submitted.statement_id,
         num_chunks,
         batches,
         schema,
+        columns: submitted.columns,
     })
 }
 
@@ -283,6 +287,7 @@ pub struct JsonResult {
     pub statement_id: String,
     pub num_chunks: usize,
     pub rows: Vec<Vec<Option<String>>>,
+    pub columns: Vec<ColumnDescription>,
 }
 
 /// JSON_ARRAY's contract (Databricks' own, not ours): each chunk is a JSON
@@ -307,12 +312,12 @@ pub async fn run_json_pipeline(
     catalog: Option<&str>,
     schema: Option<&str>,
 ) -> Result<JsonResult, ApiError> {
-    let (statement_id, chunk_metas) = client.execute_json_statement(statement, catalog, schema).await?;
-    let num_chunks = chunk_metas.len();
+    let submitted = client.execute_json_statement(statement, catalog, schema).await?;
+    let num_chunks = submitted.chunk_metas.len();
 
     let rx = client
         .clone()
-        .fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+        .fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
     let mut reorder = ReorderBuffer::new(rx);
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
@@ -326,9 +331,10 @@ pub async fn run_json_pipeline(
     }
 
     Ok(JsonResult {
-        statement_id,
+        statement_id: submitted.statement_id,
         num_chunks,
         rows,
+        columns: submitted.columns,
     })
 }
 

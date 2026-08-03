@@ -212,6 +212,7 @@ impl PyDbClient {
             Ok(PyResultSet {
                 statement_id: stream.statement_id.clone(),
                 num_chunks: stream.num_chunks,
+                columns: column_pairs(&stream.columns),
                 inner: Arc::new(AsyncMutex::new(stream)),
             })
         })
@@ -306,7 +307,17 @@ struct PyResultSet {
     statement_id: String,
     #[pyo3(get)]
     num_chunks: usize,
+    /// (name, type_name) pairs from the manifest -- a pre-fetch estimate
+    /// only (Databricks doesn't include every manifest's schema, and this
+    /// crate doesn't correct/validate it against the real Arrow schema);
+    /// used for `Cursor.description`-style compatibility.
+    #[pyo3(get)]
+    columns: Vec<(String, Option<String>)>,
     inner: Arc<AsyncMutex<ResultStream>>,
+}
+
+fn column_pairs(columns: &[client::ColumnDescription]) -> Vec<(String, Option<String>)> {
+    columns.iter().map(|c| (c.name.clone(), c.type_name.clone())).collect()
 }
 
 #[pymethods]
@@ -383,6 +394,7 @@ impl PyExecuteStreamedIter {
                     let result_set = PyResultSet {
                         statement_id: stream.statement_id.clone(),
                         num_chunks: stream.num_chunks,
+                        columns: column_pairs(&stream.columns),
                         inner: Arc::new(AsyncMutex::new(stream)),
                     };
                     Python::attach(|py| Py::new(py, result_set).map(|rs| rs.into_any()))

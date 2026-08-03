@@ -46,10 +46,30 @@ struct ChunkMetaRaw {
     row_count: Option<i64>,
 }
 
+/// One manifest column description -- matches `_description_from_manifest`'s
+/// `c.get("name")`/`c.get("type_name")`. Only carried for `Cursor.description`
+/// compatibility (Python's own fallback for describing a result before any
+/// chunk has actually been fetched, since the real Arrow schema isn't known
+/// until then); nothing in this crate's own pipeline needs it otherwise.
+#[derive(Deserialize, Clone)]
+pub struct ColumnDescription {
+    pub name: String,
+    #[serde(default)]
+    pub type_name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ManifestSchemaBody {
+    #[serde(default)]
+    columns: Vec<ColumnDescription>,
+}
+
 #[derive(Deserialize, Default)]
 struct ManifestBody {
     #[serde(default)]
     chunks: Vec<ChunkMetaRaw>,
+    #[serde(default)]
+    schema: Option<ManifestSchemaBody>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +175,18 @@ pub(crate) fn join_error(e: tokio::task::JoinError) -> ApiError {
 pub struct ChunkMeta {
     pub chunk_index: i64,
     pub row_count: Option<i64>,
+}
+
+/// What submitting a statement gets you before any chunk is fetched:
+/// `statement_id` (needed to resolve chunk links), `chunk_metas` (what
+/// `fetch_chunks_with_backpressure` needs), and `columns` -- the manifest's
+/// own (name, type_name) pairs, used only for `Cursor.description`'s
+/// pre-fetch fallback (the real Arrow schema isn't known until a chunk has
+/// actually been decoded).
+pub struct StatementSubmitResult {
+    pub statement_id: String,
+    pub chunk_metas: Vec<ChunkMeta>,
+    pub columns: Vec<ColumnDescription>,
 }
 
 #[derive(Debug)]
@@ -338,15 +370,13 @@ impl DbClient {
     }
 
     /// Submit + poll an EXTERNAL_LINKS/ARROW_STREAM statement to terminal
-    /// state. Returns (statement_id, chunk metas) -- manifest fields beyond
-    /// `chunks` (e.g. `schema`) aren't consumed anywhere downstream, so
-    /// there's nothing to gain from carrying the rest of the manifest along.
+    /// state.
     pub async fn execute_arrow_statement(
         &self,
         statement: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
-    ) -> Result<(String, Vec<ChunkMeta>), ApiError> {
+    ) -> Result<StatementSubmitResult, ApiError> {
         self.execute_statement(statement, "ARROW_STREAM", catalog, schema).await
     }
 
@@ -362,7 +392,7 @@ impl DbClient {
         statement: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
-    ) -> Result<(String, Vec<ChunkMeta>), ApiError> {
+    ) -> Result<StatementSubmitResult, ApiError> {
         self.execute_statement(statement, "JSON_ARRAY", catalog, schema).await
     }
 
@@ -372,7 +402,7 @@ impl DbClient {
         format: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
-    ) -> Result<(String, Vec<ChunkMeta>), ApiError> {
+    ) -> Result<StatementSubmitResult, ApiError> {
         let mut body = json!({
             "warehouse_id": self.warehouse_id,
             "statement": statement,
@@ -417,9 +447,8 @@ impl DbClient {
             _ => {}
         }
 
-        let chunk_metas = data
-            .manifest
-            .unwrap_or_default()
+        let manifest = data.manifest.unwrap_or_default();
+        let chunk_metas = manifest
             .chunks
             .into_iter()
             .map(|c| ChunkMeta {
@@ -427,7 +456,12 @@ impl DbClient {
                 row_count: c.row_count,
             })
             .collect();
-        Ok((data.statement_id, chunk_metas))
+        let columns = manifest.schema.map(|s| s.columns).unwrap_or_default();
+        Ok(StatementSubmitResult {
+            statement_id: data.statement_id,
+            chunk_metas,
+            columns,
+        })
     }
 
     async fn fetch_chunk_index(&self, statement_id: &str, chunk_index: i64) -> Result<Vec<Bytes>, ApiError> {
