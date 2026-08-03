@@ -3,7 +3,7 @@
 //! bytes are handed off raw, decoding happens in `pipeline.rs`.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -69,6 +69,29 @@ struct ExternalLinkBody {
 struct ChunkLinksBody {
     #[serde(default)]
     external_links: Vec<ExternalLinkBody>,
+}
+
+/// Bearer token source -- either a static string or a caller-supplied
+/// callback, matching Python's `token: str | None` / `token_provider:
+/// Callable[[], str | Awaitable[str]] | None`. Kept generic (no PyO3 here)
+/// so this module stays Python-agnostic, same reasoning as its own module
+/// doc comment; the PyO3-specific bridging for a Python callable lives in
+/// `lib.rs`. Called on every request, no caching here -- matches
+/// `_bearer_token`'s own contract ("if your provider is expensive to call,
+/// cache/refresh inside it").
+pub type TokenFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, ApiError>> + Send>>;
+
+pub trait TokenProvider: Send + Sync {
+    fn get_token(&self) -> TokenFuture;
+}
+
+struct StaticToken(String);
+
+impl TokenProvider for StaticToken {
+    fn get_token(&self) -> TokenFuture {
+        let token = self.0.clone();
+        Box::pin(async move { Ok(token) })
+    }
 }
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -158,7 +181,7 @@ pub struct DbClient {
     http: Client,
     host: String,
     warehouse_id: String,
-    token: String,
+    token_provider: Arc<dyn TokenProvider>,
     http_timeout: Duration,
     wait_timeout: String,
     pub chunk_fetch_concurrency: usize,
@@ -169,6 +192,10 @@ pub struct DbClient {
 
 impl DbClient {
     pub fn new(host: &str, warehouse_id: &str, token: &str) -> Self {
+        Self::with_token_provider(host, warehouse_id, Arc::new(StaticToken(token.to_string())))
+    }
+
+    pub fn with_token_provider(host: &str, warehouse_id: &str, token_provider: Arc<dyn TokenProvider>) -> Self {
         let host = host.trim_end_matches('/');
         // Only force https:// when no scheme was given at all -- same as
         // Python's check, but relaxed to not clobber an explicit http://
@@ -183,7 +210,7 @@ impl DbClient {
             http: Client::builder().build().expect("failed to build reqwest client"),
             host,
             warehouse_id: warehouse_id.to_string(),
-            token: token.to_string(),
+            token_provider,
             http_timeout: Duration::from_secs(60),
             wait_timeout: "30s".to_string(),
             // Python's DatabricksClient defaults to 6, tuned for asyncio+GIL
@@ -218,10 +245,15 @@ impl DbClient {
         body: Option<&Value>,
     ) -> Result<T, ApiError> {
         retry_call(|| async {
+            // Fetched fresh on every attempt, not just once before the retry
+            // loop -- matches Python's _bearer_token being called on every
+            // _do() invocation, so a retry after a 401 picks up a
+            // just-refreshed token instead of resending the same stale one.
+            let token = self.token_provider.get_token().await?;
             let mut req = self
                 .http
                 .request(method.clone(), url)
-                .bearer_auth(&self.token)
+                .bearer_auth(&token)
                 .timeout(self.http_timeout);
             if let Some(b) = body {
                 req = req.json(b);

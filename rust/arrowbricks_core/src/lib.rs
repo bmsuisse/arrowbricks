@@ -1,20 +1,99 @@
 pub mod client;
 pub mod pipeline;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::Schema;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_arrow::PyTable;
+use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
-use client::DbClient;
+use client::{ApiError, DbClient, TokenFuture, TokenProvider};
 use pipeline::ResultStream;
 
 #[pyfunction]
 fn ping() -> &'static str {
     "pong"
+}
+
+fn py_err_to_api_error(e: PyErr) -> ApiError {
+    ApiError { message: e.to_string(), transient: false }
+}
+
+/// Bridges a Python `token_provider` callable (sync or async, matching
+/// `TokenProvider = Callable[[], str | Awaitable[str]]`) into Rust's
+/// `client::TokenProvider` trait. Calling it re-attaches to the GIL only for
+/// the parts that actually touch Python -- the call itself, the awaitable
+/// check, and extracting the final string -- not for the whole future,
+/// since `future_into_py`'s machinery already detaches the GIL around
+/// whatever this future awaits.
+///
+/// `get_token` isn't only ever called from the outermost task
+/// `future_into_py` wraps -- `execute()`/`execute_arrow()` spawn chunk-fetch
+/// worker tasks (`fetch_chunks_with_backpressure`) that each call an
+/// authenticated endpoint (chunk-index resolution) too, and those inner
+/// `tokio::spawn`ed tasks don't inherit the outer task's asyncio-event-loop
+/// context. Calling `pyo3_async_runtimes::tokio::into_future` from one of
+/// them fails with "no running event loop" -- caught by testing an async
+/// `token_provider` against a multi-chunk result, not by the eager/sync
+/// cases alone. Fix: capture the current task's `TaskLocals` on first use
+/// (guaranteed to be the outer context, since `execute_arrow_statement`
+/// always needs a token before any worker is spawned) and cache it, so
+/// later calls -- including from worker tasks -- run inside
+/// `pyo3_async_runtimes::tokio::scope` with that same captured context
+/// instead of trying to discover one from whatever task happens to call.
+struct PyTokenProvider {
+    callable: Py<PyAny>,
+    locals: Mutex<Option<TaskLocals>>,
+}
+
+impl TokenProvider for PyTokenProvider {
+    fn get_token(&self) -> TokenFuture {
+        let callable = Python::attach(|py| self.callable.clone_ref(py));
+        let locals = {
+            let mut guard = self.locals.lock().unwrap();
+            if guard.is_none() {
+                // Best-effort: if this call isn't in a context with a
+                // running loop either, leave it None and fall through to
+                // the no-scope path below (matches today's behavior).
+                if let Ok(captured) = Python::attach(pyo3_async_runtimes::tokio::get_current_locals) {
+                    *guard = Some(captured);
+                }
+            }
+            guard.clone()
+        };
+
+        Box::pin(async move {
+            let called: Py<PyAny> = Python::attach(|py| -> PyResult<Py<PyAny>> {
+                let bound = callable.bind(py);
+                Ok(bound.call0()?.unbind())
+            })
+            .map_err(py_err_to_api_error)?;
+
+            // Mirrors Python's own `inspect.isawaitable(result)` check in
+            // `_bearer_token`: a plain sync callable's return value has no
+            // `__await__`, an async callable's coroutine/Future does.
+            let is_awaitable = Python::attach(|py| called.bind(py).hasattr("__await__")).map_err(py_err_to_api_error)?;
+
+            let result_obj: Py<PyAny> = if is_awaitable {
+                let awaited = async move {
+                    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(called.bind(py).clone()))
+                        .map_err(py_err_to_api_error)?;
+                    fut.await.map_err(py_err_to_api_error)
+                };
+                match locals {
+                    Some(l) => pyo3_async_runtimes::tokio::scope(l, awaited).await?,
+                    None => awaited.await?,
+                }
+            } else {
+                called
+            };
+
+            Python::attach(|py| result_obj.bind(py).extract::<String>()).map_err(py_err_to_api_error)
+        })
+    }
 }
 
 /// One Databricks SQL warehouse endpoint -- a persistent `reqwest::Client`
@@ -29,10 +108,28 @@ struct PyDbClient {
 
 #[pymethods]
 impl PyDbClient {
+    /// Auth is either `token` (a static string) or `token_provider` (a
+    /// callable, sync or async, returning a token string -- called on every
+    /// request, no caching here) -- exactly one of the two, matching
+    /// `DatabricksClient`'s own `__init__` validation.
     #[new]
-    #[pyo3(signature = (host, warehouse_id, token, chunk_fetch_concurrency=32))]
-    fn new(host: String, warehouse_id: String, token: String, chunk_fetch_concurrency: usize) -> Self {
-        Self { inner: Arc::new(DbClient::new(&host, &warehouse_id, &token).with_concurrency(chunk_fetch_concurrency)) }
+    #[pyo3(signature = (host, warehouse_id, token=None, token_provider=None, chunk_fetch_concurrency=32))]
+    fn new(
+        host: String,
+        warehouse_id: String,
+        token: Option<String>,
+        token_provider: Option<Py<PyAny>>,
+        chunk_fetch_concurrency: usize,
+    ) -> PyResult<Self> {
+        let db_client = match (token, token_provider) {
+            (Some(t), _) => DbClient::new(&host, &warehouse_id, &t),
+            (None, Some(callable)) => {
+                let provider: Arc<dyn TokenProvider> = Arc::new(PyTokenProvider { callable, locals: Mutex::new(None) });
+                DbClient::with_token_provider(&host, &warehouse_id, provider)
+            }
+            (None, None) => return Err(PyValueError::new_err("Client needs either `token` or `token_provider`")),
+        };
+        Ok(Self { inner: Arc::new(db_client.with_concurrency(chunk_fetch_concurrency)) })
     }
 
     /// Full submit->poll->fetch->reorder->decode pipeline for one

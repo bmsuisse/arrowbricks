@@ -32,6 +32,12 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Without this, bare `pytest -q` also auto-discovers
+# rust/arrowbricks_core/tests_py -- which needs the Rust extension actually
+# built (maturin develop) first and will fail in the main CI job's venv,
+# which never builds it. That suite is invoked explicitly by path in the
+# rust-test CI job instead.
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
@@ -42,3 +48,4 @@ select = ["E", "F", "I", "UP", "S", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S106"]
+"rust/arrowbricks_core/tests_py/*" = ["S101", "S106"]

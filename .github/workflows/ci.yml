@@ -35,3 +35,15 @@ jobs:
         # maturin ships, wrong for a plain `cargo test` binary. See
         # Cargo.toml's [features] comment.
         run: cargo test --no-default-features
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.14"
+      # rust/arrowbricks_core/tests_py needs a real Python asyncio event loop
+      # with real nested task contexts -- exactly what plain `cargo test`
+      # can't provide, and exactly what caught the token_provider
+      # event-loop-propagation bug during development. Reuses the main
+      # project's deps (arro3, pytest-asyncio) rather than a separate
+      # dependency set for the Rust crate's own tests.
+      - run: uv sync --all-extras
+      - run: uvx maturin develop --uv --release --manifest-path rust/arrowbricks_core/Cargo.toml
+      - run: uv run pytest rust/arrowbricks_core/tests_py -v
