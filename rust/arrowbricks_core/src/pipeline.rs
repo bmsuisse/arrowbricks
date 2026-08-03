@@ -94,6 +94,128 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
         .map_err(|e| ApiError { message: format!("Arrow IPC decode error: {e}"), transient: false })
 }
 
+/// Caps how many chunks `ResultStream::fetch_at_least` will pull/decode
+/// ahead of a `fetchmany` request before checking real (decoded) row counts
+/// against what was asked for. Chunk metas carry a `row_count` estimate from
+/// the manifest that's normally used for this instead, but it can be absent
+/// -- this bounds worst-case over-fetch when it is, same reasoning as
+/// Python's own `chunk_fetch_concurrency` default: I/O-bound work doesn't
+/// benefit past a modest amount of look-ahead.
+const MAX_CHUNKS_PER_FETCH_BATCH: usize = 32;
+
+/// Lazy, incremental counterpart to `run_pipeline`/`ExecuteResult`: pulls and
+/// decodes only as many chunks as a `fetchmany`-style caller actually asks
+/// for, buffering the rest at the Arrow `RecordBatch` level -- the same
+/// architecture as `cursor.py`'s `_ResultSet` (buffer at the Arrow level, not
+/// materialized rows, so Arrow-native fetches stay zero-copy and a
+/// `fetchmany(100)` loop over a huge result never pulls more chunks than it
+/// consumes).
+pub struct ResultStream {
+    pub statement_id: String,
+    pub num_chunks: usize,
+    pub schema: Option<SchemaRef>,
+    reorder: ReorderBuffer,
+    pending: VecDeque<RecordBatch>,
+    pending_rows: usize,
+    exhausted: bool,
+}
+
+impl ResultStream {
+    /// Pulls/decodes chunks until at least `want_rows` are buffered (or the
+    /// source is exhausted). Chunks are pulled a batch at a time -- using
+    /// each chunk's manifest `row_count` estimate to decide how many to pull
+    /// before decoding, capped at `MAX_CHUNKS_PER_FETCH_BATCH` -- and their
+    /// `spawn_blocking` decode handles are awaited together, same
+    /// fetch/decode overlap reasoning as `run_pipeline`. `want_rows =
+    /// usize::MAX` drains the whole result (used by `fetchall_arrow`).
+    async fn fetch_at_least(&mut self, want_rows: usize) -> Result<(), ApiError> {
+        let mut decode_handles = Vec::new();
+        let mut estimated_new_rows = 0usize;
+        while self.pending_rows + estimated_new_rows < want_rows
+            && !self.exhausted
+            && decode_handles.len() < MAX_CHUNKS_PER_FETCH_BATCH
+        {
+            match self.reorder.next().await? {
+                Some(item) => {
+                    estimated_new_rows += item.row_count.unwrap_or(0).max(0) as usize;
+                    decode_handles.push(tokio::task::spawn_blocking(move || decode_chunk(&item.blob)));
+                }
+                None => self.exhausted = true,
+            }
+        }
+        for handle in decode_handles {
+            for batch in handle.await.map_err(join_error)?? {
+                if self.schema.is_none() {
+                    self.schema = Some(batch.schema());
+                }
+                self.pending_rows += batch.num_rows();
+                self.pending.push_back(batch);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes up to `n` rows off the front of the buffer, splitting a batch
+    /// with `RecordBatch::slice` if it straddles the boundary -- the
+    /// remainder stays buffered for the next call. Assumes `fetch_at_least`
+    /// already ran for this call; may return fewer than `n` rows (or none)
+    /// if the source was exhausted first.
+    fn take(&mut self, n: usize) -> Vec<RecordBatch> {
+        let mut out = Vec::new();
+        let mut remaining = n;
+        while remaining > 0 {
+            let Some(front) = self.pending.pop_front() else { break };
+            if front.num_rows() <= remaining {
+                remaining -= front.num_rows();
+                self.pending_rows -= front.num_rows();
+                out.push(front);
+            } else {
+                let head = front.slice(0, remaining);
+                let tail = front.slice(remaining, front.num_rows() - remaining);
+                self.pending_rows -= remaining;
+                self.pending.push_front(tail);
+                out.push(head);
+                remaining = 0;
+            }
+        }
+        out
+    }
+
+    pub async fn fetchmany_arrow(&mut self, n: usize) -> Result<(Vec<RecordBatch>, Option<SchemaRef>), ApiError> {
+        self.fetch_at_least(n).await?;
+        Ok((self.take(n), self.schema.clone()))
+    }
+
+    pub async fn fetchall_arrow(&mut self) -> Result<(Vec<RecordBatch>, Option<SchemaRef>), ApiError> {
+        self.fetch_at_least(usize::MAX).await?;
+        let all = self.pending_rows;
+        Ok((self.take(all), self.schema.clone()))
+    }
+}
+
+/// Submit -> poll -> start background chunk fetching, without draining
+/// anything yet -- pairs with `ResultStream`'s `fetchmany_arrow`/
+/// `fetchall_arrow` for on-demand pulling.
+pub async fn execute_lazy(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+) -> Result<ResultStream, ApiError> {
+    let (statement_id, chunk_metas) = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let num_chunks = chunk_metas.len();
+    let rx = client.fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+    Ok(ResultStream {
+        statement_id,
+        num_chunks,
+        schema: None,
+        reorder: ReorderBuffer::new(rx),
+        pending: VecDeque::new(),
+        pending_rows: 0,
+        exhausted: false,
+    })
+}
+
 /// Full submit -> poll -> fetch -> reorder -> decode pipeline. Returns the
 /// assembled batches in logical (chunk_index) order plus their schema, ready
 /// to hand to `pyo3_arrow::PyTable` for a zero-copy Arrow C Data Interface

@@ -11,7 +11,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrowbricks_core::client::DbClient;
-use arrowbricks_core::pipeline::run_pipeline;
+use arrowbricks_core::pipeline::{execute_lazy, run_pipeline};
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -121,6 +121,50 @@ async fn full_pipeline_survives_reverse_arrival() {
     // of (chunk_index) order over real async I/O, the assembled row data
     // itself comes back in the original 0..20 order, not arrival order.
     assert_ids_in_order(&summary.batches, 20);
+}
+
+#[tokio::test]
+async fn lazy_fetchmany_never_pulls_more_chunks_than_consumed() {
+    let server = MockServer::start().await;
+    // 5 rows/chunk, requested in batches of 7 -- deliberately misaligned
+    // with the chunk boundary so a `fetchmany` call must sometimes split a
+    // batch mid-chunk (RecordBatch::slice) and buffer the remainder for the
+    // next call.
+    install_mock_warehouse(&server, 6, 5, false).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None).await.unwrap();
+    assert_eq!(stream.num_chunks, 6);
+
+    let mut all_batches = Vec::new();
+    let mut total_rows = 0;
+    loop {
+        let (batches, _schema) = stream.fetchmany_arrow(7).await.unwrap();
+        let got: usize = batches.iter().map(|b| b.num_rows()).sum();
+        if got == 0 {
+            break;
+        }
+        assert!(got <= 7, "fetchmany_arrow(7) returned more than asked for: {got}");
+        total_rows += got;
+        all_batches.extend(batches);
+    }
+
+    assert_eq!(total_rows, 30);
+    assert_ids_in_order(&all_batches, 30);
+}
+
+#[tokio::test]
+async fn lazy_fetchmany_survives_reverse_arrival() {
+    let server = MockServer::start().await;
+    install_mock_warehouse(&server, 5, 4, true).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None).await.unwrap();
+
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 20);
+    assert_ids_in_order(&batches, 20);
 }
 
 /// Concatenates every batch's `id` column and checks it runs 0..n_rows in
