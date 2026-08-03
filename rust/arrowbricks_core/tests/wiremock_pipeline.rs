@@ -11,7 +11,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrowbricks_core::client::DbClient;
-use arrowbricks_core::pipeline::{execute_lazy, run_pipeline};
+use arrowbricks_core::pipeline::{execute_lazy, run_json_pipeline, run_pipeline};
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -186,6 +186,77 @@ async fn lazy_fetchmany_survives_reverse_arrival() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 20);
     assert_ids_in_order(&batches, 20);
+}
+
+async fn install_mock_warehouse_json(server: &MockServer, n_chunks: i64, rows_per_chunk: i64, delay_reverse: bool) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(server)
+        .await;
+
+    let chunks: Vec<_> = (0..n_chunks).map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk})).collect();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": chunks},
+        })))
+        .mount(server)
+        .await;
+
+    for i in 0..n_chunks {
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "external_links": [{"external_link": format!("{uri}/_data/chunk-{i}")}]
+            })))
+            .mount(server)
+            .await;
+
+        // JSON_ARRAY's own contract: each row is an array of *strings*
+        // (nulls stay null) regardless of real column type -- not this
+        // crate's choice, Databricks'.
+        let rows: Vec<_> = (i * rows_per_chunk..(i + 1) * rows_per_chunk)
+            .map(|id| json!([id.to_string(), format!("row_{id}")]))
+            .collect();
+        let delay_ms = if delay_reverse { ((n_chunks - i) * 10) as u64 } else { 0 };
+        Mock::given(method("GET"))
+            .and(path_regex(format!(r"^/_data/chunk-{i}$")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rows).set_delay(std::time::Duration::from_millis(delay_ms)))
+            .mount(server)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn json_pipeline_happy_path() {
+    let server = MockServer::start().await;
+    install_mock_warehouse_json(&server, 3, 5, false).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let result = run_json_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
+
+    assert_eq!(result.statement_id, STATEMENT_ID);
+    assert_eq!(result.num_chunks, 3);
+    assert_eq!(result.rows.len(), 15);
+    let ids: Vec<i64> = result.rows.iter().map(|r| r[0].as_ref().unwrap().parse().unwrap()).collect();
+    assert_eq!(ids, (0..15).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn json_pipeline_survives_reverse_arrival() {
+    let server = MockServer::start().await;
+    install_mock_warehouse_json(&server, 5, 4, true).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
+    let result = run_json_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
+
+    assert_eq!(result.rows.len(), 20);
+    let ids: Vec<i64> = result.rows.iter().map(|r| r[0].as_ref().unwrap().parse().unwrap()).collect();
+    assert_eq!(ids, (0..20).collect::<Vec<_>>(), "row order must survive out-of-order chunk arrival for JSON too");
 }
 
 /// Concatenates every batch's `id` column and checks it runs 0..n_rows in

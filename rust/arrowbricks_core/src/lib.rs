@@ -181,6 +181,29 @@ impl PyDbClient {
             })
         })
     }
+
+    /// Full submit->poll->fetch->reorder pipeline for one JSON_ARRAY
+    /// statement -- no Arrow parse at all. Returns a plain list of rows,
+    /// each row a list of values where every non-null value is a *string*
+    /// (Databricks' own JSON_ARRAY contract, not this crate's choice) --
+    /// cast by the manifest's column type_name yourself if you want native
+    /// Python types.
+    #[pyo3(signature = (statement, catalog=None, schema=None))]
+    fn execute_json<'py>(
+        &self,
+        py: Python<'py>,
+        statement: String,
+        catalog: Option<String>,
+        schema: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = pipeline::run_json_pipeline(client, &statement, catalog.as_deref(), schema.as_deref())
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+            Ok(result.rows)
+        })
+    }
 }
 
 /// One statement's worth of lazily-fetched result. `fetchmany_arrow`/

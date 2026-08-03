@@ -261,6 +261,50 @@ pub async fn run_pipeline(
     Ok(ExecuteResult { statement_id, num_chunks, batches, schema })
 }
 
+pub struct JsonResult {
+    pub statement_id: String,
+    pub num_chunks: usize,
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
+/// JSON_ARRAY's contract (Databricks' own, not ours): each chunk is a JSON
+/// array of rows, each row an array of values where every non-null value is
+/// a *string* regardless of its real column type; null stays JSON null.
+/// Casting by the manifest's column type_name, if wanted, is left to the
+/// caller -- same pass-through the Python original leaves to its own
+/// caller.
+fn decode_json_chunk(blob: &Bytes) -> Result<Vec<Vec<Option<String>>>, ApiError> {
+    serde_json::from_slice(&blob[..]).map_err(|e| ApiError { message: format!("bad JSON_ARRAY chunk: {e}"), transient: false })
+}
+
+/// JSON_ARRAY counterpart to `run_pipeline` -- same submit/poll/fetch/
+/// reorder machinery (chunk bytes are chunk bytes regardless of format),
+/// decoding each chunk as a JSON array of rows instead of Arrow-IPC.
+pub async fn run_json_pipeline(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+) -> Result<JsonResult, ApiError> {
+    let (statement_id, chunk_metas) = client.execute_json_statement(statement, catalog, schema).await?;
+    let num_chunks = chunk_metas.len();
+
+    let rx = client.clone().fetch_chunks_with_backpressure(statement_id.clone(), chunk_metas);
+    let mut reorder = ReorderBuffer::new(rx);
+
+    let mut decode_handles = Vec::with_capacity(num_chunks);
+    while let Some(item) = reorder.next().await? {
+        decode_handles.push(tokio::task::spawn_blocking(move || decode_json_chunk(&item.blob)));
+    }
+
+    let mut rows = Vec::new();
+    for handle in decode_handles {
+        rows.extend(handle.await.map_err(join_error)??);
+    }
+
+    Ok(JsonResult { statement_id, num_chunks, rows })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

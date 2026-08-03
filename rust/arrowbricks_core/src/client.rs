@@ -328,11 +328,37 @@ impl DbClient {
         catalog: Option<&str>,
         schema: Option<&str>,
     ) -> Result<(String, Vec<ChunkMeta>), ApiError> {
+        self.execute_statement(statement, "ARROW_STREAM", catalog, schema).await
+    }
+
+    /// Like `execute_arrow_statement`, fixed to JSON_ARRAY -- each fetched
+    /// chunk's bytes are then a JSON array of rows, each row itself an array
+    /// of values where every non-null value is a *string* regardless of its
+    /// real column type (Databricks' own JSON_ARRAY contract; null stays
+    /// JSON null) -- casting by the manifest's column type_name, if wanted,
+    /// is left to the caller, same as the Python original does nothing extra
+    /// here either.
+    pub async fn execute_json_statement(
+        &self,
+        statement: &str,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<(String, Vec<ChunkMeta>), ApiError> {
+        self.execute_statement(statement, "JSON_ARRAY", catalog, schema).await
+    }
+
+    async fn execute_statement(
+        &self,
+        statement: &str,
+        format: &str,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<(String, Vec<ChunkMeta>), ApiError> {
         let mut body = json!({
             "warehouse_id": self.warehouse_id,
             "statement": statement,
             "disposition": "EXTERNAL_LINKS",
-            "format": "ARROW_STREAM",
+            "format": format,
             "wait_timeout": self.wait_timeout,
             "on_wait_timeout": "CONTINUE",
         });
