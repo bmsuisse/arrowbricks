@@ -45,18 +45,33 @@ class Client:
         warehouse_confirmed_running_ttl_s: float = 30.0,
     ) -> None: ...
     async def execute_arrow(
-        self, statement: str, catalog: str | None = None, schema: str | None = None
+        self,
+        statement: str,
+        catalog: str | None = None,
+        schema: str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
     ) -> Any: ...  # Arrow table (__arrow_c_stream__)
-    async def execute(self, statement: str, catalog: str | None = None, schema: str | None = None) -> ResultSet: ...
+    async def execute(
+        self,
+        statement: str,
+        catalog: str | None = None,
+        schema: str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
+    ) -> ResultSet: ...
     def execute_streamed(
         self,
         statement: str,
         catalog: str | None = None,
         schema: str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
         total_timeout_s: float | None = None,
     ) -> ExecuteStreamedIter: ...
     async def execute_json(
-        self, statement: str, catalog: str | None = None, schema: str | None = None
+        self,
+        statement: str,
+        catalog: str | None = None,
+        schema: str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
     ) -> list[list[Any]]: ...
     async def upload_volume_file(self, volume_path: str, data: bytes) -> None: ...
     async def delete_volume_file(self, volume_path: str) -> None: ...
@@ -65,5 +80,6 @@ class Client:
         statement: str,
         catalog: str | None = None,
         schema: str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
         total_timeout_s: float | None = None,
     ) -> ChunkStreamIter: ...

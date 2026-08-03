@@ -99,7 +99,7 @@ async fn full_pipeline_happy_path() {
     install_mock_warehouse(&server, 3, 5, false).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
-    let summary = run_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
+    let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.statement_id, STATEMENT_ID);
     assert_eq!(summary.num_chunks, 3);
@@ -116,7 +116,7 @@ async fn full_pipeline_survives_reverse_arrival() {
     install_mock_warehouse(&server, 5, 4, true).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
-    let summary = run_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
+    let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.num_chunks, 5);
     assert_eq!(summary.num_batches(), 5);
@@ -137,7 +137,7 @@ async fn lazy_fetchmany_never_pulls_more_chunks_than_consumed() {
     install_mock_warehouse(&server, 6, 5, false).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
-    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None).await.unwrap();
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
     assert_eq!(stream.num_chunks, 6);
 
     let mut all_batches = Vec::new();
@@ -170,7 +170,7 @@ async fn lazy_fetchall_drains_beyond_the_per_batch_chunk_cap() {
     install_mock_warehouse(&server, 50, 3, false).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
-    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None).await.unwrap();
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -187,7 +187,7 @@ async fn lazy_fetchmany_survives_reverse_arrival() {
     install_mock_warehouse(&server, 5, 4, true).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
-    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None).await.unwrap();
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -252,7 +252,9 @@ async fn json_pipeline_happy_path() {
     install_mock_warehouse_json(&server, 3, 5, false).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
-    let result = run_json_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
+    let result = run_json_pipeline(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.statement_id, STATEMENT_ID);
     assert_eq!(result.num_chunks, 3);
@@ -271,7 +273,9 @@ async fn json_pipeline_survives_reverse_arrival() {
     install_mock_warehouse_json(&server, 5, 4, true).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
-    let result = run_json_pipeline(client, "SELECT * FROM t", None, None).await.unwrap();
+    let result = run_json_pipeline(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.rows.len(), 20);
     let ids: Vec<i64> = result

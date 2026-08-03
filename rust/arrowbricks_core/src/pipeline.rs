@@ -9,6 +9,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::{ApiError, ChunkItem, ColumnDescription, DbClient, join_error};
@@ -219,8 +220,11 @@ pub async fn execute_lazy(
     statement: &str,
     catalog: Option<&str>,
     schema: Option<&str>,
+    parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
-    let submitted = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let submitted = client
+        .execute_arrow_statement(statement, catalog, schema, parameters)
+        .await?;
     let num_chunks = submitted.chunk_metas.len();
     let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
     Ok(ResultStream {
@@ -254,8 +258,11 @@ pub async fn run_pipeline(
     statement: &str,
     catalog: Option<&str>,
     schema: Option<&str>,
+    parameters: Option<Value>,
 ) -> Result<ExecuteResult, ApiError> {
-    let submitted = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let submitted = client
+        .execute_arrow_statement(statement, catalog, schema, parameters)
+        .await?;
     let num_chunks = submitted.chunk_metas.len();
 
     let rx = client
@@ -331,8 +338,11 @@ pub async fn execute_chunk_stream(
     statement: &str,
     catalog: Option<&str>,
     schema: Option<&str>,
+    parameters: Option<Value>,
 ) -> Result<ChunkStream, ApiError> {
-    let submitted = client.execute_arrow_statement(statement, catalog, schema).await?;
+    let submitted = client
+        .execute_arrow_statement(statement, catalog, schema, parameters)
+        .await?;
     let num_chunks = submitted.chunk_metas.len();
     let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
     Ok(ChunkStream {
@@ -371,8 +381,11 @@ pub async fn run_json_pipeline(
     statement: &str,
     catalog: Option<&str>,
     schema: Option<&str>,
+    parameters: Option<Value>,
 ) -> Result<JsonResult, ApiError> {
-    let submitted = client.execute_json_statement(statement, catalog, schema).await?;
+    let submitted = client
+        .execute_json_statement(statement, catalog, schema, parameters)
+        .await?;
     let num_chunks = submitted.chunk_metas.len();
 
     let rx = client

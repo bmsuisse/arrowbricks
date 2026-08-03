@@ -405,14 +405,20 @@ impl DbClient {
     }
 
     /// Submit + poll an EXTERNAL_LINKS/ARROW_STREAM statement to terminal
-    /// state.
+    /// state. `parameters`, if given, is Databricks' own named-parameter
+    /// format ([{"name":..., "value":..., "type":...}] bound against `:name`
+    /// markers in `statement`) -- passed through to the request body
+    /// verbatim, same as the Python original does no validation of its own
+    /// shape either.
     pub async fn execute_arrow_statement(
         &self,
         statement: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
+        parameters: Option<Value>,
     ) -> Result<StatementSubmitResult, ApiError> {
-        self.execute_statement(statement, "ARROW_STREAM", catalog, schema).await
+        self.execute_statement(statement, "ARROW_STREAM", catalog, schema, parameters)
+            .await
     }
 
     /// Like `execute_arrow_statement`, fixed to JSON_ARRAY -- each fetched
@@ -427,8 +433,10 @@ impl DbClient {
         statement: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
+        parameters: Option<Value>,
     ) -> Result<StatementSubmitResult, ApiError> {
-        self.execute_statement(statement, "JSON_ARRAY", catalog, schema).await
+        self.execute_statement(statement, "JSON_ARRAY", catalog, schema, parameters)
+            .await
     }
 
     async fn execute_statement(
@@ -437,6 +445,7 @@ impl DbClient {
         format: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
+        parameters: Option<Value>,
     ) -> Result<StatementSubmitResult, ApiError> {
         let mut body = json!({
             "warehouse_id": self.warehouse_id,
@@ -451,6 +460,9 @@ impl DbClient {
         }
         if let Some(s) = schema {
             body["schema"] = json!(s);
+        }
+        if let Some(p) = parameters {
+            body["parameters"] = p;
         }
 
         self.ensure_warehouse_running().await?;

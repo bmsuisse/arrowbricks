@@ -29,6 +29,19 @@ fn py_err_to_api_error(e: PyErr) -> ApiError {
     }
 }
 
+/// Converts `parameters` (Databricks' own named-parameter format --
+/// `[{"name": ..., "value": ..., "type": ...}]`, matching Python's own
+/// `list[dict[str, Any]] | None`) from a raw Python object into
+/// `serde_json::Value`, passed straight through to the request body -- this
+/// crate does no validation of its own shape either, same as the Python
+/// original.
+fn parameters_to_value(py: Python<'_>, parameters: Option<Py<PyAny>>) -> PyResult<Option<serde_json::Value>> {
+    parameters
+        .map(|p| pythonize::depythonize::<serde_json::Value>(p.bind(py)))
+        .transpose()
+        .map_err(|e| PyValueError::new_err(format!("bad `parameters`: {e}")))
+}
+
 /// Marker type for the `HEARTBEAT` sentinel -- matches Python's own
 /// `_streaming.py` (`class _Heartbeat: ...; HEARTBEAT = _Heartbeat()`): one
 /// singleton instance, so a caller's `item is HEARTBEAT` identity check
@@ -195,17 +208,19 @@ impl PyDbClient {
     /// (`__arrow_c_stream__`), so DuckDB/pyarrow/arro3 can all import it
     /// directly, zero-copy. For a large result where you don't want the
     /// whole thing pulled upfront, use `execute()` + `ResultSet.fetchmany_arrow`.
-    #[pyo3(signature = (statement, catalog=None, schema=None))]
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None))]
     fn execute_arrow<'py>(
         &self,
         py: Python<'py>,
         statement: String,
         catalog: Option<String>,
         schema: Option<String>,
+        parameters: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
+        let parameters = parameters_to_value(py, parameters)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = pipeline::run_pipeline(client, &statement, catalog.as_deref(), schema.as_deref())
+            let result = pipeline::run_pipeline(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.message))?;
             let arrow_schema = result.schema.unwrap_or_else(|| Arc::new(Schema::empty()));
@@ -218,17 +233,19 @@ impl PyDbClient {
     /// `fetchmany_arrow`/`fetchall_arrow`, mirroring `cursor.py`'s
     /// `execute()` + `_ResultSet` split (chunks fetched lazily as the
     /// caller actually needs them, not all upfront).
-    #[pyo3(signature = (statement, catalog=None, schema=None))]
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None))]
     fn execute<'py>(
         &self,
         py: Python<'py>,
         statement: String,
         catalog: Option<String>,
         schema: Option<String>,
+        parameters: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
+        let parameters = parameters_to_value(py, parameters)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref())
+            let stream = pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.message))?;
             Ok(PyResultSet {
@@ -248,20 +265,24 @@ impl PyDbClient {
     /// a sync method returning an async generator) -- the submit/poll starts
     /// running immediately in the background regardless of when the caller
     /// starts iterating.
-    #[pyo3(signature = (statement, catalog=None, schema=None, total_timeout_s=None))]
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None))]
     fn execute_streamed(
         &self,
+        py: Python<'_>,
         statement: String,
         catalog: Option<String>,
         schema: Option<String>,
+        parameters: Option<Py<PyAny>>,
         total_timeout_s: Option<f64>,
-    ) -> PyExecuteStreamedIter {
+    ) -> PyResult<PyExecuteStreamedIter> {
         let client = self.inner.clone();
-        let fut =
-            async move { pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref()).await };
-        PyExecuteStreamedIter {
+        let parameters = parameters_to_value(py, parameters)?;
+        let fut = async move {
+            pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref(), parameters).await
+        };
+        Ok(PyExecuteStreamedIter {
             wait: Arc::new(AsyncMutex::new(Some(HeartbeatWait::new(fut, total_timeout_s)))),
-        }
+        })
     }
 
     /// Full submit->poll->fetch->reorder pipeline for one JSON_ARRAY
@@ -270,19 +291,22 @@ impl PyDbClient {
     /// (Databricks' own JSON_ARRAY contract, not this crate's choice) --
     /// cast by the manifest's column type_name yourself if you want native
     /// Python types.
-    #[pyo3(signature = (statement, catalog=None, schema=None))]
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None))]
     fn execute_json<'py>(
         &self,
         py: Python<'py>,
         statement: String,
         catalog: Option<String>,
         schema: Option<String>,
+        parameters: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
+        let parameters = parameters_to_value(py, parameters)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = pipeline::run_json_pipeline(client, &statement, catalog.as_deref(), schema.as_deref())
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+            let result =
+                pipeline::run_json_pipeline(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
+                    .await
+                    .map_err(|e| PyRuntimeError::new_err(e.message))?;
             Ok(result.rows)
         })
     }
@@ -326,23 +350,27 @@ impl PyDbClient {
     /// a time rather than the whole result upfront. Not async itself, same
     /// as `execute_streamed` -- the returned iterator's `__anext__` does the
     /// real work, including the initial submit/poll on its very first call.
-    #[pyo3(signature = (statement, catalog=None, schema=None, total_timeout_s=None))]
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None))]
     fn stream_chunks_arrow(
         &self,
+        py: Python<'_>,
         statement: String,
         catalog: Option<String>,
         schema: Option<String>,
+        parameters: Option<Py<PyAny>>,
         total_timeout_s: Option<f64>,
-    ) -> PyChunkStreamIter {
-        PyChunkStreamIter {
+    ) -> PyResult<PyChunkStreamIter> {
+        let parameters = parameters_to_value(py, parameters)?;
+        Ok(PyChunkStreamIter {
             state: Arc::new(AsyncMutex::new(PyChunkStreamState::Pending {
                 client: self.inner.clone(),
                 statement,
                 catalog,
                 schema,
+                parameters,
                 total_timeout_s,
             })),
-        }
+        })
     }
 }
 
@@ -510,6 +538,7 @@ enum PyChunkStreamState {
         statement: String,
         catalog: Option<String>,
         schema: Option<String>,
+        parameters: Option<serde_json::Value>,
         total_timeout_s: Option<f64>,
     },
     Running {
@@ -547,15 +576,21 @@ impl PyChunkStreamIter {
                             statement,
                             catalog,
                             schema,
+                            parameters,
                             total_timeout_s,
                         } = std::mem::replace(&mut *guard, PyChunkStreamState::Done)
                         else {
                             unreachable!()
                         };
-                        let stream =
-                            pipeline::execute_chunk_stream(client, &statement, catalog.as_deref(), schema.as_deref())
-                                .await
-                                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+                        let stream = pipeline::execute_chunk_stream(
+                            client,
+                            &statement,
+                            catalog.as_deref(),
+                            schema.as_deref(),
+                            parameters,
+                        )
+                        .await
+                        .map_err(|e| PyRuntimeError::new_err(e.message))?;
                         *guard = PyChunkStreamState::Running {
                             stream: Arc::new(AsyncMutex::new(stream)),
                             heartbeat: HeartbeatStream::new(total_timeout_s),
