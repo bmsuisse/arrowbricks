@@ -82,6 +82,24 @@ impl<T: Send + 'static> HeartbeatWait<T> {
                 let now = Instant::now();
                 if now >= deadline {
                     handle.abort();
+                    // `abort()` only *requests* cancellation -- the task
+                    // (running on pyo3-async-runtimes' own persistent
+                    // background runtime, independent of whatever's calling
+                    // `tick()`) keeps running until its next await point,
+                    // where tokio actually drops it. Awaiting the handle
+                    // here blocks until that drop has genuinely happened
+                    // before this error ever reaches the caller -- found by
+                    // testing a real timeout against a live warehouse from a
+                    // short-lived script: without this, the caller can see
+                    // QueryTimeout, decide the program is done, and exit
+                    // while the orphaned task is still mid-drop; if that
+                    // drop needs to touch a Python object (e.g. dropping a
+                    // token_provider callback reference) after the
+                    // interpreter has started finalizing, it panics with
+                    // "The Python interpreter is not initialized". A
+                    // long-running server never hits this (the interpreter
+                    // stays alive), but nothing should depend on that.
+                    let _ = handle.await;
                     self.handle = None;
                     let secs = self.total_timeout_s.unwrap_or(0.0);
                     return Err(ApiError {
@@ -161,6 +179,12 @@ impl<T: Send + 'static> HeartbeatStream<T> {
                 let now = Instant::now();
                 if now >= deadline {
                     handle.abort();
+                    // See HeartbeatWait::tick's identical comment -- awaiting
+                    // the aborted handle blocks until the task has genuinely
+                    // been dropped, closing the race where a caller sees
+                    // QueryTimeout and exits while the orphaned task is
+                    // still mid-drop.
+                    let _ = handle.await;
                     self.current = None;
                     let secs = self.total_timeout_s.unwrap_or(0.0);
                     return Err(ApiError {
@@ -251,6 +275,56 @@ mod tests {
             err.message.contains("0.05"),
             "error should mention the configured timeout: {}",
             err.message
+        );
+    }
+
+    /// Regression test for a real panic found by testing a real timeout
+    /// against a live warehouse from a short-lived script: `handle.abort()`
+    /// alone only *requests* cancellation, so the aborted task could still
+    /// be mid-drop when `tick()` returns the timeout error -- if the caller
+    /// then exits (as a short script naturally does right after catching
+    /// the exception), the orphaned task can panic trying to touch Python
+    /// state after the interpreter has started finalizing. `tick()` must
+    /// not return the timeout error until the aborted task has genuinely
+    /// finished dropping -- proven here by a task that sets a shared flag in
+    /// its own `Drop` impl, asserted `true` immediately after `tick()`
+    /// returns, not merely "eventually".
+    #[tokio::test]
+    async fn total_timeout_waits_for_the_aborted_task_to_actually_drop() {
+        struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = SetOnDrop(dropped.clone());
+        let mut wait = HeartbeatWait::with_interval(
+            async move {
+                let _guard = guard; // moved in, dropped only when this future is dropped
+                tokio::time::sleep(Duration::from_secs(120)).await;
+                Ok(())
+            },
+            Some(0.03),
+            TEST_INTERVAL,
+        );
+
+        let mut last_err = None;
+        for _ in 0..10 {
+            match wait.tick().await {
+                Ok(Some(Tick::Heartbeat)) => continue,
+                Ok(_) => panic!("must not become Ready/None before the timeout fires"),
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(last_err.is_some(), "timeout must fire within 10 ticks");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the aborted task's future must already be dropped by the time tick() returns the timeout error"
         );
     }
 
@@ -356,6 +430,52 @@ mod tests {
             err.message.contains("0.045"),
             "error should mention the configured timeout: {}",
             err.message
+        );
+    }
+
+    /// `HeartbeatStream` counterpart to
+    /// `total_timeout_waits_for_the_aborted_task_to_actually_drop` -- same
+    /// fix, same reasoning, separate code path (the chunk-fetch phase,
+    /// rather than the initial submit/poll wait).
+    #[tokio::test]
+    async fn heartbeat_stream_timeout_waits_for_the_aborted_task_to_actually_drop() {
+        struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut stream: HeartbeatStream<u32> = HeartbeatStream::with_interval(Some(0.03), TEST_INTERVAL);
+
+        // A fresh closure is built each loop iteration (tick() takes FnOnce),
+        // but `tick()` only actually calls it on the first pull (self.current
+        // is None) -- every later iteration's closure is just dropped
+        // unused, so only one SetOnDrop guard is ever really constructed.
+        let mut last_err = None;
+        for _ in 0..10 {
+            let dropped_for_task = dropped.clone();
+            let spawn_next = move || -> NextItemFuture<u32> {
+                Box::pin(async move {
+                    let _guard = SetOnDrop(dropped_for_task);
+                    tokio::time::sleep(Duration::from_secs(120)).await;
+                    Ok(Some(1))
+                })
+            };
+            match stream.tick(spawn_next).await {
+                Ok(Some(Tick::Heartbeat)) => continue,
+                Ok(_) => panic!("must not become Ready/None before the timeout fires"),
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(last_err.is_some(), "timeout must fire within 10 ticks");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the aborted task's future must already be dropped by the time tick() returns the timeout error"
         );
     }
 }
