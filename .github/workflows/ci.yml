@@ -64,3 +64,30 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ty check src tests
       - run: uv run pytest -q
+
+  # Regression coverage for arrowbricks' "arro3-core is optional" claim --
+  # every other job installs with `--all-extras`, so arro3 is always present
+  # there and would never catch a path silently growing a hidden dependency
+  # on it (this is exactly how ReplayableArrowChunk vanished from the public
+  # API in 1.0.0 with nothing noticing until a real downstream integration
+  # did). This job installs the wheel with NO extras and no dev dependency
+  # group at all, so tests/arro3_free/ genuinely cannot import arro3.
+  test-arro3-free:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: dist
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.14"
+      - run: uv venv
+      - run: uv pip install dist/*.whl pytest pytest-asyncio
+      # Deliberately not `uv run` -- it would implicitly `uv sync` this
+      # project's own pyproject.toml (dev group included, which pulls in
+      # arro3-core for the rest of tests/) and defeat the point of this job.
+      # Call the venv's own interpreter directly instead.
+      - run: .venv/bin/python -m pytest tests/arro3_free -v

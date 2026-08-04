@@ -4,7 +4,11 @@ Rust implementation of [arrowbricks](https://github.com/bmsuisse/arrowbricks)'
 hot path -- statement submit/poll, bounded-concurrency chunk fetch, the
 `chunk_index` reorder buffer, Arrow-IPC decode/write, and NDJSON encode via
 [arrow-rs](https://github.com/apache/arrow-rs) -- exposed to Python via
-[PyO3](https://pyo3.rs). This crate builds into the same wheel as the
+[PyO3](https://pyo3.rs). Every statement also requests LZ4-compressed
+cloud-fetch chunks (`result_compression: "LZ4_FRAME"`, matching
+`databricks-sql-connector`'s own default) and transparently decompresses them
+(`lz4_flex`, pure Rust) right after download -- less data over the wire, no
+client-facing change. This crate builds into the same wheel as the
 top-level `arrowbricks` package, as its compiled submodule `arrowbricks._core`
 (see the repo root `pyproject.toml`'s `[tool.maturin]`) -- it is not published
 to PyPI on its own. `arrowbricks`'s own `Cursor`/`DatabricksClient`/

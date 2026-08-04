@@ -3,6 +3,7 @@
 Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a `Cursor` shaped like [`databricks-sql-python`](https://github.com/databricks/databricks-sql-python)'s (`execute`, `fetchone`/`fetchmany`/`fetchall`, `fetchall_arrow`/`fetchmany_arrow`), or `stream_query_json` for streaming NDJSON.
 
 - **Rust core.** Statement submit/poll, bounded-concurrency chunk fetch, the reorder buffer, and Arrow-IPC decode all run in a [PyO3](https://pyo3.rs)/[arrow-rs](https://github.com/apache/arrow-rs) extension bundled in this same package -- 1.6x-2.5x faster than a pure-Python/asyncio client on a multi-chunk result, scaling further with chunk count and concurrency where asyncio+GIL plateaus.
+- **Compressed cloud-fetch transport by default.** Every statement requests LZ4-compressed chunk downloads (same default as the official `databricks-sql-connector`) and decompresses them in Rust before you ever see the bytes -- less data over the wire, which matters more than local decode speed for a large result.
 - **Zero required dependencies.** `pip install arrowbricks` and go.
 - **Bring-your-own-auth** -- a static token or your own token-refresh callable. No cloud-SDK dependency baked in.
 - **Result order preserved** even though chunks can complete out of order over the network.
@@ -58,13 +59,50 @@ async for item in stream_query_json(client, "SELECT * FROM my_catalog.my_schema.
 
 See [`examples/basic.py`](examples/basic.py) for a runnable version,
 [`examples/cursor_paging.py`](examples/cursor_paging.py) for paging a large
-result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront,
-[`examples/fastapi_sse.py`](examples/fastapi_sse.py) for streaming a query to
-a client as Server-Sent Events, [`examples/fastapi_sse_pivot.py`](examples/fastapi_sse_pivot.py)
-for the same over a buffered `Cursor.fetchall_streamed` result with one
-combined heartbeat/timeout budget across both the wait and the download, or
+result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront, or
 [`examples/azure_auth.py`](examples/azure_auth.py) for a caching
 `token_provider` built on Azure AD (`DefaultAzureCredential`).
+
+## FastAPI SSE example
+
+`stream_query_json` is the full-speed way to serve a query over HTTP: the first row reaches the client after roughly one chunk's fetch/decode time, not the whole query's -- the Rust core is fetching, decoding, and reordering chunks concurrently the entire time, and the `HEARTBEAT`s keep the connection alive through a slow cold warehouse start instead of the client just seeing dead air:
+
+```python
+import os
+from collections.abc import AsyncIterator
+
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+from arrowbricks import HEARTBEAT, DatabricksClient, stream_query_json
+
+app = FastAPI()
+client = DatabricksClient(
+    host=os.environ["DATABRICKS_HOST"],
+    warehouse_id=os.environ["DATABRICKS_WAREHOUSE_ID"],
+    token=os.environ["DATABRICKS_TOKEN"],
+)
+
+
+async def _sse(sql: str) -> AsyncIterator[str]:
+    async for item in stream_query_json(client, sql, total_timeout_s=300):
+        if item is HEARTBEAT:
+            yield ": keep-alive\n\n"  # SSE comment line -- clients ignore it, it just keeps the connection open
+        else:
+            yield f"data: {item}\n\n"
+
+
+@app.get("/query")
+async def query(sql: str) -> StreamingResponse:
+    return StreamingResponse(_sse(sql), media_type="text/event-stream")
+```
+
+```bash
+uvicorn app:app --reload
+curl -N "http://localhost:8000/query?sql=SELECT+*+FROM+range(1000000)"
+```
+
+This example takes `sql` straight from the request for brevity -- arrowbricks does no SQL validation by design, so a real deployment must validate/allowlist it (or accept fixed query names + params) before exposing a route like this publicly. See [`examples/fastapi_sse.py`](examples/fastapi_sse.py) for the runnable version, or [`examples/fastapi_sse_pivot.py`](examples/fastapi_sse_pivot.py) for the same over a buffered `Cursor.fetchall_streamed` result with one combined heartbeat/timeout budget across both the wait and the download.
 
 ## Auth
 
@@ -117,6 +155,34 @@ async for row in cursor:  # or: rows = await cursor.fetchall()
 ```
 
 Calling a row-tuple method without `arro3-core` installed raises a `ModuleNotFoundError` naming the exact install command, rather than failing silently or with a confusing traceback.
+
+## Using with DuckDB
+
+Anything arrowbricks hands back as Arrow (`fetchall_arrow`/`fetchmany_arrow`, `ReplayableArrowChunk`) implements `__arrow_c_stream__`, so DuckDB can register and query it directly -- zero-copy, no intermediate materialization, and no `arro3-core`/`pyarrow` install needed on top:
+
+```python
+import duckdb
+from arrowbricks import connect
+
+conn = connect(host=..., warehouse_id=..., token=...)
+cursor = conn.cursor()
+await cursor.execute("SELECT * FROM my_catalog.my_schema.my_table LIMIT 100")
+table = await cursor.fetchall_arrow()
+
+con = duckdb.connect()
+con.register("my_table", table)
+con.sql("SELECT count(*) FROM my_table").show()
+```
+
+`ReplayableArrowChunk` works the same way for Arrow-IPC bytes you fetched and stored earlier (e.g. `client.execute_arrow_statement(...)`'s raw chunk bytes, cached in Redis/a file/wherever) -- DuckDB's registration path calls `__arrow_c_stream__` twice (a schema peek, then the actual scan), which is exactly what `ReplayableArrowChunk` exists to support:
+
+```python
+from arrowbricks import ReplayableArrowChunk
+
+chunk = ReplayableArrowChunk(stored_bytes, chunk_index=0)
+con.register("my_table", chunk)
+con.sql("SELECT * FROM my_table WHERE id = 42").show()
+```
 
 ## Rust core
 

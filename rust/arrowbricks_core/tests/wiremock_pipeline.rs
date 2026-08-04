@@ -94,6 +94,46 @@ async fn install_mock_warehouse(server: &MockServer, n_chunks: i64, rows_per_chu
 }
 
 #[tokio::test]
+async fn execute_statement_requests_lz4_frame_compression() {
+    let server = MockServer::start().await;
+    let captured_body: Arc<std::sync::Mutex<Option<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(None));
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let captured_for_responder = captured_body.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            *captured_for_responder.lock().unwrap() = Some(req.body.clone());
+            ResponseTemplate::new(200).set_body_json(json!({
+                "statement_id": STATEMENT_ID,
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": []},
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    let body = captured_body
+        .lock()
+        .unwrap()
+        .take()
+        .expect("statement submission never captured");
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["result_compression"], "LZ4_FRAME",
+        "expected the submitted statement to request LZ4_FRAME cloud-fetch compression, got: {parsed}"
+    );
+}
+
+#[tokio::test]
 async fn full_pipeline_happy_path() {
     let server = MockServer::start().await;
     install_mock_warehouse(&server, 3, 5, false).await;
@@ -288,6 +328,82 @@ async fn json_pipeline_survives_reverse_arrival() {
         (0..20).collect::<Vec<_>>(),
         "row order must survive out-of-order chunk arrival for JSON too"
     );
+}
+
+fn compress_lz4_frame(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// Same shape as `install_mock_warehouse`, but the manifest echoes back
+/// `result_compression: "LZ4_FRAME"` (confirming the server honored our
+/// request, see `execute_statement`) and each chunk's bytes are actually
+/// LZ4-frame-compressed on the wire, exactly as a real Databricks warehouse
+/// would send them with cloud-fetch compression enabled -- proves
+/// `decompress_lz4_frame` in client.rs round-trips real data, not just that
+/// the plumbing compiles.
+async fn install_mock_warehouse_compressed(server: &MockServer, n_chunks: i64, rows_per_chunk: i64) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(server)
+        .await;
+
+    let chunks: Vec<_> = (0..n_chunks)
+        .map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk}))
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": chunks,
+                "result_compression": "LZ4_FRAME",
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+        })))
+        .mount(server)
+        .await;
+
+    for i in 0..n_chunks {
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "external_links": [{"external_link": format!("{uri}/_data/chunk-{i}")}]
+            })))
+            .mount(server)
+            .await;
+
+        let bytes = build_chunk_bytes(i * rows_per_chunk, (i + 1) * rows_per_chunk);
+        let compressed = compress_lz4_frame(&bytes);
+        Mock::given(method("GET"))
+            .and(path_regex(format!(r"^/_data/chunk-{i}$")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(compressed, "application/octet-stream"))
+            .mount(server)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn compressed_pipeline_decompresses_lz4_frame_chunks() {
+    let server = MockServer::start().await;
+    install_mock_warehouse_compressed(&server, 3, 5).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    assert_eq!(summary.num_chunks, 3);
+    assert_eq!(summary.num_rows(), 15);
+    assert_ids_in_order(&summary.batches, 15);
 }
 
 /// Concatenates every batch's `id` column and checks it runs 0..n_rows in

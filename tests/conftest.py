@@ -5,7 +5,12 @@ delegates its actual network I/O to it -- so this is a real socket instead.
 
 arro3 here is a test-only dependency (building synthetic Arrow-IPC chunk
 bytes) -- the package itself has none; see rust/arrowbricks_core's own
-Arrow/NDJSON encoding.
+Arrow/NDJSON encoding. The import is deliberately lazy (inside
+`build_chunk_bytes`, not at module level) so this file stays importable with
+arro3 absent -- `tests/arro3_free/` nests under this directory and would
+otherwise fail collection entirely just from pytest loading this conftest.py
+on the way down, regardless of whether any of its own tests actually call
+`build_chunk_bytes`.
 """
 
 from __future__ import annotations
@@ -19,8 +24,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import arro3.core as core
-import arro3.io as aio
 import pytest
 
 WAREHOUSE_ID = "wh-test-123"
@@ -30,6 +33,9 @@ def build_chunk_bytes(lo: int, hi: int) -> bytes:
     """Synthesizes one chunk's Arrow-IPC bytes via arro3 directly -- an id
     column running lo..hi-1 plus a label column -- so tests exercise the real
     Arrow IPC round trip without a live Databricks connection."""
+    import arro3.core as core
+    import arro3.io as aio
+
     ids = list(range(lo, hi))
     id_col = core.Array(ids, type=core.DataType.int64())
     label_col = core.Array([f"row_{i}" for i in ids], type=core.DataType.string())

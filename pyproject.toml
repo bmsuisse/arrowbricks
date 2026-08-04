@@ -63,10 +63,12 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# Bare `pytest`/`pytest -q` (no explicit path) stays scoped to the Cursor-
-# level suite -- rust/arrowbricks_core/tests_py (the compiled extension's own
-# PyO3-level tests) is invoked explicitly by path where it's needed (CI's
-# build job, or by hand), not auto-discovered every run.
+# Bare `pytest`/`pytest -q` (no explicit path) covers tests/ -- including
+# tests/arro3_free (nested here on purpose; see its own conftest.py for why
+# that doesn't pull arro3 into its collection) -- but NOT
+# rust/arrowbricks_core/tests_py (the compiled extension's own PyO3-level
+# tests), which needs the extension built via maturin first and is invoked
+# explicitly by path where that's already true (CI's build job, or by hand).
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -79,3 +81,4 @@ select = ["E", "F", "I", "UP", "S", "B"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S106"]
 "rust/arrowbricks_core/tests_py/*" = ["S101", "S106"]
+"tests/arro3_free/*" = ["S101", "S106"]

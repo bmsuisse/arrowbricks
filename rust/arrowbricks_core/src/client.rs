@@ -70,6 +70,12 @@ struct ManifestBody {
     chunks: Vec<ChunkMetaRaw>,
     #[serde(default)]
     schema: Option<ManifestSchemaBody>,
+    /// Echoes back whether the server actually honored our
+    /// `result_compression: "LZ4_FRAME"` request (see `execute_statement`) --
+    /// decompression is driven by this, not by what we asked for, in case a
+    /// disposition/format combination ever doesn't honor it.
+    #[serde(default)]
+    result_compression: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -187,6 +193,9 @@ pub struct StatementSubmitResult {
     pub statement_id: String,
     pub chunk_metas: Vec<ChunkMeta>,
     pub columns: Vec<ColumnDescription>,
+    /// Whether the server confirmed `LZ4_FRAME` cloud-fetch compression is in
+    /// effect for this statement's chunks -- see `ManifestBody::result_compression`.
+    pub compressed: bool,
 }
 
 #[derive(Debug)]
@@ -198,6 +207,23 @@ pub struct ChunkItem {
     pub blob: Bytes,
     pub row_count: Option<i64>,
     pub chunk_index: i64,
+}
+
+/// Unwraps one downloaded chunk file's outer LZ4 Frame compression --
+/// server-side, this is a whole-file wrapper applied because we asked for
+/// `result_compression: "LZ4_FRAME"`, not Arrow-IPC's own (unrelated,
+/// per-buffer) compression option. `reqwest::Response::bytes()` already
+/// collected the full body reliably before this runs, so a decode failure
+/// here means a genuine format problem, not a network blip -- treated as
+/// permanent (not retried), same reasoning as `ApiError::from_reqwest`.
+fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
+    use std::io::Read;
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
+    Ok(Bytes::from(out))
 }
 
 async fn retry_call<F, Fut, T>(mut f: F) -> Result<T, ApiError>
@@ -349,8 +375,12 @@ impl DbClient {
     }
 
     /// Unauthenticated -- external links are presigned blob-storage URLs,
-    /// same as `_fetch_link_bytes` in the Python client.
-    async fn fetch_link_bytes(&self, url: &str) -> Result<Bytes, ApiError> {
+    /// same as `_fetch_link_bytes` in the Python client. `compressed` decodes
+    /// the server's LZ4 Frame wrapper (see `execute_statement`'s
+    /// `result_compression` request) before handing bytes onward -- the
+    /// downloaded file is smaller over the wire, but its content is opaque
+    /// (Arrow-IPC or JSON, depending on `format`) until unwrapped here.
+    async fn fetch_link_bytes(&self, url: &str, compressed: bool) -> Result<Bytes, ApiError> {
         retry_call(|| async {
             let resp = self
                 .http
@@ -364,7 +394,11 @@ impl DbClient {
                 let text = resp.text().await.unwrap_or_default();
                 return Err(ApiError::from_status(status, &text));
             }
-            resp.bytes().await.map_err(ApiError::from_reqwest)
+            let bytes = resp.bytes().await.map_err(ApiError::from_reqwest)?;
+            if !compressed {
+                return Ok(bytes);
+            }
+            decompress_lz4_frame(&bytes)
         })
         .await
     }
@@ -454,6 +488,12 @@ impl DbClient {
             "format": format,
             "wait_timeout": self.wait_timeout,
             "on_wait_timeout": "CONTINUE",
+            // Matches databricks-sql-python's default
+            // (enable_query_result_lz4_compression=True) -- trades a cheap
+            // client-side LZ4 decompress for meaningfully less data over the
+            // wire, which is the actual bottleneck for a large result (local
+            // Arrow-IPC decode is already fast; network transfer isn't).
+            "result_compression": "LZ4_FRAME",
         });
         if let Some(c) = catalog {
             body["catalog"] = json!(c);
@@ -495,6 +535,7 @@ impl DbClient {
         }
 
         let manifest = data.manifest.unwrap_or_default();
+        let compressed = manifest.result_compression.as_deref() == Some("LZ4_FRAME");
         let chunk_metas = manifest
             .chunks
             .into_iter()
@@ -508,10 +549,16 @@ impl DbClient {
             statement_id: data.statement_id,
             chunk_metas,
             columns,
+            compressed,
         })
     }
 
-    async fn fetch_chunk_index(&self, statement_id: &str, chunk_index: i64) -> Result<Vec<Bytes>, ApiError> {
+    async fn fetch_chunk_index(
+        &self,
+        statement_id: &str,
+        chunk_index: i64,
+        compressed: bool,
+    ) -> Result<Vec<Bytes>, ApiError> {
         let url = format!(
             "{}/api/2.0/sql/statements/{}/result/chunks/{}",
             self.host, statement_id, chunk_index
@@ -520,7 +567,7 @@ impl DbClient {
 
         let mut blobs = Vec::with_capacity(data.external_links.len());
         for link in data.external_links {
-            blobs.push(self.fetch_link_bytes(&link.external_link).await?);
+            blobs.push(self.fetch_link_bytes(&link.external_link, compressed).await?);
         }
         Ok(blobs)
     }
@@ -539,6 +586,7 @@ impl DbClient {
         self: std::sync::Arc<Self>,
         statement_id: String,
         chunk_metas: Vec<ChunkMeta>,
+        compressed: bool,
     ) -> mpsc::Receiver<Result<ChunkItem, ApiError>> {
         let concurrency = self.chunk_fetch_concurrency.max(1);
         let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
@@ -555,7 +603,10 @@ impl DbClient {
                     loop {
                         let meta = { queue.lock().unwrap().pop_front() };
                         let Some(meta) = meta else { return Ok(()) };
-                        match client.fetch_chunk_index(&statement_id, meta.chunk_index).await {
+                        match client
+                            .fetch_chunk_index(&statement_id, meta.chunk_index, compressed)
+                            .await
+                        {
                             Ok(blobs) => {
                                 for blob in blobs {
                                     let item = ChunkItem {

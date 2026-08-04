@@ -226,7 +226,11 @@ pub async fn execute_lazy(
         .execute_arrow_statement(statement, catalog, schema, parameters)
         .await?;
     let num_chunks = submitted.chunk_metas.len();
-    let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
+    let rx = client.fetch_chunks_with_backpressure(
+        submitted.statement_id.clone(),
+        submitted.chunk_metas,
+        submitted.compressed,
+    );
     Ok(ResultStream {
         statement_id: submitted.statement_id,
         num_chunks,
@@ -265,9 +269,11 @@ pub async fn run_pipeline(
         .await?;
     let num_chunks = submitted.chunk_metas.len();
 
-    let rx = client
-        .clone()
-        .fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
+    let rx = client.clone().fetch_chunks_with_backpressure(
+        submitted.statement_id.clone(),
+        submitted.chunk_metas,
+        submitted.compressed,
+    );
     let mut reorder = ReorderBuffer::new(rx);
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
@@ -375,7 +381,11 @@ pub async fn execute_ndjson_stream(
         .execute_arrow_statement(statement, catalog, schema, parameters)
         .await?;
     let num_chunks = submitted.chunk_metas.len();
-    let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
+    let rx = client.fetch_chunks_with_backpressure(
+        submitted.statement_id.clone(),
+        submitted.chunk_metas,
+        submitted.compressed,
+    );
     Ok(NdjsonStream {
         statement_id: submitted.statement_id,
         num_chunks,
@@ -418,9 +428,11 @@ pub async fn run_json_pipeline(
         .await?;
     let num_chunks = submitted.chunk_metas.len();
 
-    let rx = client
-        .clone()
-        .fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
+    let rx = client.clone().fetch_chunks_with_backpressure(
+        submitted.statement_id.clone(),
+        submitted.chunk_metas,
+        submitted.compressed,
+    );
     let mut reorder = ReorderBuffer::new(rx);
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
