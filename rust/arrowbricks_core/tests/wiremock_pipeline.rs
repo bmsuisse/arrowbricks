@@ -370,11 +370,23 @@ async fn json_pipeline_survives_reverse_arrival() {
     );
 }
 
-fn compress_lz4_frame(data: &[u8]) -> Vec<u8> {
+/// Splits `data` into `frame_size`-byte pieces and LZ4-frame-compresses each
+/// independently, concatenating the results -- matches what a real
+/// Databricks warehouse actually sends (confirmed against a live workspace:
+/// a single chunk's compressed bytes were 18 separate concatenated frames,
+/// not one frame wrapping the whole payload). A small `frame_size` here
+/// exercises the same multi-frame path through the real fetch_link_bytes
+/// (not just the isolated client.rs unit test), which the single-frame
+/// version of this helper never did.
+fn compress_lz4_frame_multi(data: &[u8], frame_size: usize) -> Vec<u8> {
     use std::io::Write;
-    let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
-    encoder.write_all(data).unwrap();
-    encoder.finish().unwrap()
+    let mut out = Vec::new();
+    for piece in data.chunks(frame_size.max(1)) {
+        let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+        encoder.write_all(piece).unwrap();
+        out.extend(encoder.finish().unwrap());
+    }
+    out
 }
 
 /// Same shape as `install_mock_warehouse`, but the manifest echoes back
@@ -424,7 +436,10 @@ async fn install_mock_warehouse_compressed(server: &MockServer, n_chunks: i64, r
             .await;
 
         let bytes = build_chunk_bytes(i * rows_per_chunk, (i + 1) * rows_per_chunk);
-        let compressed = compress_lz4_frame(&bytes);
+        // Deliberately tiny -- forces several frames out of a small test
+        // payload, exercising the same multi-frame path a real (much
+        // larger) chunk takes.
+        let compressed = compress_lz4_frame_multi(&bytes, 64);
         Mock::given(method("GET"))
             .and(path_regex(format!(r"^/_data/chunk-{i}$")))
             .respond_with(ResponseTemplate::new(200).set_body_raw(compressed, "application/octet-stream"))

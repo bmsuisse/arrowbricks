@@ -225,19 +225,27 @@ pub struct ChunkItem {
 /// message, no data) instead of the full stream, which `pipeline.rs` then
 /// decoded as a zero-row/zero-column result with no error at all -- this bug
 /// shipped from a design that was only ever verified against synthetic
-/// single-frame test data. Looping via `into_inner()` (which hands back
-/// whatever of the input slice the just-finished frame didn't consume) reads
-/// every concatenated frame in turn.
+/// single-frame test data. One `FrameDecoder` resets its own frame state
+/// after each `EndMark` and picks up the next concatenated frame on a
+/// subsequent `read_to_end` call against the *same* instance (verified: the
+/// decoder's position in the underlying byte slice carries over across
+/// calls) -- so looping `read_to_end` on one decoder until it stops growing
+/// `out` reads every frame without reconstructing a decoder per frame.
 fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
     use std::io::Read;
-    let mut out = Vec::new();
-    let mut remaining: &[u8] = &compressed[..];
-    while !remaining.is_empty() {
-        let mut decoder = lz4_flex::frame::FrameDecoder::new(remaining);
+    // Decompressed size is always >= compressed size for real chunk data, so
+    // this is a real (if approximate) lower bound, not a guess -- avoids
+    // repeated doubling-and-copy growth across frames.
+    let mut out = Vec::with_capacity(compressed.len());
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
+    loop {
+        let before = out.len();
         decoder
             .read_to_end(&mut out)
             .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
-        remaining = decoder.into_inner();
+        if out.len() == before {
+            break;
+        }
     }
     Ok(Bytes::from(out))
 }
@@ -417,6 +425,12 @@ impl DbClient {
     /// `result_compression` request) before handing bytes onward -- the
     /// downloaded file is smaller over the wire, but its content is opaque
     /// (Arrow-IPC or JSON, depending on `format`) until unwrapped here.
+    /// Decompression runs on `spawn_blocking`, same reasoning as
+    /// `pipeline.rs`'s Arrow-IPC decode: it's real CPU work (multiple LZ4
+    /// frames per chunk, see `decompress_lz4_frame`), and running it inline
+    /// would block this task's tokio worker thread from polling anything
+    /// else scheduled on it -- other concurrent chunk fetches, heartbeat
+    /// timers -- for however long that takes.
     async fn fetch_link_bytes(&self, url: &str, compressed: bool) -> Result<Bytes, ApiError> {
         retry_call(|| async {
             let resp = self
@@ -435,7 +449,9 @@ impl DbClient {
             if !compressed {
                 return Ok(bytes);
             }
-            decompress_lz4_frame(&bytes)
+            tokio::task::spawn_blocking(move || decompress_lz4_frame(&bytes))
+                .await
+                .map_err(join_error)?
         })
         .await
     }
