@@ -125,6 +125,30 @@ impl<T: Send + 'static> HeartbeatWait<T> {
     }
 }
 
+impl<T> Drop for HeartbeatWait<T> {
+    /// Best-effort: if this is dropped with a task still in flight for any
+    /// reason *other* than `tick()`'s own `total_timeout_s` path (which
+    /// already awaits the abort before returning -- see its comment) --
+    /// Python-side cancellation (`asyncio.wait_for`, `task.cancel()`) being
+    /// the real one, found the same way as that fix, by testing against a
+    /// live warehouse -- at least *requests* cancellation immediately.
+    /// `JoinHandle::drop` alone does not abort the task: tokio explicitly
+    /// leaves a dropped-but-unaborted task running fully detached to
+    /// completion, so without this, an early drop for any reason would leave
+    /// the task running with nothing left to observe or join it, at all,
+    /// ever. `Drop::drop` can't `.await`, so this can't guarantee the task
+    /// has actually finished by the time this returns -- only `tick()`'s own
+    /// timeout path gives that stronger guarantee -- it only shrinks how
+    /// long an orphaned task keeps running (and how long it can panic
+    /// touching Python state after the interpreter starts finalizing)
+    /// afterward.
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Future factory for `HeartbeatStream::tick` -- produces the future that
 /// pulls the next item, boxed so it can be spawned onto the shared runtime.
 type NextItemFuture<T> = Pin<Box<dyn Future<Output = Result<Option<T>, ApiError>> + Send>>;
@@ -206,6 +230,18 @@ impl<T: Send + 'static> HeartbeatStream<T> {
                 }
             }
             _ = tokio::time::sleep(wait_for) => Ok(Some(Tick::Heartbeat)),
+        }
+    }
+}
+
+impl<T> Drop for HeartbeatStream<T> {
+    /// See `HeartbeatWait`'s identical `Drop` impl -- same reasoning, same
+    /// limitation (best-effort request, not a guaranteed-finished join),
+    /// same real motivating case (Python-side cancellation of the chunk
+    /// download phase, not just `tick()`'s own timeout path).
+    fn drop(&mut self) {
+        if let Some(handle) = self.current.take() {
+            handle.abort();
         }
     }
 }
@@ -326,6 +362,55 @@ mod tests {
             dropped.load(std::sync::atomic::Ordering::SeqCst),
             "the aborted task's future must already be dropped by the time tick() returns the timeout error"
         );
+    }
+
+    /// Regression test for a *second*, more general real panic found the
+    /// same way: dropping a `HeartbeatWait` for a reason other than its own
+    /// `total_timeout_s` firing -- Python-side cancellation
+    /// (`asyncio.wait_for`, `task.cancel()`) being the real one -- never
+    /// went through `tick()`'s timeout branch at all, so nothing ever called
+    /// `.abort()`; `JoinHandle::drop` alone does not abort a task, so the
+    /// spawned task ran on fully detached, forever, with nothing left to
+    /// observe or join it. Reproduced against a live warehouse: intermittent
+    /// (1 run in 3), same "Python interpreter is not initialized" panic as
+    /// the `tick()` case, just on a longer, unbounded fuse instead of a
+    /// short one. `Drop for HeartbeatWait` fixes the "never even requested"
+    /// half of that (it can't fix "immediately joined", since `Drop::drop`
+    /// can't `.await`) -- this only proves cancellation is requested
+    /// (`JoinHandle::is_finished()` eventually becomes true), not that it
+    /// happens synchronously within `drop()` itself.
+    #[tokio::test]
+    async fn dropping_heartbeat_wait_directly_requests_cancellation() {
+        let mut wait: HeartbeatWait<()> = HeartbeatWait::with_interval(
+            async {
+                tokio::time::sleep(Duration::from_secs(120)).await;
+                Ok(())
+            },
+            None, // no total_timeout_s at all -- this drop is not going through tick()'s timeout branch
+            TEST_INTERVAL,
+        );
+        // One tick to prove the task is genuinely running first (not
+        // already finished for some unrelated reason).
+        assert!(matches!(wait.tick().await.unwrap(), Some(Tick::Heartbeat)));
+        assert!(
+            !wait.handle.as_ref().unwrap().is_finished(),
+            "the 120s sleep must not have finished on its own yet"
+        );
+        let abort_handle = wait.handle.as_ref().unwrap().abort_handle();
+
+        drop(wait);
+        // Abort is requested synchronously in Drop, but the task only
+        // actually finishes at its next await point -- give the runtime a
+        // moment to schedule that, matching the "best-effort, not
+        // immediate" contract this Drop impl actually provides (unlike
+        // tick()'s own timeout path, which awaits the join directly).
+        for _ in 0..20 {
+            if abort_handle.is_finished() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("dropping HeartbeatWait must still abort its spawned task, even outside tick()'s own timeout path");
     }
 
     #[tokio::test]
