@@ -290,37 +290,68 @@ pub async fn run_pipeline(
     })
 }
 
+/// Converts one chunk's decoded batches into NDJSON lines, one per row, in
+/// arro3-`write_ndjson(explicit_nulls=True)`-compatible format: null-valued
+/// keys stay present as JSON `null` rather than being omitted, and a
+/// UTC-aware timestamp column renders as full ISO-8601 with a trailing `Z`
+/// (arrow-json's own default -- no custom format string needed, verified
+/// against arrow-json's own `write_timestamps_with_tz` test producing
+/// `"2018-11-13T17:11:10Z"`-shaped output, same as arro3).
+fn encode_ndjson_lines(batches: &[RecordBatch]) -> Result<Vec<String>, ApiError> {
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut buf = Vec::new();
+    {
+        let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
+        let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut buf);
+        let refs: Vec<&RecordBatch> = batches.iter().collect();
+        writer.write_batches(&refs).map_err(|e| ApiError {
+            message: format!("NDJSON encode error: {e}"),
+            transient: false,
+        })?;
+        writer.finish().map_err(|e| ApiError {
+            message: format!("NDJSON encode error: {e}"),
+            transient: false,
+        })?;
+    }
+    String::from_utf8(buf)
+        .map_err(|e| ApiError {
+            message: format!("NDJSON encode produced invalid UTF-8: {e}"),
+            transient: false,
+        })?
+        .lines()
+        .map(|line| Ok(line.to_string()))
+        .collect()
+}
+
 /// Chunk-granularity (not row-count-granularity) counterpart to
-/// `ResultStream`: pulls and decodes exactly one reordered chunk per
-/// `next_chunk()` call rather than buffering ahead to satisfy a row count.
-/// Backs `stream_query_json`'s Rust side -- Python still owns turning each
-/// chunk's Arrow batches into NDJSON text via arro3 (`write_ndjson`), same as
-/// today; this only replaces the submit/poll/fetch/reorder/decode beneath
-/// it.
-pub struct ChunkStream {
+/// `ResultStream`: pulls, decodes, and NDJSON-encodes exactly one reordered
+/// chunk per `next_chunk()` call rather than buffering ahead to satisfy a
+/// row count. Backs `stream_query_json` end to end -- unlike the Arrow-Table
+/// pipelines above, there's no further Python-side conversion step.
+pub struct NdjsonStream {
     pub statement_id: String,
     pub num_chunks: usize,
-    pub schema: Option<SchemaRef>,
     reorder: ReorderBuffer,
 }
 
-impl ChunkStream {
-    /// Pulls the next chunk in logical (chunk_index) order and decodes it on
-    /// a blocking thread -- `None` once the source is exhausted. One network
-    /// chunk in, one `Vec<RecordBatch>` out (usually a single batch),
-    /// matching `fetch_arrow_chunks_for_statement`'s per-chunk yield.
-    pub async fn next_chunk(&mut self) -> Result<Option<Vec<RecordBatch>>, ApiError> {
+impl NdjsonStream {
+    /// Pulls the next chunk in logical (chunk_index) order, decodes it, and
+    /// NDJSON-encodes it (all on a blocking thread, since both decode and
+    /// JSON encoding are CPU work) -- `None` once the source is exhausted.
+    /// One network chunk in, one line per row out, matching
+    /// `fetch_arrow_chunks_for_statement`'s old per-chunk yield.
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<String>>, ApiError> {
         match self.reorder.next().await? {
             Some(item) => {
-                let batches = tokio::task::spawn_blocking(move || decode_chunk(&item.blob))
-                    .await
-                    .map_err(join_error)??;
-                if self.schema.is_none() {
-                    if let Some(b) = batches.first() {
-                        self.schema = Some(b.schema());
-                    }
-                }
-                Ok(Some(batches))
+                let lines = tokio::task::spawn_blocking(move || {
+                    let batches = decode_chunk(&item.blob)?;
+                    encode_ndjson_lines(&batches)
+                })
+                .await
+                .map_err(join_error)??;
+                Ok(Some(lines))
             }
             None => Ok(None),
         }
@@ -333,22 +364,21 @@ impl ChunkStream {
 /// follow are) -- `stream_query_json` only wraps its chunk iterator, not
 /// this initial submit/poll wait, so this crate preserves that same gap
 /// rather than "fixing" it during the port.
-pub async fn execute_chunk_stream(
+pub async fn execute_ndjson_stream(
     client: Arc<DbClient>,
     statement: &str,
     catalog: Option<&str>,
     schema: Option<&str>,
     parameters: Option<Value>,
-) -> Result<ChunkStream, ApiError> {
+) -> Result<NdjsonStream, ApiError> {
     let submitted = client
         .execute_arrow_statement(statement, catalog, schema, parameters)
         .await?;
     let num_chunks = submitted.chunk_metas.len();
     let rx = client.fetch_chunks_with_backpressure(submitted.statement_id.clone(), submitted.chunk_metas);
-    Ok(ChunkStream {
+    Ok(NdjsonStream {
         statement_id: submitted.statement_id,
         num_chunks,
-        schema: None,
         reorder: ReorderBuffer::new(rx),
     })
 }

@@ -1,10 +1,11 @@
 """Query Databricks via the Rust core, then hand the result straight to
 DuckDB -- zero-copy, no intermediate row materialization. The Table
-arrowbricks_core returns implements the Arrow C Data Interface
+`arrowbricks._core` returns implements the Arrow C Data Interface
 (`__arrow_c_stream__`), the same protocol pyarrow/arro3 use, so DuckDB's own
-replacement scan can read it directly by variable name.
+replacement scan can read it directly by variable name. No extra dependency
+beyond `arrowbricks` itself.
 
-Requires `pip install duckdb` on top of arrowbricks_core.
+Requires `pip install duckdb` on top of arrowbricks.
 
     DATABRICKS_HOST=adb-1234567890.1.azuredatabricks.net \\
     DATABRICKS_WAREHOUSE_ID=abcd1234efgh5678 \\
@@ -15,12 +16,13 @@ Requires `pip install duckdb` on top of arrowbricks_core.
 import asyncio
 import os
 
-import arrowbricks_core
 import duckdb
+
+from arrowbricks import _core
 
 
 async def main() -> None:
-    client = arrowbricks_core.Client(
+    client = _core.Client(
         host=os.environ["DATABRICKS_HOST"],
         warehouse_id=os.environ["DATABRICKS_WAREHOUSE_ID"],
         token=os.environ["DATABRICKS_TOKEN"],

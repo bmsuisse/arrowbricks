@@ -1,7 +1,8 @@
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, BinaryIO
 
 def ping() -> str: ...
+def write_ipc_stream(stream: Any, buf: BinaryIO) -> None: ...  # stream: anything implementing __arrow_c_stream__
 
 class _Heartbeat:
     def __repr__(self) -> str: ...
@@ -18,6 +19,7 @@ class ResultSet:
     async def fetchmany_arrow(self, n: int) -> Any: ...  # Arrow table (__arrow_c_stream__)
     async def fetchall_arrow(self) -> Any: ...  # Arrow table (__arrow_c_stream__)
     def fetchall_arrow_streamed(self, total_timeout_s: float | None = None) -> FetchallArrowStreamedIter: ...
+    async def schema(self) -> list[tuple[str, str]] | None: ...  # real schema, known after >=1 fetch
 
 class ExecuteStreamedIter:
     def __aiter__(self) -> ExecuteStreamedIter: ...
@@ -27,9 +29,9 @@ class FetchallArrowStreamedIter:
     def __aiter__(self) -> FetchallArrowStreamedIter: ...
     async def __anext__(self) -> Any: ...  # Arrow table (__arrow_c_stream__) | _Heartbeat
 
-class ChunkStreamIter:
-    def __aiter__(self) -> ChunkStreamIter: ...
-    async def __anext__(self) -> Any: ...  # Arrow table (__arrow_c_stream__) | _Heartbeat
+class NdjsonStreamIter:
+    def __aiter__(self) -> NdjsonStreamIter: ...
+    async def __anext__(self) -> list[str] | _Heartbeat: ...  # NDJSON lines for one chunk
 
 class Client:
     def __init__(
@@ -75,11 +77,11 @@ class Client:
     ) -> list[list[Any]]: ...
     async def upload_volume_file(self, volume_path: str, data: bytes) -> None: ...
     async def delete_volume_file(self, volume_path: str) -> None: ...
-    def stream_chunks_arrow(
+    def stream_ndjson_lines(
         self,
         statement: str,
         catalog: str | None = None,
         schema: str | None = None,
         parameters: list[dict[str, Any]] | None = None,
         total_timeout_s: float | None = None,
-    ) -> ChunkStreamIter: ...
+    ) -> NdjsonStreamIter: ...

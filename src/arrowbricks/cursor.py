@@ -1,34 +1,30 @@
 """A Cursor/Connection surface shaped like databricks-sql-python's (execute,
 fetchone/fetchmany/fetchall, fetchall_arrow/fetchmany_arrow) -- familiar DB-API
-ergonomics on top of the Statement Execution API + arro3, for callers who want
-to pull rows/Arrow incrementally rather than get everything back at once.
+ergonomics on top of the Statement Execution API. The actual submit/poll/
+fetch/reorder/decode work is delegated to `arrowbricks_core` (Rust/PyO3) via
+`DatabricksClient._core_client` -- this module just adapts that result to the
+same public shape as before the cutover (`Cursor.fetchone`/`fetchmany`/
+`fetchall`, `Cursor.description`, etc.), so existing callers see no change.
 
 Unlike a real DB-API cursor, this is async throughout (`execute`, `fetchone`,
 etc. are all coroutines) since the underlying client is -- there's no
-synchronous escape hatch, matching every other function in this package.
-
-Chunks are fetched from Databricks lazily, only as fetchone/fetchmany/fetchall
-actually need more rows -- a `fetchmany(100)` loop over a 700k-row result
-never pulls more chunks than it's consumed. Chunks can arrive out of order
-over the network (see client.py); a `pending` buffer holds early arrivals
-until the next expected chunk_index shows up, same reasoning as
-_streaming.py's stream_query_json."""
+synchronous escape hatch, matching every other function in this package."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import arro3.core as core
-
-from ._streaming import (
-    HEARTBEAT,
-    ReplayableArrowChunk,
-    await_with_heartbeat,
-    fetch_arrow_chunks_with_manifest,
-    windowed_sql,
-)
+from ._streaming import HEARTBEAT, await_with_heartbeat, windowed_sql
 from .client import DatabricksClient
+
+if TYPE_CHECKING:
+    # Type-only: the objects returned by `._core` (this package's compiled
+    # Rust submodule) are already arro3-compatible Tables at runtime (no
+    # import needed for that) -- arro3-core is an *optional* runtime
+    # dependency (`pip install arrowbricks[arro3]`), needed only by
+    # `_table_to_rows` below, so this import must never execute.
+    import arro3.core as core
 
 __all__ = ["Connection", "Cursor", "connect"]
 
@@ -36,124 +32,18 @@ Row = tuple[Any, ...]
 Description = tuple[str, str | None, None, None, None, None, None]
 
 
-def _empty_table(schema: core.Schema | None) -> core.Table:
-    return core.Table.from_batches([], schema=schema) if schema is not None else core.Table.from_pydict({})
-
-
-def _description_from_manifest(manifest: dict[str, Any]) -> list[Description]:
-    columns = manifest.get("schema", {}).get("columns") or []
-    return [(c.get("name"), c.get("type_name"), None, None, None, None, None) for c in columns]
-
-
-class _ResultSet:
-    """Buffers already-fetched-but-not-yet-returned rows at the Arrow level
-    (an arro3 Table), so fetchall_arrow/fetchmany_arrow stay zero-copy and
-    fetchone/fetchmany/fetchall just materialize whatever slice they need.
-    Not part of the public API -- reached only via Cursor."""
-
-    def __init__(self, schema: core.Schema | None, chunk_aiter: AsyncIterator[ReplayableArrowChunk]) -> None:
-        self.schema = schema
-        self._chunk_aiter = chunk_aiter
-        # A list per index, not a single chunk -- a chunk_index can have more
-        # than one blob (DatabricksClient._fetch_chunk_index gathers over
-        # possibly-multiple `external_links` per chunk, "usually exactly one"
-        # but not guaranteed to be), and a dict keyed by index alone would
-        # silently overwrite/lose the first blob when a second one for the
-        # same index arrives.
-        self._pending: dict[int, list[ReplayableArrowChunk]] = {}
-        self._next_idx = 0
-        self._exhausted = False
-        self._buffer: core.Table | None = None
-        self.rownumber = 0
-
-    def _pop_pending(self, idx: int) -> ReplayableArrowChunk:
-        blobs = self._pending[idx]
-        chunk = blobs.pop(0)
-        if not blobs:
-            del self._pending[idx]
-        return chunk
-
-    async def _pull_one_chunk_table(self) -> core.Table | None:
-        """Returns one chunk's Table, preferring the next expected index --
-        checking `_pending` FIRST, since a single earlier call can have pulled
-        several chunks off `_chunk_aiter` before the one it actually needed
-        showed up (arrival order is completion order, not chunk_index order),
-        leaving the rest already-fetched-and-buffered here. Only touches the
-        network (`_chunk_aiter.__anext__()`) once `_pending` has nothing more
-        to give for the current index.
-
-        Once the source is exhausted, `_next_idx` reaching that exact value is
-        no longer required: if some index was skipped entirely (e.g. a chunk
-        whose bytes came back empty, see fetch_arrow_chunks_for_statement),
-        waiting for it forever would silently strand every higher-indexed
-        chunk already sitting in `_pending`. Draining the lowest remaining
-        index instead means a genuine gap costs row *order* past that point,
-        never lost rows."""
-        while True:
-            if self._next_idx in self._pending:
-                chunk = self._pop_pending(self._next_idx)
-                if self._next_idx not in self._pending:
-                    self._next_idx += 1
-                return chunk.to_table()
-            if self._exhausted:
-                if self._pending:
-                    return self._pop_pending(min(self._pending)).to_table()
-                return None
-            try:
-                chunk = await self._chunk_aiter.__anext__()
-            except StopAsyncIteration:
-                self._exhausted = True
-                continue
-            self._pending.setdefault(chunk.chunk_index, []).append(chunk)
-
-    async def _ensure_buffer(self, want: int) -> None:
-        while (self._buffer is None or self._buffer.num_rows < want) and not self._exhausted:
-            table = await self._pull_one_chunk_table()
-            if table is None:
-                break
-            if self.schema is None:
-                self.schema = table.schema
-            self._buffer = (
-                table
-                if self._buffer is None
-                else core.Table.from_batches(self._buffer.to_batches() + table.to_batches(), schema=self._buffer.schema)
-            )
-
-    async def fetchmany_arrow(self, size: int) -> core.Table:
-        await self._ensure_buffer(size)
-        if self._buffer is None or self._buffer.num_rows == 0:
-            return _empty_table(self.schema)
-        n = min(size, self._buffer.num_rows)
-        out = self._buffer.slice(0, n)
-        rest = self._buffer.slice(n)
-        self._buffer = rest if rest.num_rows else None
-        self.rownumber += n
-        return out
-
-    async def fetchall_arrow(self) -> core.Table:
-        while not self._exhausted:
-            await self._ensure_buffer((self._buffer.num_rows if self._buffer is not None else 0) + 1)
-        out = self._buffer if self._buffer is not None else _empty_table(self.schema)
-        self._buffer = None
-        self.rownumber += out.num_rows
-        return out
-
-    @staticmethod
-    def _table_to_rows(table: core.Table) -> list[Row]:
-        if table.num_rows == 0:
-            return []
+def _table_to_rows(table: Any) -> list[Row]:
+    if table.num_rows == 0:
+        return []
+    try:
         columns = [table.column(i).combine_chunks().to_pylist() for i in range(table.num_columns)]
-        return list(zip(*columns, strict=True))
-
-    async def fetchone(self) -> Row | None:
-        rows = self._table_to_rows(await self.fetchmany_arrow(1))
-        return rows[0] if rows else None
-
-    async def fetchmany(self, size: int) -> list[Row]:
-        return self._table_to_rows(await self.fetchmany_arrow(size))
-
-    async def fetchall(self) -> list[Row]:
-        return self._table_to_rows(await self.fetchall_arrow())
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "fetchone/fetchmany/fetchall need arro3-core installed -- "
+            "`pip install arrowbricks[arro3]`, or use fetchall_arrow/fetchmany_arrow instead, "
+            "which don't need it"
+        ) from exc
+    return list(zip(*columns, strict=True))
 
 
 class Cursor:
@@ -164,18 +54,21 @@ class Cursor:
 
     def __init__(self, client: DatabricksClient) -> None:
         self._client = client
-        self._result: _ResultSet | None = None
+        self._result: Any = None  # arrowbricks_core.ResultSet once execute() has run
         self._manifest_description: list[Description] | None = None
+        # Prefers the *actual* Arrow schema off the first fetched chunk once
+        # one has been pulled -- the manifest's own columns (used for
+        # `_manifest_description` above) is only a pre-fetch estimate.
+        # (name, type_name) pairs from `._core.ResultSet.schema()` -- not a
+        # `core.Table`'s own `.schema` property, which specifically requires
+        # a real arro3 install to construct its return value (see
+        # cursor.py's `fetchmany_arrow`/`fetchall_arrow`).
+        self._schema: list[tuple[str, str]] | None = None
 
     @property
     def description(self) -> list[Description] | None:
-        """Prefers the *actual* Arrow schema off the first fetched chunk
-        (`_result.schema`) once one has been pulled -- the manifest's own
-        `schema.columns` (if Databricks included it; not every manifest does)
-        is only a pre-fetch estimate, used as a fallback so `description` is
-        still available immediately after `execute()`, before any fetch."""
-        if self._result is not None and self._result.schema is not None:
-            return [(f.name, str(f.type), None, None, None, None, None) for f in self._result.schema]
+        if self._schema is not None:
+            return [(name, type_name, None, None, None, None, None) for name, type_name in self._schema]
         return self._manifest_description
 
     def execute_streamed(
@@ -196,16 +89,17 @@ class Cursor:
         sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
 
         async def _gen() -> AsyncIterator[Any]:
-            fetch = fetch_arrow_chunks_with_manifest(
-                self._client, sql, catalog=catalog, schema=schema, parameters=parameters
-            )
-            async for item in await_with_heartbeat(fetch, total_timeout_s=total_timeout_s):
+            core_client = self._client._core_client  # noqa: SLF001 -- same package, see client.py
+            submit = core_client.execute(sql, catalog=catalog, schema=schema, parameters=parameters)
+            async for item in await_with_heartbeat(submit, total_timeout_s=total_timeout_s):
                 if item is HEARTBEAT:
                     yield HEARTBEAT
                     continue
-                _statement_id, manifest, chunk_iter = item
-                self._manifest_description = _description_from_manifest(manifest)
-                self._result = _ResultSet(schema=None, chunk_aiter=chunk_iter.__aiter__())
+                self._result = item
+                self._schema = None
+                self._manifest_description = [
+                    (name, type_name, None, None, None, None, None) for name, type_name in item.columns
+                ]
                 yield self
 
         return _gen()
@@ -238,25 +132,34 @@ class Cursor:
             pass
         return self
 
-    def _require_result(self) -> _ResultSet:
+    def _require_result(self) -> Any:
         if self._result is None:
             raise RuntimeError("no active result set -- call execute() first")
         return self._result
 
     async def fetchone(self) -> Row | None:
-        return await self._require_result().fetchone()
+        rows = _table_to_rows(await self.fetchmany_arrow(1))
+        return rows[0] if rows else None
 
     async def fetchmany(self, size: int) -> list[Row]:
-        return await self._require_result().fetchmany(size)
+        return _table_to_rows(await self.fetchmany_arrow(size))
 
     async def fetchall(self) -> list[Row]:
-        return await self._require_result().fetchall()
+        return _table_to_rows(await self.fetchall_arrow())
 
     async def fetchmany_arrow(self, size: int) -> core.Table:
-        return await self._require_result().fetchmany_arrow(size)
+        result = self._require_result()
+        table = await result.fetchmany_arrow(size)
+        if self._schema is None:
+            self._schema = await result.schema()
+        return table
 
     async def fetchall_arrow(self) -> core.Table:
-        return await self._require_result().fetchall_arrow()
+        result = self._require_result()
+        table = await result.fetchall_arrow()
+        if self._schema is None:
+            self._schema = await result.schema()
+        return table
 
     def fetchall_streamed(self, *, total_timeout_s: float | None = None) -> AsyncIterator[Any]:
         """Like fetchall(), but yields HEARTBEAT while pulling chunks instead

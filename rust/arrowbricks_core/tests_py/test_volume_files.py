@@ -5,8 +5,9 @@ just proves the actual PyO3-exposed async methods work end to end."""
 import http.server
 import threading
 
-import arrowbricks_core
 import pytest
+
+from arrowbricks import _core as arrowbricks_core
 
 WAREHOUSE_ID = "wh-test-123"
 

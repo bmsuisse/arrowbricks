@@ -148,6 +148,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-json"
+version = "59.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fe05e916ddc50f4c7a363cd69c0ef5894fcee063517e9a0b8582f0c56746af6"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-ord",
+ "arrow-schema",
+ "arrow-select",
+ "chrono",
+ "half",
+ "indexmap",
+ "itoa",
+ "lexical-core",
+ "memchr",
+ "num-traits",
+ "ryu",
+ "serde_core",
+ "serde_json",
+ "simdutf8",
+]
+
+[[package]]
 name = "arrow-ord"
 version = "59.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -218,6 +243,7 @@ name = "arrowbricks_core"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "arrow-json",
  "bytes",
  "pyo3",
  "pyo3-arrow",

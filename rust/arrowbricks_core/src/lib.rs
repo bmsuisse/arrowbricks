@@ -9,17 +9,52 @@ use arrow::record_batch::RecordBatch;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
+use pyo3::types::PyBytes;
 use pyo3_arrow::PyTable;
+use pyo3_arrow::input::AnyRecordBatch;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
 use client::{ApiError, DbClient, TokenFuture, TokenProvider};
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
-use pipeline::{ChunkStream, ResultStream};
+use pipeline::{NdjsonStream, ResultStream};
 
 #[pyfunction]
 fn ping() -> &'static str {
     "pong"
+}
+
+/// Writes any object implementing `__arrow_c_stream__` (a `Table`/
+/// `RecordBatchReader` from this crate, arro3, pyarrow, or anything else
+/// Arrow-C-Data-Interface-compatible) as Arrow-IPC stream bytes to `buf` (a
+/// Python file-like object with a `.write(bytes)` method) -- always
+/// uncompressed. arro3's own default (`compression="LZ4"`) is transparently
+/// decompressed by some Arrow readers (e.g. DuckDB's) but not all --
+/// `duckdb-wasm`'s browser-side decoder silently fails to parse it. Plain,
+/// uncompressed bodies are the safe default for bytes that might end up read
+/// by anything.
+#[pyfunction]
+#[pyo3(signature = (stream, buf))]
+fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyAny>) -> PyResult<()> {
+    let any_rb: AnyRecordBatch = stream.extract()?;
+    let mut reader = any_rb.into_reader()?;
+    let schema = reader.schema();
+    let mut ipc_buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut ipc_buf, &schema)
+            .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+        for batch in reader.by_ref() {
+            let batch = batch.map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+            writer
+                .write(&batch)
+                .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+    }
+    buf.call_method1("write", (PyBytes::new(py, &ipc_buf),))?;
+    Ok(())
 }
 
 fn py_err_to_api_error(e: PyErr) -> ApiError {
@@ -343,15 +378,17 @@ impl PyDbClient {
         })
     }
 
-    /// Chunk-at-a-time counterpart to `execute_arrow`, backing
+    /// Chunk-at-a-time counterpart to `execute_arrow`, entirely backing
     /// `stream_query_json`: yields `HEARTBEAT` while waiting on each
     /// still-in-flight chunk (not just the initial statement wait), then a
-    /// `Table` per chunk as it arrives in logical order, one chunk's rows at
-    /// a time rather than the whole result upfront. Not async itself, same
-    /// as `execute_streamed` -- the returned iterator's `__anext__` does the
+    /// `list[str]` of NDJSON lines (one per row, arro3-`write_ndjson(
+    /// explicit_nulls=True)`-compatible) per chunk as it arrives in logical
+    /// order -- decode and JSON-encoding both happen here, so there's no
+    /// further Python-side conversion step. Not async itself, same as
+    /// `execute_streamed` -- the returned iterator's `__anext__` does the
     /// real work, including the initial submit/poll on its very first call.
     #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None))]
-    fn stream_chunks_arrow(
+    fn stream_ndjson_lines(
         &self,
         py: Python<'_>,
         statement: String,
@@ -359,10 +396,10 @@ impl PyDbClient {
         schema: Option<String>,
         parameters: Option<Py<PyAny>>,
         total_timeout_s: Option<f64>,
-    ) -> PyResult<PyChunkStreamIter> {
+    ) -> PyResult<PyNdjsonStreamIter> {
         let parameters = parameters_to_value(py, parameters)?;
-        Ok(PyChunkStreamIter {
-            state: Arc::new(AsyncMutex::new(PyChunkStreamState::Pending {
+        Ok(PyNdjsonStreamIter {
+            state: Arc::new(AsyncMutex::new(PyNdjsonStreamState::Pending {
                 client: self.inner.clone(),
                 statement,
                 catalog,
@@ -439,6 +476,29 @@ impl PyResultSet {
         PyFetchallArrowStreamedIter {
             wait: Arc::new(AsyncMutex::new(Some(HeartbeatWait::new(fut, total_timeout_s)))),
         }
+    }
+
+    /// The real Arrow schema, once known (after at least one chunk has been
+    /// fetched and decoded) -- `(name, type_name)` pairs, matching
+    /// `Cursor.description`'s shape. `None` before any fetch (the caller
+    /// should fall back to `columns`, the manifest-based pre-fetch
+    /// estimate). Computed directly from the decoded `arrow_schema::Schema`
+    /// here rather than via a returned `Table`'s own `.schema` property --
+    /// that property specifically requires a *real* `arro3.core` install to
+    /// construct its return value (by pyo3-arrow's own design, so callers
+    /// get their own runtime's Schema type back), which would reintroduce
+    /// exactly the dependency this crate's callers don't have.
+    fn schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream = inner.lock().await;
+            Ok(stream.schema.as_ref().map(|s| {
+                s.fields()
+                    .iter()
+                    .map(|f| (f.name().clone(), f.data_type().to_string()))
+                    .collect::<Vec<_>>()
+            }))
+        })
     }
 }
 
@@ -525,14 +585,14 @@ impl PyFetchallArrowStreamedIter {
     }
 }
 
-/// Not-yet-started vs. running state for `PyChunkStreamIter`. The
+/// Not-yet-started vs. running state for `PyNdjsonStreamIter`. The
 /// submit/poll/spawn-workers step (`Pending` -> `Running`) happens on the
-/// iterator's first `__anext__` call, un-heartbeated -- matching Python's
-/// `stream_query_json`, which awaits `fetch_arrow_chunks_with_manifest`
-/// directly before entering its heartbeat-wrapped chunk loop. The
-/// `total_timeout_s` budget starts counting from `Running`, not from
-/// construction, for the same reason.
-enum PyChunkStreamState {
+/// iterator's first `__anext__` call, un-heartbeated -- matching
+/// `stream_query_json`'s pre-cutover behavior (its submit/poll wait was never
+/// heartbeat-wrapped, only its chunk loop was). The `total_timeout_s` budget
+/// starts counting from `Running`, not from construction, for the same
+/// reason.
+enum PyNdjsonStreamState {
     Pending {
         client: Arc<DbClient>,
         statement: String,
@@ -542,23 +602,23 @@ enum PyChunkStreamState {
         total_timeout_s: Option<f64>,
     },
     Running {
-        stream: Arc<AsyncMutex<ChunkStream>>,
-        heartbeat: HeartbeatStream<Vec<RecordBatch>>,
+        stream: Arc<AsyncMutex<NdjsonStream>>,
+        heartbeat: HeartbeatStream<Vec<String>>,
     },
     Done,
 }
 
-/// Async iterator returned by `Client.stream_chunks_arrow`: yields the
+/// Async iterator returned by `Client.stream_ndjson_lines`: yields the
 /// `HEARTBEAT` singleton while waiting on the statement or any individual
-/// chunk, and a `Table` per chunk (in logical order) as each arrives, until
-/// the result is exhausted.
-#[pyclass(name = "ChunkStreamIter")]
-struct PyChunkStreamIter {
-    state: Arc<AsyncMutex<PyChunkStreamState>>,
+/// chunk, and a `list[str]` of NDJSON lines per chunk (in logical order) as
+/// each arrives, until the result is exhausted.
+#[pyclass(name = "NdjsonStreamIter")]
+struct PyNdjsonStreamIter {
+    state: Arc<AsyncMutex<PyNdjsonStreamState>>,
 }
 
 #[pymethods]
-impl PyChunkStreamIter {
+impl PyNdjsonStreamIter {
     fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -569,20 +629,20 @@ impl PyChunkStreamIter {
             let mut guard = state.lock().await;
             loop {
                 match &mut *guard {
-                    PyChunkStreamState::Done => return Err(PyStopAsyncIteration::new_err(())),
-                    PyChunkStreamState::Pending { .. } => {
-                        let PyChunkStreamState::Pending {
+                    PyNdjsonStreamState::Done => return Err(PyStopAsyncIteration::new_err(())),
+                    PyNdjsonStreamState::Pending { .. } => {
+                        let PyNdjsonStreamState::Pending {
                             client,
                             statement,
                             catalog,
                             schema,
                             parameters,
                             total_timeout_s,
-                        } = std::mem::replace(&mut *guard, PyChunkStreamState::Done)
+                        } = std::mem::replace(&mut *guard, PyNdjsonStreamState::Done)
                         else {
                             unreachable!()
                         };
-                        let stream = pipeline::execute_chunk_stream(
+                        let stream = pipeline::execute_ndjson_stream(
                             client,
                             &statement,
                             catalog.as_deref(),
@@ -591,13 +651,13 @@ impl PyChunkStreamIter {
                         )
                         .await
                         .map_err(|e| PyRuntimeError::new_err(e.message))?;
-                        *guard = PyChunkStreamState::Running {
+                        *guard = PyNdjsonStreamState::Running {
                             stream: Arc::new(AsyncMutex::new(stream)),
                             heartbeat: HeartbeatStream::new(total_timeout_s),
                         };
                         // Loop back around to the now-`Running` arm below.
                     }
-                    PyChunkStreamState::Running { stream, heartbeat } => {
+                    PyNdjsonStreamState::Running { stream, heartbeat } => {
                         let stream_for_pull = stream.clone();
                         let tick_result = heartbeat
                             .tick(move || Box::pin(async move { stream_for_pull.lock().await.next_chunk().await }))
@@ -606,23 +666,15 @@ impl PyChunkStreamIter {
                             Ok(Some(Tick::Heartbeat)) => {
                                 Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any()))
                             }
-                            Ok(Some(Tick::Ready(batches))) => {
-                                let arrow_schema = stream
-                                    .lock()
-                                    .await
-                                    .schema
-                                    .clone()
-                                    .unwrap_or_else(|| Arc::new(Schema::empty()));
-                                let table = PyTable::try_new(batches, arrow_schema)
-                                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                                Python::attach(|py| Py::new(py, table).map(|t| t.into_any()))
+                            Ok(Some(Tick::Ready(lines))) => {
+                                Python::attach(|py| Ok(lines.into_pyobject(py)?.into_any().unbind()))
                             }
                             Ok(None) => {
-                                *guard = PyChunkStreamState::Done;
+                                *guard = PyNdjsonStreamState::Done;
                                 Err(PyStopAsyncIteration::new_err(()))
                             }
                             Err(e) => {
-                                *guard = PyChunkStreamState::Done;
+                                *guard = PyNdjsonStreamState::Done;
                                 Err(PyRuntimeError::new_err(e.message))
                             }
                         };
@@ -633,15 +685,20 @@ impl PyChunkStreamIter {
     }
 }
 
+/// Registers as `arrowbricks._core` -- a compiled submodule bundled inside
+/// the same `arrowbricks` wheel, not a separately published package. See
+/// `[tool.maturin]` in the repo-root `pyproject.toml` (module-name =
+/// "arrowbricks._core", manifest-path pointing back at this crate).
 #[pymodule]
-fn arrowbricks_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ping, m)?)?;
+    m.add_function(wrap_pyfunction!(write_ipc_stream, m)?)?;
     m.add_class::<PyDbClient>()?;
     m.add_class::<PyResultSet>()?;
     m.add_class::<PyHeartbeat>()?;
     m.add_class::<PyExecuteStreamedIter>()?;
     m.add_class::<PyFetchallArrowStreamedIter>()?;
-    m.add_class::<PyChunkStreamIter>()?;
+    m.add_class::<PyNdjsonStreamIter>()?;
     m.add("HEARTBEAT", heartbeat_singleton(m.py())?)?;
     Ok(())
 }

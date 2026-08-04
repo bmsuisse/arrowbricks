@@ -1,21 +1,51 @@
 from __future__ import annotations
 
-import asyncio
+import time
 
-import httpx
 import pytest
-import respx
+from conftest import WAREHOUSE_ID, Response
 
 from arrowbricks import HEARTBEAT, DatabricksClient, QueryTimeout
 from arrowbricks.cursor import Cursor
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchall_returns_all_rows_in_order(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=3, rows_per_chunk=10)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_failed_statement_raises(mock_server):
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(
+            json_body={
+                "statement_id": "stmt-failed",
+                "status": {"state": "FAILED", "error": {"error_code": "SYNTAX_ERROR", "message": "bad sql"}},
+            }
+        )
+    )
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    cursor = Cursor(client)
+
+    with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
+        await cursor.execute("not valid sql")
+
+
+@pytest.mark.asyncio
+async def test_canceled_statement_raises(mock_server):
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(json_body={"statement_id": "stmt-canceled", "status": {"state": "CANCELED"}})
+    )
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    cursor = Cursor(client)
+
+    with pytest.raises(RuntimeError, match="canceled"):
+        await cursor.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_fetchall_returns_all_rows_in_order(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=3, rows_per_chunk=10)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -27,11 +57,9 @@ async def test_fetchall_returns_all_rows_in_order(mock_warehouse, warehouse_host
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchall_preserves_order_despite_out_of_order_chunks(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=4, rows_per_chunk=5, reverse_arrival=True)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_fetchall_preserves_order_despite_out_of_order_chunks(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=4, rows_per_chunk=5, reverse_arrival=True)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever ORDER BY id")
@@ -41,14 +69,12 @@ async def test_fetchall_preserves_order_despite_out_of_order_chunks(mock_warehou
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchmany_pages_across_chunk_boundaries(mock_warehouse, warehouse_host_id):
+async def test_fetchmany_pages_across_chunk_boundaries(mock_warehouse):
     """3 rows/chunk, fetchmany(2) repeatedly -- must page correctly across a
     chunk boundary (chunk 0 has 3 rows, so the 2nd fetchmany(2) needs 1 row
     left in chunk 0 plus 1 from chunk 1)."""
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=3, rows_per_chunk=3)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+    server, _route = mock_warehouse(n_chunks=3, rows_per_chunk=3)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -63,11 +89,9 @@ async def test_fetchmany_pages_across_chunk_boundaries(mock_warehouse, warehouse
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchone_then_fetchall_gets_remaining_rows(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=5)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_fetchone_then_fetchall_gets_remaining_rows(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=5)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -80,11 +104,9 @@ async def test_fetchone_then_fetchall_gets_remaining_rows(mock_warehouse, wareho
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchone_past_end_returns_none(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=1)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_fetchone_past_end_returns_none(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=1)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -93,11 +115,9 @@ async def test_fetchone_past_end_returns_none(mock_warehouse, warehouse_host_id)
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchall_arrow_returns_a_table_with_all_rows(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=2, rows_per_chunk=4)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_fetchall_arrow_returns_a_table_with_all_rows(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=2, rows_per_chunk=4)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -109,11 +129,9 @@ async def test_fetchall_arrow_returns_a_table_with_all_rows(mock_warehouse, ware
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchmany_arrow_pages_across_chunk_boundaries(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=2, rows_per_chunk=3)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_fetchmany_arrow_pages_across_chunk_boundaries(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=2, rows_per_chunk=3)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -127,11 +145,9 @@ async def test_fetchmany_arrow_pages_across_chunk_boundaries(mock_warehouse, war
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_aiter_yields_rows_one_at_a_time(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=3)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_aiter_yields_rows_one_at_a_time(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=3)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")
@@ -141,11 +157,9 @@ async def test_aiter_yields_rows_one_at_a_time(mock_warehouse, warehouse_host_id
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_execute_streamed_emits_heartbeat_before_cursor_ready(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=3)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_execute_streamed_emits_heartbeat_before_cursor_ready(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=3)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     items = [item async for item in cursor.execute_streamed("SELECT * FROM whatever", total_timeout_s=5)]
@@ -156,36 +170,32 @@ async def test_execute_streamed_emits_heartbeat_before_cursor_ready(mock_warehou
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchall_streamed_times_out_on_a_slow_chunk_download(warehouse_host_id):
+async def test_fetchall_streamed_times_out_on_a_slow_chunk_download(mock_server):
     """execute_streamed's own timeout only covers the wait for the statement
     to become ready -- it stops the moment chunks are available to fetch,
     before any chunk has actually been downloaded. A slow chunk download must
     still be bounded, which is exactly what fetchall_streamed adds."""
-    host, warehouse_id = warehouse_host_id
-    respx.mock.get(f"{host}/api/2.0/sql/warehouses/{warehouse_id}").mock(
-        return_value=httpx.Response(200, json={"state": "RUNNING"})
-    )
-    respx.mock.post(f"{host}/api/2.0/sql/statements").mock(
-        return_value=httpx.Response(
-            200,
-            json={
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(
+            json_body={
                 "statement_id": "stmt-slow",
                 "status": {"state": "SUCCEEDED"},
                 "manifest": {"chunks": [{"chunk_index": 0, "row_count": 3}]},
-            },
+            }
         )
     )
-    respx.mock.get(f"{host}/api/2.0/sql/statements/stmt-slow/result/chunks/0").mock(
-        return_value=httpx.Response(200, json={"external_links": [{"external_link": f"{host}/_data/slow-chunk"}]})
+    server.get("/api/2.0/sql/statements/stmt-slow/result/chunks/0").mock(
+        Response(json_body={"external_links": [{"external_link": f"{server.host}/_data/slow-chunk"}]})
     )
 
-    async def _slow_chunk(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(10)
+    def _slow_chunk(_request: object) -> Response:
+        time.sleep(10)
         raise AssertionError("unreachable -- test should time out first")
 
-    respx.mock.get(f"{host}/_data/slow-chunk").mock(side_effect=_slow_chunk)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+    server.get("/_data/slow-chunk").mock(side_effect=_slow_chunk)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
     await cursor.execute("SELECT * FROM whatever")
 
@@ -195,11 +205,9 @@ async def test_fetchall_streamed_times_out_on_a_slow_chunk_download(warehouse_ho
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_fetchall_streamed_yields_result_after_zero_or_more_heartbeats(mock_warehouse, warehouse_host_id):
-    host, warehouse_id = warehouse_host_id
-    mock_warehouse(respx.mock, n_chunks=1, rows_per_chunk=3)
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+async def test_fetchall_streamed_yields_result_after_zero_or_more_heartbeats(mock_warehouse):
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=3)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
     await cursor.execute("SELECT * FROM whatever")
 
@@ -211,7 +219,7 @@ async def test_fetchall_streamed_yields_result_after_zero_or_more_heartbeats(moc
 
 @pytest.mark.asyncio
 async def test_fetch_before_execute_raises():
-    client = DatabricksClient("https://fake", "wh", token="test-token")
+    client = DatabricksClient("http://fake", WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     with pytest.raises(RuntimeError, match="execute"):
@@ -219,32 +227,26 @@ async def test_fetch_before_execute_raises():
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_description_falls_back_to_real_arrow_schema_when_manifest_omits_it(
-    chunk_bytes_builder, warehouse_host_id
-):
+async def test_description_falls_back_to_real_arrow_schema_when_manifest_omits_it(mock_server, chunk_bytes_builder):
     """Not every manifest carries `schema.columns` -- description must still
     resolve correctly once a chunk has actually been fetched, from that
     chunk's real Arrow schema, rather than staying empty forever."""
-    host, warehouse_id = warehouse_host_id
-    respx.mock.get(f"{host}/api/2.0/sql/warehouses/{warehouse_id}").mock(
-        return_value=httpx.Response(200, json={"state": "RUNNING"})
-    )
-    respx.mock.post(f"{host}/api/2.0/sql/statements").mock(
-        return_value=httpx.Response(
-            200,
-            json={
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(
+            json_body={
                 "statement_id": "stmt-no-schema",
                 "status": {"state": "SUCCEEDED"},
                 "manifest": {"chunks": [{"chunk_index": 0, "row_count": 3}]},  # no "schema" key
-            },
+            }
         )
     )
-    respx.mock.get(url__regex=rf"{host}/api/2\.0/sql/statements/stmt-no-schema/result/chunks/\d+").mock(
-        return_value=httpx.Response(200, json={"external_links": [{"external_link": f"{host}/_data/chunk-0"}]})
+    server.get(r"^/api/2\.0/sql/statements/stmt-no-schema/result/chunks/\d+$", regex=True).mock(
+        Response(json_body={"external_links": [{"external_link": f"{server.host}/_data/chunk-0"}]})
     )
-    respx.mock.get(f"{host}/_data/chunk-0").mock(return_value=httpx.Response(200, content=chunk_bytes_builder(0, 3)))
-    client = DatabricksClient(host, warehouse_id, token="test-token")
+    server.get("/_data/chunk-0").mock(Response(content=chunk_bytes_builder(0, 3)))
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
     cursor = Cursor(client)
 
     await cursor.execute("SELECT * FROM whatever")

@@ -8,8 +8,9 @@ import json
 import re
 import threading
 
-import arrowbricks_core
 import pytest
+
+from arrowbricks import _core as arrowbricks_core
 
 WAREHOUSE_ID = "wh-test-123"
 STATEMENT_ID = "stmt-abc"

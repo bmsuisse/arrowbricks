@@ -6,22 +6,11 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: uv sync --all-extras
-      - run: uv run ruff check .
-      - run: uv run ty check src tests
-      - run: uv run pytest -q
-
-  rust-test:
+  # One Rust build covers both the crate's own checks/tests and produces the
+  # abi3 wheel every Python-version leg below installs -- avoids a redundant
+  # cargo compile per matrix leg (abi3-py311 means one wheel covers every
+  # supported Python already).
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -42,12 +31,36 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.14"
+      - run: uv sync --all-extras --no-install-project
+      - run: uvx maturin build --release --out dist
+      - run: uv pip install dist/*.whl
       # rust/arrowbricks_core/tests_py needs a real Python asyncio event loop
       # with real nested task contexts -- exactly what plain `cargo test`
       # can't provide, and exactly what caught the token_provider
-      # event-loop-propagation bug during development. Reuses the main
-      # project's deps (arro3, pytest-asyncio) rather than a separate
-      # dependency set for the Rust crate's own tests.
-      - run: uv sync --all-extras
-      - run: uvx maturin develop --uv --release --manifest-path rust/arrowbricks_core/Cargo.toml
+      # event-loop-propagation bug during development.
       - run: uv run pytest rust/arrowbricks_core/tests_py -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: dist
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras --no-install-project
+      - run: uv pip install dist/*.whl
+      - run: uv run ruff check .
+      - run: uv run ty check src tests
+      - run: uv run pytest -q

@@ -1,54 +1,49 @@
 # arrowbricks_core
 
-Rust reimplementation of [arrowbricks](https://github.com/bmsuisse/arrowbricks)'
+Rust implementation of [arrowbricks](https://github.com/bmsuisse/arrowbricks)'
 hot path -- statement submit/poll, bounded-concurrency chunk fetch, the
-`chunk_index` reorder buffer, and Arrow-IPC decode via
-[arrow-rs](https://github.com/apache/arrow-rs) -- exposed to Python as an
-async `Client` via [PyO3](https://pyo3.rs). This is the committed direction
-for arrowbricks itself: once this crate reaches feature parity with the
-current pure-Python/arro3 implementation, `arrowbricks`'s build switches to
-this crate and the Python implementation is deleted -- not kept as a
-permanent second option.
-
-**Feature parity with the pure-Python implementation is done.** Ported: lazy
-`fetchmany_arrow`/`fetchall_arrow` (`execute()` + `ResultSet`), `token_provider`
-callback (sync or async), JSON result format (`execute_json`), volume-file
-operations (`upload_volume_file`/`delete_volume_file`), and
-`execute_streamed`/`fetchall_arrow_streamed` heartbeats during a slow
-warehouse cold start. Not wired into `arrowbricks` itself yet and not
-published to PyPI -- that cutover (swap `arrowbricks`'s build to this crate
-behind the same public API, delete the Python implementation) is the next
-step. See the parent repo's [AGENTS.md](../../AGENTS.md) for the state of
-the migration.
+`chunk_index` reorder buffer, Arrow-IPC decode/write, and NDJSON encode via
+[arrow-rs](https://github.com/apache/arrow-rs) -- exposed to Python via
+[PyO3](https://pyo3.rs). This crate builds into the same wheel as the
+top-level `arrowbricks` package, as its compiled submodule `arrowbricks._core`
+(see the repo root `pyproject.toml`'s `[tool.maturin]`) -- it is not published
+to PyPI on its own. `arrowbricks`'s own `Cursor`/`DatabricksClient`/
+`stream_query_json` all delegate to it directly; this README is for working
+with the compiled extension on its own terms, or on the crate itself.
 
 ## Build
+
+From the repo root (this crate has no `pyproject.toml` of its own -- the root
+one's `manifest-path` points back at this directory's `Cargo.toml`):
 
 ```bash
 uvx maturin develop --uv --release
 ```
 
-`maturin develop` builds this as a mixed Python/Rust project (see
-`pyproject.toml`'s `python-source = "python"`): the compiled extension lands
-in `python/arrowbricks_core/`, alongside a hand-written `__init__.pyi` and a
-`py.typed` marker (PEP 561), so `Client`/`ResultSet`/etc. get real
-autocomplete and type-checking in editors and under `mypy`/`pyright`/`ty` --
-a compiled PyO3 extension has no type info of its own without them.
+This builds a mixed Python/Rust project: the compiled extension lands at
+`src/arrowbricks/_core.<abi3>.so`, alongside `src/arrowbricks/_core.pyi` and
+`src/arrowbricks/py.typed` (PEP 561) for editor autocomplete and
+`mypy`/`pyright`/`ty` type-checking -- a compiled PyO3 extension has no type
+info of its own without them.
 
 ## Quickstart
 
+Importable directly (bypassing the `arrowbricks` Python wrapper) as
+`arrowbricks._core`:
+
 ```python
 import asyncio
-import arrowbricks_core
+from arrowbricks import _core
 
 
 async def main():
-    client = arrowbricks_core.Client(
+    client = _core.Client(
         host="adb-1234567890.1.azuredatabricks.net",
         warehouse_id="abcd1234efgh5678",
         token="dapi...",
     )
     table = await client.execute_arrow("SELECT * FROM my_catalog.my_schema.my_table LIMIT 100")
-    print(table.num_rows, table.schema)
+    print(table.num_rows)
 
 
 asyncio.run(main())
@@ -56,27 +51,34 @@ asyncio.run(main())
 
 `table` implements the [Arrow C Data Interface](https://arrow.apache.org/docs/format/CDataInterface.html)
 (`__arrow_c_stream__`/`__arrow_c_array__`) -- any consumer that speaks that
-protocol (DuckDB, pyarrow, arro3) can import it with zero copies.
+protocol (DuckDB, pyarrow, arro3) can import it with zero copies, no extra
+dependency needed. Note: `table.column(i)`/`table.schema` (materializing
+native Python values) are `pyo3-arrow` methods designed to hand back the
+caller's own *real* `arro3.core` objects -- they need `arro3-core` installed,
+unlike the table object itself.
 
 ## API
 
-- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=32)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching.
-- `Client.execute_arrow(statement, *, catalog=None, schema=None) -> Table` -- eager: fetches and assembles the whole result before returning.
-- `Client.execute(statement, *, catalog=None, schema=None) -> ResultSet` -- submits and starts background chunk fetching without pulling anything yet.
+- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=32, http_timeout=60.0, wait_timeout="30s", warehouse_start_timeout=300.0, warehouse_confirmed_running_ttl_s=30.0)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching.
+- `Client.execute_arrow(statement, *, catalog=None, schema=None, parameters=None) -> Table` -- eager: fetches and assembles the whole result before returning. `parameters` is Databricks' own named-parameter format (`[{"name":..., "value":..., "type":...}]`), passed straight through.
+- `Client.execute(statement, *, catalog=None, schema=None, parameters=None) -> ResultSet` -- submits and starts background chunk fetching without pulling anything yet.
   - `ResultSet.fetchmany_arrow(n) -> Table` -- pulls/decodes only as many chunks as needed for `n` rows, buffering the rest; may return fewer than `n` once exhausted.
   - `ResultSet.fetchall_arrow() -> Table` -- drains everything remaining.
-  - `ResultSet.statement_id`, `ResultSet.num_chunks`.
-- `Client.execute_json(statement, *, catalog=None, schema=None) -> list[list[str | None]]` -- JSON_ARRAY format, no Arrow parse. Every non-null value comes back as a string regardless of real column type (Databricks' own contract) -- cast by the manifest's column type yourself if you want native Python types.
-- `Client.upload_volume_file(volume_path, data: bytes)` / `Client.delete_volume_file(volume_path)` -- Unity Catalog volume files via the Files API. Delete treats a 404 as success (idempotent).
-- `Client.execute_streamed(statement, *, catalog=None, schema=None, total_timeout_s=None)` -- like `execute()`, but an async iterator yielding the `HEARTBEAT` singleton while waiting on Databricks instead of blocking silently (bridge e.g. an SSE connection through a slow warehouse cold start), then a `ResultSet` exactly once. Raises if `total_timeout_s` elapses first.
+  - `ResultSet.schema() -> list[tuple[str, str]] | None` -- the real decoded Arrow schema as `(name, type_name)` string pairs, once known (after >=1 fetch); `None` before that. Computed directly in Rust -- unlike a `Table`'s own `.schema`, this needs no arro3 install.
+  - `ResultSet.statement_id`, `ResultSet.num_chunks`, `ResultSet.columns` (manifest-based pre-fetch schema estimate, also arro3-free).
+- `Client.execute_json(statement, *, catalog=None, schema=None, parameters=None) -> list[list[str | None]]` -- JSON_ARRAY format, no Arrow parse. Every non-null value comes back as a string regardless of real column type (Databricks' own contract) -- cast by the manifest's column type yourself if you want native Python types.
+- `Client.stream_ndjson_lines(statement, *, catalog=None, schema=None, parameters=None, total_timeout_s=None)` -- chunk-at-a-time: an async iterator yielding the `HEARTBEAT` singleton while waiting on the statement or any individual chunk, then a `list[str]` of NDJSON lines (one per row, explicit nulls, ISO-8601 timestamps) per chunk in logical order. Decode and JSON encoding both happen in Rust -- backs `stream_query_json` end to end.
+- `Client.upload_volume_file(volume_path, data: bytes)` / `Client.delete_volume_file(volume_path)` -- Unity Catalog volume files via the Files API. Delete treats a 404 as success (idempotent). Both raise a plain `RuntimeError` (message only) on failure.
+- `Client.execute_streamed(statement, *, catalog=None, schema=None, parameters=None, total_timeout_s=None)` -- like `execute()`, but an async iterator yielding the `HEARTBEAT` singleton while waiting on Databricks instead of blocking silently (bridge e.g. an SSE connection through a slow warehouse cold start), then a `ResultSet` exactly once. Raises if `total_timeout_s` elapses first.
   - `ResultSet.fetchall_arrow_streamed(*, total_timeout_s=None)` -- same idea for the chunk-download phase: yields `HEARTBEAT` while pulling chunks, then a `Table` exactly once.
-- `HEARTBEAT` -- module-level singleton; compare with `is`, e.g. `if item is arrowbricks_core.HEARTBEAT: ...`.
+- `write_ipc_stream(stream, buf)` -- free function; writes any object implementing `__arrow_c_stream__` (a `Table` from this crate, arro3, pyarrow, ...) as uncompressed Arrow-IPC stream bytes to a Python file-like object. No dependency needed regardless of the input's origin.
+- `HEARTBEAT` -- module-level singleton; compare with `is`, e.g. `if item is _core.HEARTBEAT: ...`.
 
 ## With DuckDB
 
 DuckDB's `duckdb.sql()` resolves an unrecognized table name against local
 Python variables via a replacement scan -- point it at the Arrow object
-directly, no pandas/pyarrow conversion step:
+directly, no pandas/pyarrow conversion step, no extra dependency:
 
 ```python
 import duckdb
@@ -89,45 +91,24 @@ Runnable version: [`examples/duckdb_query.py`](examples/duckdb_query.py).
 
 ## With FastAPI (Server-Sent Events)
 
-`execute_arrow` fetches the whole result eagerly by design (it's the
-one-call convenience method) -- streaming its result means sending the
-*already-fetched* table to the HTTP client in per-row chunks, bounding
-client-side memory/parse latency on a large result, not hiding a slow
-Databricks warehouse cold start:
+The simplest streaming path is `stream_ndjson_lines`, which yields
+ready-to-send NDJSON lines directly (see `arrowbricks.stream_query_json`,
+built on exactly this):
 
 ```python
 import json
-from fastapi.responses import StreamingResponse
-
-def _rows(table):
-    names = [f.name for f in table.schema]
-    columns = [table.column(i).combine_chunks().to_pylist() for i in range(table.num_columns)]
-    return [dict(zip(names, row, strict=True)) for row in zip(*columns, strict=True)]
+from arrowbricks import _core
 
 async def _sse(sql: str):
-    table = await client.execute_arrow(sql)
-    for row in _rows(table):
-        yield f"data: {json.dumps(row)}\n\n"
+    async for item in client.stream_ndjson_lines(sql, total_timeout_s=300):
+        if item is _core.HEARTBEAT:
+            yield ": keep-alive\n\n"
+            continue
+        for line in item:
+            yield f"data: {line}\n\n"
 ```
 
 Runnable version: [`examples/fastapi_sse.py`](examples/fastapi_sse.py).
-
-For a connection that also needs to survive a slow warehouse cold start
-without going silent, use `execute_streamed` and forward `HEARTBEAT` as an
-SSE keep-alive comment:
-
-```python
-from arrowbricks_core import HEARTBEAT
-
-async def _sse_with_heartbeats(sql: str):
-    async for item in client.execute_streamed(sql, total_timeout_s=300):
-        if item is HEARTBEAT:
-            yield ": keep-alive\n\n"
-            continue
-        table = await item.fetchall_arrow()  # item is a ResultSet here
-        for row in _rows(table):
-            yield f"data: {json.dumps(row)}\n\n"
-```
 
 ## Testing
 
@@ -138,6 +119,11 @@ cargo test --no-default-features
 (`--no-default-features` disables `extension-module`, which otherwise skips
 linking against libpython -- correct for the cdylib maturin ships, wrong for
 a plain `cargo test` binary. See `Cargo.toml`'s `[features]` comment.)
+
+`tests_py/` is this crate's own PyO3-level Python test suite (against the
+actually-built extension) -- run explicitly by path (`uv run pytest
+rust/arrowbricks_core/tests_py -v` from the repo root), not auto-discovered
+by a bare `pytest`.
 
 ## License
 

@@ -1,42 +1,65 @@
 [project]
 name = "arrowbricks"
 version = "0.3.0"
-description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Single Arrow engine (arro3), no DuckDB."
+description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = [
-    "httpx>=0.27",
-    "arro3-core>=0.8",
-    "arro3-io>=0.8",
-]
+# No hard runtime dependencies -- httpx and arro3-io are fully eliminated
+# (see rust/arrowbricks_core's own reqwest client + Arrow-IPC/NDJSON
+# writer). arro3-core is optional (see below): only Cursor.fetchone/
+# fetchmany/fetchall's row materialization needs it -- fetchall_arrow,
+# execute_arrow, stream_query_json, upload_volume_file/delete_volume_file,
+# and Cursor.description all work with zero dependencies installed.
+dependencies = []
+
+[project.optional-dependencies]
+# pyo3-arrow's own Table.column()/schema methods are designed to hand back
+# the caller's *real* arro3.core objects for further arro3-ecosystem
+# interop (not a value pyo3-arrow can materialize itself), so
+# fetchone/fetchmany/fetchall need this installed. `pip install
+# arrowbricks[arro3]` -- or handle rows as Arrow via fetchall_arrow/
+# fetchmany_arrow instead, which don't need it at all.
+arro3 = ["arro3-core>=0.8"]
 
 [project.urls]
 Repository = "https://github.com/bmsuisse/arrowbricks"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/arrowbricks"]
+# The compiled hot path (rust/arrowbricks_core) builds into this same wheel as
+# arrowbricks._core -- not a separately published package -- so `pip install
+# arrowbricks` is the only install step. python-source points at the existing
+# src/ layout (arrowbricks/__init__.py, client.py, cursor.py, _streaming.py);
+# manifest-path points back at the Cargo.toml living under rust/, since it
+# isn't in the same directory as this pyproject.toml.
+[tool.maturin]
+python-source = "src"
+module-name = "arrowbricks._core"
+manifest-path = "rust/arrowbricks_core/Cargo.toml"
 
 [dependency-groups]
+# arro3-core/arro3-io are test-only -- tests/conftest.py uses them to build
+# synthetic Arrow-IPC chunk bytes so tests exercise a real Arrow IPC round
+# trip. The package itself has no runtime dependency on them (or anything
+# else) -- see rust/arrowbricks_core's own Arrow/NDJSON encoding.
 dev = [
+    "arro3-core>=0.8",
+    "arro3-io>=0.8",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "respx>=0.21",
     "ruff>=0.6",
     "ty>=0.0.65",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# Without this, bare `pytest -q` also auto-discovers
-# rust/arrowbricks_core/tests_py -- which needs the Rust extension actually
-# built (maturin develop) first and will fail in the main CI job's venv,
-# which never builds it. That suite is invoked explicitly by path in the
-# rust-test CI job instead.
+# Bare `pytest`/`pytest -q` (no explicit path) stays scoped to the Cursor-
+# level suite -- rust/arrowbricks_core/tests_py (the compiled extension's own
+# PyO3-level tests) is invoked explicitly by path where it's needed (CI's
+# build job, or by hand), not auto-discovered every run.
 testpaths = ["tests"]
 
 [tool.ruff]

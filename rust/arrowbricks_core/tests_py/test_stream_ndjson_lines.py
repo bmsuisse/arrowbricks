@@ -1,8 +1,9 @@
-"""Python-level tests for Client.stream_chunks_arrow -- the chunk-at-a-time
-streaming primitive backing stream_query_json. Proves: one Table per chunk,
-in logical (chunk_index) order even when a later chunk resolves first,
-StopAsyncIteration once exhausted, and heartbeat/timeout during a slow
-chunk (not just a slow initial submit/poll)."""
+"""Python-level tests for Client.stream_ndjson_lines -- the chunk-at-a-time
+streaming primitive backing stream_query_json end to end (decode + NDJSON
+encode both happen in Rust). Proves: one list[str] of NDJSON lines per
+chunk, in logical (chunk_index) order even when a later chunk resolves
+first, StopAsyncIteration once exhausted, and heartbeat/timeout during a
+slow chunk (not just a slow initial submit/poll)."""
 
 import http.server
 import io
@@ -12,8 +13,9 @@ import time
 
 import arro3.core as core
 import arro3.io as aio
-import arrowbricks_core
 import pytest
+
+from arrowbricks import _core as arrowbricks_core
 
 WAREHOUSE_ID = "wh-test-123"
 STATEMENT_ID = "stmt-abc"
@@ -89,40 +91,40 @@ def _start_server(chunk_values: list[list[int]], *, chunk_delay_s: dict[int, flo
 
 
 @pytest.mark.asyncio
-async def test_stream_chunks_arrow_yields_one_table_per_chunk_in_order():
+async def test_stream_ndjson_lines_yields_one_chunk_of_lines_in_order():
     server, port = _start_server([[1, 2], [3, 4, 5], [6]])
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
-        tables = [item async for item in client.stream_chunks_arrow("SELECT * FROM t")]
-        assert all(t is not arrowbricks_core.HEARTBEAT for t in tables)
-        assert [t.num_rows for t in tables] == [2, 3, 1]
-        all_ids = [v for t in tables for v in core.Table.from_arrow(t)["id"].to_pylist()]
+        chunks = [item async for item in client.stream_ndjson_lines("SELECT * FROM t")]
+        assert all(c is not arrowbricks_core.HEARTBEAT for c in chunks)
+        assert [len(c) for c in chunks] == [2, 3, 1]
+        all_ids = [json.loads(line)["id"] for chunk in chunks for line in chunk]
         assert all_ids == [1, 2, 3, 4, 5, 6], "chunks must come out in logical order"
     finally:
         server.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_stream_chunks_arrow_preserves_order_despite_out_of_order_arrival():
+async def test_stream_ndjson_lines_preserves_order_despite_out_of_order_arrival():
     # Chunk 0 is slow, chunk 1 resolves first -- must still be yielded 0, 1.
     server, port = _start_server([[1], [2]], chunk_delay_s={0: 0.2})
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
-        tables = [item async for item in client.stream_chunks_arrow("SELECT * FROM t")]
-        all_ids = [v for t in tables for v in core.Table.from_arrow(t)["id"].to_pylist()]
+        chunks = [item async for item in client.stream_ndjson_lines("SELECT * FROM t")]
+        all_ids = [json.loads(line)["id"] for chunk in chunks for line in chunk]
         assert all_ids == [1, 2]
     finally:
         server.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_stream_chunks_arrow_stops_after_exhausted():
+async def test_stream_ndjson_lines_stops_after_exhausted():
     server, port = _start_server([[1]])
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
-        it = client.stream_chunks_arrow("SELECT * FROM t")
+        it = client.stream_ndjson_lines("SELECT * FROM t")
         first = await it.__anext__()
-        assert first.num_rows == 1
+        assert first == ['{"id":1}']
         with pytest.raises(StopAsyncIteration):
             await it.__anext__()
     finally:
@@ -130,16 +132,17 @@ async def test_stream_chunks_arrow_stops_after_exhausted():
 
 
 @pytest.mark.asyncio
-async def test_stream_chunks_arrow_heartbeats_on_slow_chunk_then_times_out():
+async def test_stream_ndjson_lines_heartbeats_on_slow_chunk_then_times_out():
     """total_timeout_s covers each chunk pull, not just the initial
     submit/poll -- a chunk that never arrives must still heartbeat then
-    time out, matching stream_query_json's heartbeat_over_stream wrapping."""
+    time out, matching stream_query_json's pre-cutover heartbeat_over_stream
+    wrapping."""
     server, port = _start_server([[1]], chunk_delay_s={0: 60.0})
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
         seen_heartbeat = False
         with pytest.raises(RuntimeError, match="timeout"):
-            async for item in client.stream_chunks_arrow("SELECT * FROM t", total_timeout_s=0.01):
+            async for item in client.stream_ndjson_lines("SELECT * FROM t", total_timeout_s=0.01):
                 assert item is arrowbricks_core.HEARTBEAT
                 seen_heartbeat = True
         assert seen_heartbeat, "expected at least one HEARTBEAT before the timeout fired"

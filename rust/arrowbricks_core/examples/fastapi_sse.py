@@ -1,17 +1,14 @@
 """Fetch a Databricks query via the Rust core, then stream the result to a
-client as Server-Sent Events.
+client as Server-Sent Events -- as soon as each chunk's rows are ready, not
+after the whole result is materialized. `Client.stream_ndjson_lines` yields
+the `HEARTBEAT` singleton while waiting on the statement or any individual
+chunk (bridging a possible multi-minute cold warehouse start without going
+silent), then a `list[str]` of already-formatted NDJSON lines per chunk in
+logical order -- decode and JSON encoding both happen in Rust, so there's no
+Arrow-to-Python conversion step, and no extra dependency beyond arrowbricks
+itself.
 
-Note the difference from arrowbricks' own examples/fastapi_sse.py:
-Client.execute_arrow fetches the *entire* result eagerly -- there's no lazy
-per-chunk pull yet (see rust/arrowbricks_core's current-limitations note in
-the PR/README), so the first byte reaches the client only after the whole
-query has finished fetching from Databricks, not after the first chunk.
-What streams here is the already-materialized result being sent to the HTTP
-client in per-row chunks instead of one giant JSON response -- useful for
-bounding client-side memory/parse latency on a big result, not for hiding a
-slow Databricks warehouse cold start.
-
-Requires `pip install fastapi uvicorn` on top of arrowbricks_core.
+Requires `pip install fastapi uvicorn` on top of arrowbricks.
 
     DATABRICKS_HOST=adb-1234567890.1.azuredatabricks.net \\
     DATABRICKS_WAREHOUSE_ID=abcd1234efgh5678 \\
@@ -26,36 +23,30 @@ This example takes `sql` straight from the request for brevity -- validate/
 allowlist it before exposing a route like this publicly.
 """
 
-import asyncio
-import json
 import os
 from collections.abc import AsyncIterator
-from typing import Any
 
-import arrowbricks_core
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
+from arrowbricks import _core
+
 app = FastAPI()
 
-client = arrowbricks_core.Client(
+client = _core.Client(
     host=os.environ["DATABRICKS_HOST"],
     warehouse_id=os.environ["DATABRICKS_WAREHOUSE_ID"],
     token=os.environ["DATABRICKS_TOKEN"],
 )
 
 
-def _rows(table: Any) -> list[dict[str, Any]]:
-    names = [f.name for f in table.schema]
-    columns = [table.column(i).combine_chunks().to_pylist() for i in range(table.num_columns)]
-    return [dict(zip(names, row, strict=True)) for row in zip(*columns, strict=True)]
-
-
 async def _sse(sql: str) -> AsyncIterator[str]:
-    table = await client.execute_arrow(sql)
-    for row in _rows(table):
-        yield f"data: {json.dumps(row)}\n\n"
-        await asyncio.sleep(0)  # yield to the event loop between rows
+    async for item in client.stream_ndjson_lines(sql, total_timeout_s=300):
+        if item is _core.HEARTBEAT:
+            yield ": keep-alive\n\n"
+            continue
+        for line in item:
+            yield f"data: {line}\n\n"
 
 
 @app.get("/query")

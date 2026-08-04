@@ -9,24 +9,104 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/arrowbricks_core
+      - working-directory: rust/arrowbricks_core
+        run: cargo fmt --check
+      - working-directory: rust/arrowbricks_core
+        run: cargo test --no-default-features
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.14"
-      - run: uv sync --all-extras
+      - run: uv sync --all-extras --no-install-project
+      - run: uvx maturin build --release --out dist
+      - run: uv pip install dist/*.whl
+      - run: uv run pytest rust/arrowbricks_core/tests_py -v
       - run: uv run ruff check .
       - run: uv run ty check src tests
       - run: uv run pytest -q
 
-  publish:
+  # abi3-py311 means one wheel per (OS, arch) covers every Python >= 3.11 --
+  # no per-Python-version build matrix needed, unlike a non-abi3 PyO3 crate.
+  linux:
     needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  macos:
+    needs: test
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows
+          path: dist
+
+  sdist:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  publish:
+    needs: [linux, macos, windows, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write # PyPI trusted publishing (OIDC) -- no stored API token
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/download-artifact@v4
         with:
-          python-version: "3.14"
-      - run: uv build
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
