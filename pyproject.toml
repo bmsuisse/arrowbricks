@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 # No hard runtime dependencies -- httpx and arro3-io are fully eliminated
 # (see rust/arrowbricks_core's own reqwest client + Arrow-IPC/NDJSON
@@ -39,6 +40,12 @@ build-backend = "maturin"
 python-source = "src"
 module-name = "arrowbricks._core"
 manifest-path = "rust/arrowbricks_core/Cargo.toml"
+# `license-files` above declares LICENSE in metadata, but maturin's sdist
+# build doesn't bundle a repo-root file just because it's referenced there --
+# it needs to be told explicitly, or PyPI rejects the upload with "License-File
+# LICENSE does not exist in distribution file" (a real failure the first time
+# v1.0.0 released: all 5 wheels published fine, only the sdist hit this).
+include = ["LICENSE"]
 
 [dependency-groups]
 # arro3-core/arro3-io are test-only -- tests/conftest.py uses them to build

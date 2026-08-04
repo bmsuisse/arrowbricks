@@ -122,3 +122,8 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # A re-run after only one artifact failed (the LICENSE-in-sdist
+          # issue that broke v1.0.0's first attempt) must not fail again on
+          # the wheels that already uploaded successfully -- PyPI otherwise
+          # rejects a re-upload of an already-published filename outright.
+          skip-existing: true
