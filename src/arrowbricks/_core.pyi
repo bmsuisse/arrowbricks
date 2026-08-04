@@ -86,4 +86,5 @@ class Client:
         schema: str | None = None,
         parameters: list[dict[str, Any]] | None = None,
         total_timeout_s: float | None = None,
+        non_finite_as_string: bool = False,
     ) -> NdjsonStreamIter: ...

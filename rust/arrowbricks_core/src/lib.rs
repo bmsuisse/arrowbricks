@@ -407,7 +407,8 @@ impl PyDbClient {
     /// further Python-side conversion step. Not async itself, same as
     /// `execute_streamed` -- the returned iterator's `__anext__` does the
     /// real work, including the initial submit/poll on its very first call.
-    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None))]
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None, non_finite_as_string=false))]
+    #[allow(clippy::too_many_arguments)]
     fn stream_ndjson_lines(
         &self,
         py: Python<'_>,
@@ -416,6 +417,7 @@ impl PyDbClient {
         schema: Option<String>,
         parameters: Option<Py<PyAny>>,
         total_timeout_s: Option<f64>,
+        non_finite_as_string: bool,
     ) -> PyResult<PyNdjsonStreamIter> {
         let parameters = parameters_to_value(py, parameters)?;
         Ok(PyNdjsonStreamIter {
@@ -426,6 +428,7 @@ impl PyDbClient {
                 schema,
                 parameters,
                 total_timeout_s,
+                non_finite_as_string,
             })),
         })
     }
@@ -620,6 +623,7 @@ enum PyNdjsonStreamState {
         schema: Option<String>,
         parameters: Option<serde_json::Value>,
         total_timeout_s: Option<f64>,
+        non_finite_as_string: bool,
     },
     Running {
         stream: Arc<AsyncMutex<NdjsonStream>>,
@@ -658,6 +662,7 @@ impl PyNdjsonStreamIter {
                             schema,
                             parameters,
                             total_timeout_s,
+                            non_finite_as_string,
                         } = std::mem::replace(&mut *guard, PyNdjsonStreamState::Done)
                         else {
                             unreachable!()
@@ -668,6 +673,7 @@ impl PyNdjsonStreamIter {
                             catalog.as_deref(),
                             schema.as_deref(),
                             parameters,
+                            non_finite_as_string,
                         )
                         .await
                         .map_err(|e| PyRuntimeError::new_err(e.message))?;

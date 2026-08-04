@@ -145,6 +145,7 @@ async def stream_query_json(
     catalog: str | None = None,
     schema: str | None = None,
     total_timeout_s: float | None = None,
+    non_finite_floats: str = "null",
 ) -> AsyncIterator[Any]:
     """Yields HEARTBEAT while waiting on Databricks (and between slow chunks
     mid-download), then each result row as a ready-to-send JSON string --
@@ -158,13 +159,33 @@ async def stream_query_json(
     of order over the network). Decode and NDJSON encoding both happen in
     Rust -- this function only forwards already-formatted lines.
 
+    `non_finite_floats` -- `"null"` (default) or `"string"`. A NaN/Infinity/
+    -Infinity float column comes back from Databricks like any other value,
+    but JSON itself has no literal for it; the underlying JSON writer's own
+    fixed behavior is to emit `null` -- valid JSON, but indistinguishable
+    from a real SQL NULL in the same column once it's out (found by testing
+    against a live warehouse: a NaN and a NULL in the same float column both
+    came back as `null`). `"string"` recovers the distinction by emitting
+    the JSON strings `"NaN"`/`"Infinity"`/`"-Infinity"` for those specific
+    cells instead -- still valid JSON, but the caller must special-case
+    those three string values if it needs the actual float back. Only
+    top-level float columns are covered; one nested inside a STRUCT/ARRAY/MAP
+    still comes back as `null` either way.
+
     Note this yields a whole chunk's rows at once -- Databricks' own chunk
     sizing already bounds how much that is."""
+    if non_finite_floats not in ("null", "string"):
+        raise ValueError(f"non_finite_floats must be 'null' or 'string', got {non_finite_floats!r}")
     sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
     core_client = client._core_client  # noqa: SLF001 -- same package, see client.py
 
     async for item in core_client.stream_ndjson_lines(
-        sql, catalog=catalog, schema=schema, parameters=params, total_timeout_s=total_timeout_s
+        sql,
+        catalog=catalog,
+        schema=schema,
+        parameters=params,
+        total_timeout_s=total_timeout_s,
+        non_finite_as_string=(non_finite_floats == "string"),
     ):
         if item is _core.HEARTBEAT:
             yield HEARTBEAT

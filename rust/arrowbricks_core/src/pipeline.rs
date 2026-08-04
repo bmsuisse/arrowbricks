@@ -5,7 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Cursor as IoCursor;
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::{DataType, Float32Type, Float64Type, SchemaRef};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -303,7 +304,17 @@ pub async fn run_pipeline(
 /// (arrow-json's own default -- no custom format string needed, verified
 /// against arrow-json's own `write_timestamps_with_tz` test producing
 /// `"2018-11-13T17:11:10Z"`-shaped output, same as arro3).
-fn encode_ndjson_lines(batches: &[RecordBatch]) -> Result<Vec<String>, ApiError> {
+///
+/// `non_finite_as_string`: `arrow-json` (this crate's own JSON writer, not
+/// something arrowbricks wrote) hardcodes NaN/+-Infinity to JSON `null` --
+/// valid JSON, but indistinguishable from a real NULL once it's out (found
+/// by testing a wide real query against a live warehouse: a NaN and a NULL
+/// column came back identically as `null`). When this is `true`, those
+/// specific cells are patched to the JSON strings `"NaN"`/`"Infinity"`/
+/// `"-Infinity"` after encoding -- see `patch_non_finite_floats`. Only
+/// top-level Float32/Float64 columns are covered; a non-finite float nested
+/// inside a STRUCT/ARRAY/MAP still comes back as `null` either way.
+fn encode_ndjson_lines(batches: &[RecordBatch], non_finite_as_string: bool) -> Result<Vec<String>, ApiError> {
     if batches.is_empty() {
         return Ok(Vec::new());
     }
@@ -321,14 +332,119 @@ fn encode_ndjson_lines(batches: &[RecordBatch]) -> Result<Vec<String>, ApiError>
             transient: false,
         })?;
     }
-    String::from_utf8(buf)
+    let mut lines: Vec<String> = String::from_utf8(buf)
         .map_err(|e| ApiError {
             message: format!("NDJSON encode produced invalid UTF-8: {e}"),
             transient: false,
         })?
         .lines()
-        .map(|line| Ok(line.to_string()))
-        .collect()
+        .map(|line| line.to_string())
+        .collect();
+
+    if non_finite_as_string {
+        patch_non_finite_floats(batches, &mut lines);
+    }
+    Ok(lines)
+}
+
+/// `Some(token)` (already-quoted JSON, e.g. `"\"NaN\""`) if `v` is NaN or
+/// +-infinite, `None` for any finite value (including `-0.0`).
+fn non_finite_token(v: f64) -> Option<&'static str> {
+    if v.is_nan() {
+        Some("\"NaN\"")
+    } else if v == f64::INFINITY {
+        Some("\"Infinity\"")
+    } else if v == f64::NEG_INFINITY {
+        Some("\"-Infinity\"")
+    } else {
+        None
+    }
+}
+
+/// Rewrites each affected line's `null` (arrow-json's fixed encoding for a
+/// non-finite float, see `encode_ndjson_lines`) to a `"NaN"`/`"Infinity"`/
+/// `"-Infinity"` JSON string, in place. Only scans top-level Float32/Float64
+/// columns -- one row of `lines` per row of the batches, in the same order.
+fn patch_non_finite_floats(batches: &[RecordBatch], lines: &mut [String]) {
+    let mut global_row = 0usize;
+    for batch in batches {
+        let schema = batch.schema();
+        for row_in_batch in 0..batch.num_rows() {
+            for (field_index, field) in schema.fields().iter().enumerate() {
+                let token = match field.data_type() {
+                    DataType::Float64 => {
+                        let arr = batch.column(field_index).as_primitive::<Float64Type>();
+                        arr.is_valid(row_in_batch)
+                            .then(|| non_finite_token(arr.value(row_in_batch)))
+                            .flatten()
+                    }
+                    DataType::Float32 => {
+                        let arr = batch.column(field_index).as_primitive::<Float32Type>();
+                        arr.is_valid(row_in_batch)
+                            .then(|| non_finite_token(arr.value(row_in_batch) as f64))
+                            .flatten()
+                    }
+                    _ => None,
+                };
+                if let Some(token) = token {
+                    lines[global_row] = replace_nth_top_level_null(&lines[global_row], field_index, token);
+                }
+            }
+            global_row += 1;
+        }
+    }
+}
+
+/// Replaces the value at the `field_index`-th top-level key (0-based, in
+/// schema field order -- matching arrow-json's own emission order, which
+/// writes keys in field order rather than sorting them) of one NDJSON line
+/// with `replacement` (already valid JSON). Only ever called where the
+/// existing value is known -- from the source Arrow array, not by inspecting
+/// the JSON text -- to be exactly the 4-byte `null` arrow-json writes for a
+/// non-finite float, so this never touches a real NULL and, by counting
+/// keys positionally rather than by name, is correct even when two top-level
+/// columns share the same name (a real, supported case in this crate).
+fn replace_nth_top_level_null(line: &str, field_index: usize, replacement: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut current_field = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            b':' if depth == 1 => {
+                if current_field == field_index {
+                    let value_start = i + 1;
+                    debug_assert_eq!(
+                        bytes.get(value_start..value_start + 4),
+                        Some(&b"null"[..]),
+                        "replace_nth_top_level_null called on a field whose value wasn't null"
+                    );
+                    let mut out = String::with_capacity(line.len() + replacement.len());
+                    out.push_str(&line[..value_start]);
+                    out.push_str(replacement);
+                    out.push_str(&line[value_start + 4..]);
+                    return out;
+                }
+                current_field += 1;
+            }
+            _ => {}
+        }
+    }
+    line.to_string()
 }
 
 /// Chunk-granularity (not row-count-granularity) counterpart to
@@ -340,6 +456,7 @@ pub struct NdjsonStream {
     pub statement_id: String,
     pub num_chunks: usize,
     reorder: ReorderBuffer,
+    non_finite_as_string: bool,
 }
 
 impl NdjsonStream {
@@ -351,9 +468,10 @@ impl NdjsonStream {
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<String>>, ApiError> {
         match self.reorder.next().await? {
             Some(item) => {
+                let non_finite_as_string = self.non_finite_as_string;
                 let lines = tokio::task::spawn_blocking(move || {
                     let batches = decode_chunk(&item.blob)?;
-                    encode_ndjson_lines(&batches)
+                    encode_ndjson_lines(&batches, non_finite_as_string)
                 })
                 .await
                 .map_err(join_error)??;
@@ -376,6 +494,7 @@ pub async fn execute_ndjson_stream(
     catalog: Option<&str>,
     schema: Option<&str>,
     parameters: Option<Value>,
+    non_finite_as_string: bool,
 ) -> Result<NdjsonStream, ApiError> {
     let submitted = client
         .execute_arrow_statement(statement, catalog, schema, parameters)
@@ -390,6 +509,7 @@ pub async fn execute_ndjson_stream(
         statement_id: submitted.statement_id,
         num_chunks,
         reorder: ReorderBuffer::new(rx),
+        non_finite_as_string,
     })
 }
 
@@ -540,5 +660,107 @@ mod tests {
         assert_eq!(buf.next().await.unwrap().unwrap().chunk_index, 0);
         assert_eq!(buf.next().await.unwrap().unwrap().chunk_index, 1);
         assert_eq!(buf.next().await.unwrap_err().message, "boom");
+    }
+
+    #[test]
+    fn non_finite_token_covers_nan_and_both_infinities_only() {
+        assert_eq!(non_finite_token(f64::NAN), Some("\"NaN\""));
+        assert_eq!(non_finite_token(f64::INFINITY), Some("\"Infinity\""));
+        assert_eq!(non_finite_token(f64::NEG_INFINITY), Some("\"-Infinity\""));
+        assert_eq!(non_finite_token(0.0), None);
+        assert_eq!(non_finite_token(-0.0), None);
+        assert_eq!(non_finite_token(123.456), None);
+        assert_eq!(non_finite_token(-123.456), None);
+    }
+
+    #[test]
+    fn replace_nth_top_level_null_targets_by_position_not_name() {
+        // Two fields named "dup" -- the second is the one that's actually
+        // null (arrow-json's non-finite-float encoding); the first, same-
+        // named field is a real value and must be left alone. Proves the
+        // positional approach (not name matching) is what makes this safe.
+        let line = r#"{"dup":1,"dup":null}"#;
+        let patched = replace_nth_top_level_null(line, 1, "\"NaN\"");
+        assert_eq!(patched, r#"{"dup":1,"dup":"NaN"}"#);
+    }
+
+    #[test]
+    fn replace_nth_top_level_null_ignores_nested_nulls_at_deeper_depth() {
+        // A nested object's own "null" must not be mistaken for the
+        // top-level field being targeted -- depth tracking (not a naive
+        // first-`null`-wins scan) is what keeps this correct.
+        let line = r#"{"a":{"inner":null},"b":null}"#;
+        let patched = replace_nth_top_level_null(line, 1, "\"Infinity\"");
+        assert_eq!(patched, r#"{"a":{"inner":null},"b":"Infinity"}"#);
+    }
+
+    #[test]
+    fn replace_nth_top_level_null_skips_colons_inside_string_values() {
+        // A colon inside a quoted string value (e.g. a timestamp or URL)
+        // must not be mistaken for a field separator.
+        let line = r#"{"label":"12:34:56","dup":1,"dup":null}"#;
+        let patched = replace_nth_top_level_null(line, 2, "\"NaN\"");
+        assert_eq!(patched, r#"{"label":"12:34:56","dup":1,"dup":"NaN"}"#);
+    }
+
+    fn make_batch(id: Vec<i64>, values: Vec<f64>) -> RecordBatch {
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{Field, Schema};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(id)), Arc::new(Float64Array::from(values))],
+        )
+        .unwrap()
+    }
+
+    /// Regression test for a real behavior found by testing edge-case data
+    /// types against a live Databricks warehouse: NaN and Infinity floats
+    /// came back from `stream_query_json` as JSON `null`, indistinguishable
+    /// from a genuine SQL NULL in the same column -- arrow-json's own fixed
+    /// encoding for non-finite floats, not something arrowbricks chose.
+    /// `non_finite_as_string=true` must recover the distinction.
+    #[test]
+    fn encode_ndjson_lines_preserves_non_finite_floats_as_strings_when_requested() {
+        let batch = make_batch(vec![1, 2, 3, 4], vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.5]);
+
+        let default_lines = encode_ndjson_lines(std::slice::from_ref(&batch), false).unwrap();
+        assert_eq!(default_lines[0], r#"{"id":1,"value":null}"#);
+        assert_eq!(default_lines[1], r#"{"id":2,"value":null}"#);
+        assert_eq!(default_lines[2], r#"{"id":3,"value":null}"#);
+        assert_eq!(default_lines[3], r#"{"id":4,"value":1.5}"#);
+
+        let string_lines = encode_ndjson_lines(std::slice::from_ref(&batch), true).unwrap();
+        assert_eq!(string_lines[0], r#"{"id":1,"value":"NaN"}"#);
+        assert_eq!(string_lines[1], r#"{"id":2,"value":"Infinity"}"#);
+        assert_eq!(string_lines[2], r#"{"id":3,"value":"-Infinity"}"#);
+        assert_eq!(string_lines[3], r#"{"id":4,"value":1.5}"#); // finite values untouched
+    }
+
+    #[test]
+    fn encode_ndjson_lines_leaves_a_real_null_alone_when_requested() {
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{Field, Schema};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float64Array::from(vec![None])), // a genuine SQL NULL, not NaN
+            ],
+        )
+        .unwrap();
+
+        let lines = encode_ndjson_lines(std::slice::from_ref(&batch), true).unwrap();
+        assert_eq!(
+            lines[0], r#"{"id":1,"value":null}"#,
+            "a real NULL must stay null, never become a string"
+        );
     }
 }
