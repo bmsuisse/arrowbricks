@@ -52,11 +52,11 @@ asyncio.run(main())
 For streaming NDJSON (e.g. a FastAPI SSE endpoint, first row out as soon as its chunk arrives):
 
 ```python
-from arrowbricks import HEARTBEAT, DatabricksClient, stream_query_json
+from arrowbricks import HEARTBEAT, DatabricksClient
 
 client = DatabricksClient(host=..., warehouse_id=..., token=...)
 
-async for item in stream_query_json(client, "SELECT * FROM my_catalog.my_schema.big_table"):
+async for item in client.stream_query_json("SELECT * FROM my_catalog.my_schema.big_table"):
     if item is HEARTBEAT:
         continue  # forward as an SSE keep-alive comment, e.g.
     print(item)  # one ready-to-send JSON string per row
@@ -79,7 +79,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from arrowbricks import HEARTBEAT, DatabricksClient, stream_query_json
+from arrowbricks import HEARTBEAT, DatabricksClient
 
 app = FastAPI()
 client = DatabricksClient(
@@ -90,7 +90,7 @@ client = DatabricksClient(
 
 
 async def _sse(sql: str) -> AsyncIterator[str]:
-    async for item in stream_query_json(client, sql, total_timeout_s=300):
+    async for item in client.stream_query_json(sql, total_timeout_s=300):
         if item is HEARTBEAT:
             yield ": keep-alive\n\n"  # SSE comment line -- clients ignore it, it just keeps the connection open
         else:
@@ -133,7 +133,7 @@ conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 - `Cursor.fetchmany_arrow(size) -> Table`, `Cursor.fetchall_arrow() -> Table` -- an Arrow table (implements `__arrow_c_stream__`, so arro3/pyarrow/DuckDB can all consume it directly, zero-copy).
 - `Cursor.fetchall_streamed(*, total_timeout_s=None)` / `Cursor.fetchall_arrow_streamed(*, total_timeout_s=None)` -- like `fetchall()`/`fetchall_arrow()`, but yield `HEARTBEAT` while pulling chunks instead of blocking silently, then the final rows/Table -- for a caller downloading a large result over SSE who needs heartbeats (and a timeout) through the *download*, not just the initial wait. Compose with `execute_streamed` and a shared deadline if you want one combined budget across both phases (see `examples/fastapi_sse_pivot.py`).
 - `Cursor.description` -- DB-API-style `[(name, type_name, None, None, None, None, None), ...]` after `execute()`.
-- `stream_query_json(client, sql, **kwargs)` -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives. Timestamps come out as full ISO-8601, every column key is always present (`"col":null` for a null value, never an omitted key). JSON has no literal for NaN/Infinity/-Infinity, so those come back as `"col":null` by default -- pass `non_finite_floats="string"` to get `"col":"NaN"`/`"col":"Infinity"`/`"col":"-Infinity"` instead if you need to tell them apart from a real NULL.
+- `client.stream_query_json(sql, **kwargs)` (or the equivalent free function `stream_query_json(client, sql, **kwargs)`) -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives. Timestamps come out as full ISO-8601, every column key is always present (`"col":null` for a null value, never an omitted key). JSON has no literal for NaN/Infinity/-Infinity, so those come back as `"col":null` by default -- pass `non_finite_floats="string"` to get `"col":"NaN"`/`"col":"Infinity"`/`"col":"-Infinity"` instead if you need to tell them apart from a real NULL.
 - `DatabricksClient(host, warehouse_id, *, token=None, token_provider=None, ...)` -- the lower-level client `Connection` wraps. `client.upload_volume_file(volume_path, data)`/`client.delete_volume_file(volume_path)` for the Files API.
 - `write_ipc_stream(table, buf)` -- writes any Arrow-C-Data-Interface-compatible object as an uncompressed Arrow-IPC stream (see below).
 - `ReplayableArrowChunk(data: bytes, chunk_index, declared_row_count=None)` -- wraps raw Arrow-IPC stream bytes (e.g. previously downloaded and stored) so they can be read more than once via `__arrow_c_stream__` (a schema peek, then the actual scan -- DuckDB's registration path does this), and `.to_table()` for a one-shot parse. No extra dependency needed.

@@ -10,7 +10,7 @@ access token (or any other pre-issued OAuth token).
 import asyncio
 import os
 
-from arrowbricks import connect, stream_query_json
+from arrowbricks import connect
 
 
 async def main() -> None:
@@ -32,7 +32,7 @@ async def main() -> None:
     # no Cursor needed, since it streams rows as they arrive rather than
     # buffering a result set to page through. `conn.client` is the same
     # client `cursor()` uses.
-    async for row_json in stream_query_json(conn.client, "SELECT * FROM range(5)"):
+    async for row_json in conn.client.stream_query_json("SELECT * FROM range(5)"):
         print(row_json)
 
 

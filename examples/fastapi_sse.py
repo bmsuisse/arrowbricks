@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from arrowbricks import HEARTBEAT, DatabricksClient, stream_query_json
+from arrowbricks import HEARTBEAT, DatabricksClient
 
 app = FastAPI()
 
@@ -37,7 +37,7 @@ client = DatabricksClient(
 
 
 async def _sse(sql: str) -> AsyncIterator[str]:
-    async for item in stream_query_json(client, sql, total_timeout_s=300):
+    async for item in client.stream_query_json(sql, total_timeout_s=300):
         if item is HEARTBEAT:
             yield ": keep-alive\n\n"  # SSE comment line -- clients ignore it, it just keeps the connection open
         else:

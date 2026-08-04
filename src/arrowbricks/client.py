@@ -7,7 +7,8 @@ reorder, Arrow/JSON/NDJSON decode)."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from . import _core
 
@@ -93,3 +94,38 @@ class DatabricksClient:
         idempotent staging cleanup. Raises `RuntimeError` (message only) on
         any other failure."""
         await self._core_client.delete_volume_file(volume_path)
+
+    def stream_query_json(
+        self,
+        sql: str,
+        *,
+        params: list[dict[str, Any]] | None = None,
+        row_limit: int | None = None,
+        offset: int | None = None,
+        catalog: str | None = None,
+        schema: str | None = None,
+        total_timeout_s: float | None = None,
+        non_finite_floats: str = "null",
+    ) -> AsyncIterator[Any]:
+        """Convenience method form of the free function `stream_query_json(client,
+        sql, ...)` -- `client.stream_query_json(sql, ...)` reads more naturally at
+        a call site than passing `client` as the first positional argument of a
+        module-level function. Same behavior, same arguments minus `client`
+        itself; see `arrowbricks.stream_query_json`'s own docstring for what each
+        one does. The free function still exists and isn't going away -- this
+        just delegates to it (a lazy import here avoids a circular import
+        between this module and `_streaming.py`, which imports `DatabricksClient`
+        from here for its own type hint)."""
+        from ._streaming import stream_query_json as _stream_query_json
+
+        return _stream_query_json(
+            self,
+            sql,
+            params=params,
+            row_limit=row_limit,
+            offset=offset,
+            catalog=catalog,
+            schema=schema,
+            total_timeout_s=total_timeout_s,
+            non_finite_floats=non_finite_floats,
+        )

@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlglot import exp
 
-from arrowbricks import HEARTBEAT, DatabricksClient, stream_query_json
+from arrowbricks import HEARTBEAT, DatabricksClient
 
 app = FastAPI()
 
@@ -77,7 +77,7 @@ def validate_sql(sql: str) -> None:
 
 
 async def _sse(sql: str) -> AsyncIterator[str]:
-    async for item in stream_query_json(client, sql, total_timeout_s=300):
+    async for item in client.stream_query_json(sql, total_timeout_s=300):
         if item is HEARTBEAT:
             yield ": keep-alive\n\n"
         else:

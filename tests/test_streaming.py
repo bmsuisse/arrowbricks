@@ -36,6 +36,24 @@ async def test_stream_query_json_row_shape(mock_warehouse):
 
 
 @pytest.mark.asyncio
+async def test_client_stream_query_json_method_matches_the_free_function(mock_warehouse):
+    """DatabricksClient.stream_query_json(sql, ...) is a convenience method
+    form of the free function above -- same behavior, client passed as
+    `self` instead of the first positional argument. Must produce identical
+    output, not just "also work"."""
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=3)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+
+    rows = [json.loads(row) async for row in client.stream_query_json("SELECT * FROM whatever")]
+
+    assert rows == [
+        {"id": 0, "label": "row_0"},
+        {"id": 1, "label": "row_1"},
+        {"id": 2, "label": "row_2"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_query_json_survives_duplicate_index_and_a_gap(mock_server, chunk_bytes_builder):
     """chunk_index 0 has TWO external_links (a real, if uncommon, shape --
     DatabricksClient._fetch_chunk_index gathers over all of them), and index 1
