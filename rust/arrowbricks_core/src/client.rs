@@ -216,13 +216,29 @@ pub struct ChunkItem {
 /// collected the full body reliably before this runs, so a decode failure
 /// here means a genuine format problem, not a network blip -- treated as
 /// permanent (not retried), same reasoning as `ApiError::from_reqwest`.
+///
+/// A real Databricks chunk is not one LZ4 frame -- it's several concatenated
+/// back to back (confirmed against a real workspace: a 50k-row/1MB chunk came
+/// back as 18 separate frames). `FrameDecoder::read_to_end` stops the moment
+/// it hits the first frame's own end marker; calling it once silently
+/// produced only that first frame's ~200 bytes (just the Arrow schema
+/// message, no data) instead of the full stream, which `pipeline.rs` then
+/// decoded as a zero-row/zero-column result with no error at all -- this bug
+/// shipped from a design that was only ever verified against synthetic
+/// single-frame test data. Looping via `into_inner()` (which hands back
+/// whatever of the input slice the just-finished frame didn't consume) reads
+/// every concatenated frame in turn.
 fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
     use std::io::Read;
-    let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
     let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
+    let mut remaining: &[u8] = &compressed[..];
+    while !remaining.is_empty() {
+        let mut decoder = lz4_flex::frame::FrameDecoder::new(remaining);
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
+        remaining = decoder.into_inner();
+    }
     Ok(Bytes::from(out))
 }
 
@@ -717,6 +733,41 @@ async fn join_first_error(handles: Vec<tokio::task::JoinHandle<Result<(), ApiErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for a real bug found by testing against an actual
+    /// Databricks workspace (not just synthetic single-frame test data): a
+    /// real chunk's LZ4 compression is several frames concatenated back to
+    /// back (a 50k-row chunk came back as 18), and `decompress_lz4_frame`
+    /// originally only decoded the first one via one `read_to_end` call --
+    /// silently truncating to just that frame's ~200 bytes (the Arrow schema
+    /// message, no row data) with no error at all, which `pipeline.rs` then
+    /// happily decoded as an empty result.
+    #[test]
+    fn decompress_lz4_frame_reads_every_concatenated_frame() {
+        use std::io::Write;
+
+        fn compress_one_frame(data: &[u8]) -> Vec<u8> {
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let part_a = b"the quick brown fox jumps over the lazy dog ".repeat(50);
+        let part_b = b"pack my box with five dozen liquor jugs ".repeat(50);
+        let part_c = b"how vexingly quick daft zebras jump ".repeat(50);
+        let mut concatenated_frames = Vec::new();
+        concatenated_frames.extend(compress_one_frame(&part_a));
+        concatenated_frames.extend(compress_one_frame(&part_b));
+        concatenated_frames.extend(compress_one_frame(&part_c));
+
+        let decompressed = decompress_lz4_frame(&Bytes::from(concatenated_frames)).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&part_a);
+        expected.extend_from_slice(&part_b);
+        expected.extend_from_slice(&part_c);
+        assert_eq!(decompressed, Bytes::from(expected));
+    }
 
     fn ok_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {
         tokio::spawn(async { Ok(()) })
