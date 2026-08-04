@@ -35,6 +35,7 @@ class DatabricksClient:
         chunk_fetch_concurrency: int = 32,
         warehouse_start_timeout: float = 300.0,
         warehouse_confirmed_running_ttl_s: float = 30.0,
+        compress_results: bool = True,
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
@@ -46,6 +47,14 @@ class DatabricksClient:
         # which scales well past what asyncio+GIL concurrency used to buy.
         self.chunk_fetch_concurrency = chunk_fetch_concurrency
         self.warehouse_start_timeout = warehouse_start_timeout
+        # Requests LZ4-compressed cloud-fetch chunks (matches
+        # databricks-sql-connector's own enable_query_result_lz4_compression
+        # default) -- measured ~2x faster chunk-fetch time against a real
+        # 120-column/100k-row table, since network transfer, not local
+        # Arrow-IPC decode, is the bottleneck for a result that size. Set
+        # False if your link to the warehouse is fast/low-latency enough that
+        # decompression CPU time stops paying for itself.
+        self.compress_results = compress_results
         self._core_client = _core.Client(
             host,
             warehouse_id,
@@ -56,6 +65,7 @@ class DatabricksClient:
             wait_timeout=wait_timeout,
             warehouse_start_timeout=warehouse_start_timeout,
             warehouse_confirmed_running_ttl_s=warehouse_confirmed_running_ttl_s,
+            compress_results=compress_results,
         )
 
     async def aclose(self) -> None:

@@ -46,6 +46,7 @@ class Client:
         wait_timeout: str = "30s",
         warehouse_start_timeout: float = 300.0,
         warehouse_confirmed_running_ttl_s: float = 30.0,
+        compress_results: bool = True,
     ) -> None: ...
     async def execute_arrow(
         self,

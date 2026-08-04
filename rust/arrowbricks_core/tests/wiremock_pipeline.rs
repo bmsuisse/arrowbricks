@@ -134,6 +134,46 @@ async fn execute_statement_requests_lz4_frame_compression() {
 }
 
 #[tokio::test]
+async fn execute_statement_omits_compression_when_disabled() {
+    let server = MockServer::start().await;
+    let captured_body: Arc<std::sync::Mutex<Option<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(None));
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let captured_for_responder = captured_body.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            *captured_for_responder.lock().unwrap() = Some(req.body.clone());
+            ResponseTemplate::new(200).set_body_json(json!({
+                "statement_id": STATEMENT_ID,
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": []},
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_compress_results(false));
+    run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    let body = captured_body
+        .lock()
+        .unwrap()
+        .take()
+        .expect("statement submission never captured");
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        parsed.get("result_compression").is_none(),
+        "expected no result_compression field when compress_results=False, got: {parsed}"
+    );
+}
+
+#[tokio::test]
 async fn full_pipeline_happy_path() {
     let server = MockServer::start().await;
     install_mock_warehouse(&server, 3, 5, false).await;

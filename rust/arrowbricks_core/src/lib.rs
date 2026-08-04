@@ -218,6 +218,7 @@ impl PyDbClient {
         wait_timeout="30s".to_string(),
         warehouse_start_timeout=300.0,
         warehouse_confirmed_running_ttl_s=30.0,
+        compress_results=true,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -230,6 +231,7 @@ impl PyDbClient {
         wait_timeout: String,
         warehouse_start_timeout: f64,
         warehouse_confirmed_running_ttl_s: f64,
+        compress_results: bool,
     ) -> PyResult<Self> {
         let db_client = match (token, token_provider) {
             (Some(t), _) => DbClient::new(&host, &warehouse_id, &t),
@@ -249,7 +251,8 @@ impl PyDbClient {
                     .with_http_timeout(http_timeout)
                     .with_wait_timeout(wait_timeout)
                     .with_warehouse_start_timeout(warehouse_start_timeout)
-                    .with_warehouse_confirmed_running_ttl(warehouse_confirmed_running_ttl_s),
+                    .with_warehouse_confirmed_running_ttl(warehouse_confirmed_running_ttl_s)
+                    .with_compress_results(compress_results),
             ),
         })
     }

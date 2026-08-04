@@ -5,10 +5,12 @@ hot path -- statement submit/poll, bounded-concurrency chunk fetch, the
 `chunk_index` reorder buffer, Arrow-IPC decode/write, and NDJSON encode via
 [arrow-rs](https://github.com/apache/arrow-rs) -- exposed to Python via
 [PyO3](https://pyo3.rs). Every statement also requests LZ4-compressed
-cloud-fetch chunks (`result_compression: "LZ4_FRAME"`, matching
-`databricks-sql-connector`'s own default) and transparently decompresses them
-(`lz4_flex`, pure Rust) right after download -- less data over the wire, no
-client-facing change. This crate builds into the same wheel as the
+cloud-fetch chunks by default (`result_compression: "LZ4_FRAME"`, matching
+`databricks-sql-connector`'s own default; `compress_results=False` opts out
+at runtime, no rebuild needed) and transparently decompresses them
+(`lz4_flex`, pure Rust) right after download -- less data over the wire,
+~2x faster chunk-fetch time measured against a real 120-column/100k-row
+table. This crate builds into the same wheel as the
 top-level `arrowbricks` package, as its compiled submodule `arrowbricks._core`
 (see the repo root `pyproject.toml`'s `[tool.maturin]`) -- it is not published
 to PyPI on its own. `arrowbricks`'s own `Cursor`/`DatabricksClient`/
@@ -63,7 +65,7 @@ unlike the table object itself.
 
 ## API
 
-- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=32, http_timeout=60.0, wait_timeout="30s", warehouse_start_timeout=300.0, warehouse_confirmed_running_ttl_s=30.0)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching.
+- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=32, http_timeout=60.0, wait_timeout="30s", warehouse_start_timeout=300.0, warehouse_confirmed_running_ttl_s=30.0, compress_results=True)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching. `compress_results` requests LZ4-compressed cloud-fetch chunks (see above); set `False` to opt out.
 - `Client.execute_arrow(statement, *, catalog=None, schema=None, parameters=None) -> Table` -- eager: fetches and assembles the whole result before returning. `parameters` is Databricks' own named-parameter format (`[{"name":..., "value":..., "type":...}]`), passed straight through.
 - `Client.execute(statement, *, catalog=None, schema=None, parameters=None) -> ResultSet` -- submits and starts background chunk fetching without pulling anything yet.
   - `ResultSet.fetchmany_arrow(n) -> Table` -- pulls/decodes only as many chunks as needed for `n` rows, buffering the rest; may return fewer than `n` once exhausted.

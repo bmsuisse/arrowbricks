@@ -274,6 +274,12 @@ pub struct DbClient {
     warehouse_start_timeout: Duration,
     warehouse_confirmed_running_ttl: Duration,
     warehouse_confirmed_running_at: Mutex<Option<Instant>>,
+    /// Whether to request `result_compression: "LZ4_FRAME"` cloud-fetch
+    /// compression on every statement -- see `execute_statement`. Runtime
+    /// toggle (not a compile-time constant) so a caller who wants to
+    /// benchmark or rule out compression as a variable doesn't need to
+    /// rebuild the extension to do it.
+    compress_results: bool,
 }
 
 impl DbClient {
@@ -316,11 +322,26 @@ impl DbClient {
             warehouse_start_timeout: Duration::from_secs(300),
             warehouse_confirmed_running_ttl: Duration::from_secs(30),
             warehouse_confirmed_running_at: Mutex::new(None),
+            compress_results: true,
         }
     }
 
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.chunk_fetch_concurrency = n.max(1);
+        self
+    }
+
+    /// Matches Python's `DatabricksClient(..., compress_results=True)` --
+    /// whether to request LZ4-compressed cloud-fetch chunks. On by default
+    /// (matches `databricks-sql-connector`'s own
+    /// `enable_query_result_lz4_compression=True` default); measured ~2x
+    /// faster chunk-fetch time against a real 120-column/100k-row table
+    /// (network transfer, not local decode, is the bottleneck for a result
+    /// this size). Off trades that back for zero decompression CPU work --
+    /// worth it for a caller on a very fast/low-latency link to the
+    /// warehouse, where compression's CPU cost stops paying for itself.
+    pub fn with_compress_results(mut self, enabled: bool) -> Self {
+        self.compress_results = enabled;
         self
     }
 
@@ -504,13 +525,17 @@ impl DbClient {
             "format": format,
             "wait_timeout": self.wait_timeout,
             "on_wait_timeout": "CONTINUE",
+        });
+        if self.compress_results {
             // Matches databricks-sql-python's default
             // (enable_query_result_lz4_compression=True) -- trades a cheap
             // client-side LZ4 decompress for meaningfully less data over the
             // wire, which is the actual bottleneck for a large result (local
             // Arrow-IPC decode is already fast; network transfer isn't).
-            "result_compression": "LZ4_FRAME",
-        });
+            // Runtime-toggleable via `compress_results=False` -- see
+            // `with_compress_results`.
+            body["result_compression"] = json!("LZ4_FRAME");
+        }
         if let Some(c) = catalog {
             body["catalog"] = json!(c);
         }
