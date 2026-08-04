@@ -1,4 +1,9 @@
-# arrowbricks
+<p align="center">
+  <img src="assets/logo.svg" width="72" height="72" alt="arrowbricks logo">
+</p>
+
+<h1 align="center">arrowbricks</h1>
+<p align="center">Databricks SQL to Arrow, with a Rust core.</p>
 
 Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a `Cursor` shaped like [`databricks-sql-python`](https://github.com/databricks/databricks-sql-python)'s (`execute`, `fetchone`/`fetchmany`/`fetchall`, `fetchall_arrow`/`fetchmany_arrow`), or `stream_query_json` for streaming NDJSON.
 
