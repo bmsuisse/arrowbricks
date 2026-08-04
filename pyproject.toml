@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "1.0.0"
+version = "1.0.1"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
 readme = "README.md"
 license = "MIT"

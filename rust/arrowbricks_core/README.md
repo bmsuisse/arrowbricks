@@ -72,6 +72,7 @@ unlike the table object itself.
 - `Client.execute_streamed(statement, *, catalog=None, schema=None, parameters=None, total_timeout_s=None)` -- like `execute()`, but an async iterator yielding the `HEARTBEAT` singleton while waiting on Databricks instead of blocking silently (bridge e.g. an SSE connection through a slow warehouse cold start), then a `ResultSet` exactly once. Raises if `total_timeout_s` elapses first.
   - `ResultSet.fetchall_arrow_streamed(*, total_timeout_s=None)` -- same idea for the chunk-download phase: yields `HEARTBEAT` while pulling chunks, then a `Table` exactly once.
 - `write_ipc_stream(stream, buf)` -- free function; writes any object implementing `__arrow_c_stream__` (a `Table` from this crate, arro3, pyarrow, ...) as uncompressed Arrow-IPC stream bytes to a Python file-like object. No dependency needed regardless of the input's origin.
+- `read_ipc_stream(data: bytes) -> Table` -- free function; the exact inverse of `write_ipc_stream`, parsing raw Arrow-IPC stream bytes back into a `Table`. No dependency needed regardless of where the bytes came from -- backs `arrowbricks.ReplayableArrowChunk`, which needs to re-parse the same cached bytes on every `__arrow_c_stream__` call.
 - `HEARTBEAT` -- module-level singleton; compare with `is`, e.g. `if item is _core.HEARTBEAT: ...`.
 
 ## With DuckDB

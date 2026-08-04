@@ -57,6 +57,23 @@ fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyA
     Ok(())
 }
 
+/// Read-side counterpart to `write_ipc_stream`: parses raw Arrow-IPC stream
+/// bytes (e.g. a previously-downloaded chunk, or anything `write_ipc_stream`
+/// itself wrote) back into a `Table`. No dependency needed regardless of
+/// where the bytes came from -- backs `ReplayableArrowChunk`, which needs to
+/// re-parse the same cached bytes on every `__arrow_c_stream__` call.
+#[pyfunction]
+#[pyo3(signature = (data))]
+fn read_ipc_stream(data: &[u8]) -> PyResult<PyTable> {
+    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
+        .map_err(|e| PyRuntimeError::new_err(format!("bad Arrow IPC stream: {e}")))?;
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader
+        .collect::<Result<_, _>>()
+        .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC decode error: {e}")))?;
+    PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
 fn py_err_to_api_error(e: PyErr) -> ApiError {
     ApiError {
         message: e.to_string(),
@@ -693,6 +710,7 @@ impl PyNdjsonStreamIter {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ping, m)?)?;
     m.add_function(wrap_pyfunction!(write_ipc_stream, m)?)?;
+    m.add_function(wrap_pyfunction!(read_ipc_stream, m)?)?;
     m.add_class::<PyDbClient>()?;
     m.add_class::<PyResultSet>()?;
     m.add_class::<PyHeartbeat>()?;

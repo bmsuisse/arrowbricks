@@ -22,6 +22,7 @@ from .client import DatabricksClient
 __all__ = [
     "HEARTBEAT",
     "QueryTimeout",
+    "ReplayableArrowChunk",
     "await_with_heartbeat",
     "stream_query_json",
     "write_ipc_stream",
@@ -61,6 +62,35 @@ def write_ipc_stream(stream: Any, buf: BinaryIO) -> None:
     uncompressed bodies are the safe default for bytes that might end up
     read by anything."""
     _core.write_ipc_stream(stream, buf)
+
+
+class ReplayableArrowChunk:
+    """Wraps one Arrow IPC-stream byte chunk so it can be handed to something
+    that calls `__arrow_c_stream__` more than once per relation (a schema
+    peek, then the actual scan -- DuckDB's registration path does this, for
+    one). A plain parsed stream is single-use and raises on the second call,
+    so this re-parses from the cached bytes every call instead. The bytes are
+    already fully in memory, so re-parsing costs a cheap second pass, not a
+    second network fetch. No extra dependency needed -- `._core.read_ipc_stream`
+    handles the actual parse."""
+
+    __slots__ = ("_data", "chunk_index", "declared_row_count")
+
+    def __init__(self, data: bytes, chunk_index: int, declared_row_count: int | None = None) -> None:
+        self._data = data
+        self.chunk_index = chunk_index
+        self.declared_row_count = declared_row_count
+
+    def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+        return _core.read_ipc_stream(self._data).__arrow_c_stream__(requested_schema)
+
+    def nbytes(self) -> int:
+        return len(self._data)
+
+    def to_table(self) -> Any:
+        """Parses this chunk's bytes into an Arrow table (implements
+        `__arrow_c_stream__` -- arro3/pyarrow/DuckDB-compatible)."""
+        return _core.read_ipc_stream(self._data)
 
 
 async def await_with_heartbeat(

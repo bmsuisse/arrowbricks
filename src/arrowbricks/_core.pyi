@@ -3,6 +3,7 @@ from typing import Any, BinaryIO
 
 def ping() -> str: ...
 def write_ipc_stream(stream: Any, buf: BinaryIO) -> None: ...  # stream: anything implementing __arrow_c_stream__
+def read_ipc_stream(data: bytes) -> Any: ...  # Arrow table (__arrow_c_stream__)
 
 class _Heartbeat:
     def __repr__(self) -> str: ...

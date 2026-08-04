@@ -1,6 +1,7 @@
 from ._streaming import (
     HEARTBEAT,
     QueryTimeout,
+    ReplayableArrowChunk,
     await_with_heartbeat,
     stream_query_json,
     write_ipc_stream,
@@ -14,6 +15,7 @@ __all__ = [
     "Cursor",
     "DatabricksClient",
     "QueryTimeout",
+    "ReplayableArrowChunk",
     "await_with_heartbeat",
     "connect",
     "stream_query_json",

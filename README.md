@@ -93,6 +93,7 @@ conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 - `stream_query_json(client, sql, **kwargs)` -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives. Timestamps come out as full ISO-8601, every column key is always present (`"col":null` for a null value, never an omitted key).
 - `DatabricksClient(host, warehouse_id, *, token=None, token_provider=None, ...)` -- the lower-level client `Connection` wraps. `client.upload_volume_file(volume_path, data)`/`client.delete_volume_file(volume_path)` for the Files API.
 - `write_ipc_stream(table, buf)` -- writes any Arrow-C-Data-Interface-compatible object as an uncompressed Arrow-IPC stream (see below).
+- `ReplayableArrowChunk(data: bytes, chunk_index, declared_row_count=None)` -- wraps raw Arrow-IPC stream bytes (e.g. previously downloaded and stored) so they can be read more than once via `__arrow_c_stream__` (a schema peek, then the actual scan -- DuckDB's registration path does this), and `.to_table()` for a one-shot parse. No extra dependency needed.
 
 `Cursor.execute`/`execute_streamed`/`stream_query_json` all accept `catalog`, `schema`, `row_limit`, `offset`, and `total_timeout_s`.
 
