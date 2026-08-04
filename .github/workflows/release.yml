@@ -32,12 +32,24 @@ jobs:
 
   # abi3-py311 means one wheel per (OS, arch) covers every Python >= 3.11 --
   # no per-Python-version build matrix needed, unlike a non-abi3 PyO3 crate.
+  #
+  # aarch64 builds natively on a hosted arm64 runner rather than
+  # cross-compiling from x86_64 -- reqwest's `rustls` feature pulls in
+  # aws-lc-sys (its only crypto backend in this reqwest version, no `ring`
+  # alternative), whose C build reliably fails under aarch64 cross-compile
+  # toolchains in maturin-action's manylinux container. Building natively
+  # sidesteps the whole cross-compilation class of aws-lc-sys issues instead
+  # of fighting the specific toolchain flags.
   linux:
     needs: test
-    runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+          - target: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
