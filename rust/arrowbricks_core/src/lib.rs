@@ -19,11 +19,6 @@ use client::{ApiError, DbClient, TokenFuture, TokenProvider};
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
 use pipeline::{NdjsonStream, ResultStream};
 
-#[pyfunction]
-fn ping() -> &'static str {
-    "pong"
-}
-
 /// Writes any object implementing `__arrow_c_stream__` (a `Table`/
 /// `RecordBatchReader` from this crate, arro3, pyarrow, or anything else
 /// Arrow-C-Data-Interface-compatible) as Arrow-IPC stream bytes to `buf` (a
@@ -257,32 +252,6 @@ impl PyDbClient {
         })
     }
 
-    /// Full submit->poll->fetch->reorder->decode pipeline for one
-    /// ARROW_STREAM statement, eagerly assembling the whole result. Returns
-    /// a `pyo3_arrow` `Table` -- it implements the Arrow C Data Interface
-    /// (`__arrow_c_stream__`), so DuckDB/pyarrow/arro3 can all import it
-    /// directly, zero-copy. For a large result where you don't want the
-    /// whole thing pulled upfront, use `execute()` + `ResultSet.fetchmany_arrow`.
-    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None))]
-    fn execute_arrow<'py>(
-        &self,
-        py: Python<'py>,
-        statement: String,
-        catalog: Option<String>,
-        schema: Option<String>,
-        parameters: Option<Py<PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.inner.clone();
-        let parameters = parameters_to_value(py, parameters)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = pipeline::run_pipeline(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))?;
-            let arrow_schema = result.schema.unwrap_or_else(|| Arc::new(Schema::empty()));
-            PyTable::try_new(result.batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
-    }
-
     /// Submits the statement and starts background chunk fetching, without
     /// pulling any of it yet -- returns a `ResultSet` for on-demand
     /// `fetchmany_arrow`/`fetchall_arrow`, mirroring `cursor.py`'s
@@ -309,60 +278,6 @@ impl PyDbClient {
                 columns: column_pairs(&stream.columns),
                 inner: Arc::new(AsyncMutex::new(stream)),
             })
-        })
-    }
-
-    /// Like `execute()`, but yields `HEARTBEAT` while waiting on Databricks
-    /// instead of blocking silently -- for bridging e.g. an SSE connection
-    /// during a possible multi-minute cold warehouse start. Yields
-    /// `HEARTBEAT` zero or more times, then a `ResultSet` once ready to
-    /// fetch. Not async itself (matches `cursor.py`'s own `execute_streamed`,
-    /// a sync method returning an async generator) -- the submit/poll starts
-    /// running immediately in the background regardless of when the caller
-    /// starts iterating.
-    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None))]
-    fn execute_streamed(
-        &self,
-        py: Python<'_>,
-        statement: String,
-        catalog: Option<String>,
-        schema: Option<String>,
-        parameters: Option<Py<PyAny>>,
-        total_timeout_s: Option<f64>,
-    ) -> PyResult<PyExecuteStreamedIter> {
-        let client = self.inner.clone();
-        let parameters = parameters_to_value(py, parameters)?;
-        let fut = async move {
-            pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref(), parameters).await
-        };
-        Ok(PyExecuteStreamedIter {
-            wait: Arc::new(AsyncMutex::new(Some(HeartbeatWait::new(fut, total_timeout_s)))),
-        })
-    }
-
-    /// Full submit->poll->fetch->reorder pipeline for one JSON_ARRAY
-    /// statement -- no Arrow parse at all. Returns a plain list of rows,
-    /// each row a list of values where every non-null value is a *string*
-    /// (Databricks' own JSON_ARRAY contract, not this crate's choice) --
-    /// cast by the manifest's column type_name yourself if you want native
-    /// Python types.
-    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None))]
-    fn execute_json<'py>(
-        &self,
-        py: Python<'py>,
-        statement: String,
-        catalog: Option<String>,
-        schema: Option<String>,
-        parameters: Option<Py<PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.inner.clone();
-        let parameters = parameters_to_value(py, parameters)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result =
-                pipeline::run_json_pipeline(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.message))?;
-            Ok(result.rows)
         })
     }
 
@@ -525,49 +440,6 @@ impl PyResultSet {
     }
 }
 
-/// Async iterator returned by `Client.execute_streamed`: yields the
-/// `HEARTBEAT` singleton zero or more times, then a `ResultSet` exactly
-/// once, then stops.
-#[pyclass(name = "ExecuteStreamedIter")]
-struct PyExecuteStreamedIter {
-    wait: Arc<AsyncMutex<Option<HeartbeatWait<ResultStream>>>>,
-}
-
-#[pymethods]
-impl PyExecuteStreamedIter {
-    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let wait = self.wait.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = wait.lock().await;
-            let Some(w) = guard.as_mut() else {
-                return Err(PyStopAsyncIteration::new_err(()));
-            };
-            match w.tick().await {
-                Ok(Some(Tick::Heartbeat)) => Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any())),
-                Ok(Some(Tick::Ready(stream))) => {
-                    *guard = None;
-                    let result_set = PyResultSet {
-                        statement_id: stream.statement_id.clone(),
-                        num_chunks: stream.num_chunks,
-                        columns: column_pairs(&stream.columns),
-                        inner: Arc::new(AsyncMutex::new(stream)),
-                    };
-                    Python::attach(|py| Py::new(py, result_set).map(|rs| rs.into_any()))
-                }
-                Ok(None) => Err(PyStopAsyncIteration::new_err(())),
-                Err(e) => {
-                    *guard = None;
-                    Err(PyRuntimeError::new_err(e.message))
-                }
-            }
-        })
-    }
-}
-
 /// Async iterator returned by `ResultSet.fetchall_arrow_streamed`: yields
 /// the `HEARTBEAT` singleton zero or more times, then a `Table` exactly
 /// once, then stops.
@@ -717,13 +589,11 @@ impl PyNdjsonStreamIter {
 /// "arrowbricks._core", manifest-path pointing back at this crate).
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(ping, m)?)?;
     m.add_function(wrap_pyfunction!(write_ipc_stream, m)?)?;
     m.add_function(wrap_pyfunction!(read_ipc_stream, m)?)?;
     m.add_class::<PyDbClient>()?;
     m.add_class::<PyResultSet>()?;
     m.add_class::<PyHeartbeat>()?;
-    m.add_class::<PyExecuteStreamedIter>()?;
     m.add_class::<PyFetchallArrowStreamedIter>()?;
     m.add_class::<PyNdjsonStreamIter>()?;
     m.add("HEARTBEAT", heartbeat_singleton(m.py())?)?;

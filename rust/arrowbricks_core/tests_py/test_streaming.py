@@ -1,7 +1,7 @@
-"""Python-level tests for Client.execute_streamed and
-ResultSet.fetchall_arrow_streamed -- the HEARTBEAT identity check and the
-async-iterator protocol (__aiter__/__anext__, StopAsyncIteration) can only be
-proven against the real built extension and a real asyncio event loop.
+"""Python-level tests for ResultSet.fetchall_arrow_streamed -- the HEARTBEAT
+identity check and the async-iterator protocol (__aiter__/__anext__,
+StopAsyncIteration) can only be proven against the real built extension and a
+real asyncio event loop.
 
 The heartbeat interval itself is hardcoded at 15s in production code (no
 Python-facing knob) -- tests don't wait through that. Instead they exploit
@@ -87,9 +87,14 @@ def _start_fast_server(n_chunks: int, rows_per_chunk: int):
     return server, port_holder["port"]
 
 
-def _start_never_ready_server():
-    """Statement submit/poll never reaches a terminal state -- forces the
-    heartbeat wrapper to keep ticking until total_timeout_s fires."""
+def _start_stalls_on_chunk_fetch_server():
+    """Statement submission succeeds immediately (one chunk), but that
+    chunk's own link-resolution GET never responds -- forces
+    fetchall_arrow_streamed's heartbeat wrapper to keep ticking (waiting on
+    the chunk download, not the statement) until total_timeout_s fires.
+    time.sleep in the handler only blocks that one request's own thread
+    (ThreadingHTTPServer) -- the client-side timeout still fires quickly
+    since it's the Rust reqwest future being aborted, not the server."""
     port_holder: dict = {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -109,33 +114,33 @@ def _start_never_ready_server():
         def do_GET(self):
             if self.path == f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}":
                 return self._json({"state": "RUNNING"})
-            return self._json({"statement_id": "stmt-never", "status": {"state": "RUNNING"}})
+            if self.path == f"/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/0":
+                import time
+
+                time.sleep(30)  # far longer than any total_timeout_s used below
+                return self._json({"external_links": []})
+            self.send_response(404)
+            self.end_headers()
 
         def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(length)
-            return self._json({"statement_id": "stmt-never", "status": {"state": "RUNNING"}})
+            if self.path == "/api/2.0/sql/statements":
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                return self._json(
+                    {
+                        "statement_id": STATEMENT_ID,
+                        "status": {"state": "SUCCEEDED"},
+                        "manifest": {"chunks": [{"chunk_index": 0, "row_count": 5}]},
+                    }
+                )
+            self.send_response(404)
+            self.end_headers()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     port_holder["port"] = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, port_holder["port"]
-
-
-@pytest.mark.asyncio
-async def test_execute_streamed_fast_query_yields_one_result_set_no_heartbeats():
-    server, port = _start_fast_server(n_chunks=3, rows_per_chunk=5)
-    try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
-        items = [item async for item in client.execute_streamed("SELECT * FROM t")]
-        assert len(items) == 1, "a statement that's already SUCCEEDED should yield no heartbeats"
-        result_set = items[0]
-        assert result_set is not arrowbricks_core.HEARTBEAT
-        table = await result_set.fetchall_arrow()
-        assert table.num_rows == 15
-    finally:
-        server.shutdown()
 
 
 @pytest.mark.asyncio
@@ -152,17 +157,18 @@ async def test_fetchall_arrow_streamed_yields_one_table_no_heartbeats():
 
 
 @pytest.mark.asyncio
-async def test_execute_streamed_heartbeat_identity_and_timeout():
+async def test_fetchall_arrow_streamed_heartbeat_identity_and_timeout():
     """total_timeout_s's deadline is checked at the *start* of each tick, so
     a very short deadline (0.01s) also shortens the first wait
     (min(interval, deadline - now)) -- makes the heartbeat-then-timeout path
     fast without waiting through the real 15s interval."""
-    server, port = _start_never_ready_server()
+    server, port = _start_stalls_on_chunk_fetch_server()
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        result_set = await client.execute("SELECT * FROM t")
         seen_heartbeat = False
         with pytest.raises(RuntimeError, match="timeout"):
-            async for item in client.execute_streamed("SELECT * FROM t", total_timeout_s=0.01):
+            async for item in result_set.fetchall_arrow_streamed(total_timeout_s=0.01):
                 assert item is arrowbricks_core.HEARTBEAT
                 seen_heartbeat = True
         assert seen_heartbeat, "expected at least one HEARTBEAT before the timeout fired"
@@ -174,11 +180,13 @@ async def test_execute_streamed_heartbeat_identity_and_timeout():
 async def test_heartbeat_is_a_true_singleton():
     # Two independently-triggered heartbeats (from two separate iterators)
     # must be the *same* object -- callers do `item is HEARTBEAT`.
-    server, port = _start_never_ready_server()
+    server, port = _start_stalls_on_chunk_fetch_server()
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
-        first = await client.execute_streamed("SELECT * FROM t", total_timeout_s=0.01).__anext__()
-        second = await client.execute_streamed("SELECT * FROM t", total_timeout_s=0.01).__anext__()
+        result_set = await client.execute("SELECT * FROM t")
+        first = await result_set.fetchall_arrow_streamed(total_timeout_s=0.01).__anext__()
+        second_result_set = await client.execute("SELECT * FROM t")
+        second = await second_result_set.fetchall_arrow_streamed(total_timeout_s=0.01).__anext__()
         assert first is arrowbricks_core.HEARTBEAT
         assert second is arrowbricks_core.HEARTBEAT
         assert first is second, "HEARTBEAT must be one singleton object, not a fresh instance per tick"
@@ -191,7 +199,8 @@ async def test_streamed_iterator_stops_after_yielding_once():
     server, port = _start_fast_server(n_chunks=1, rows_per_chunk=3)
     try:
         client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
-        it = client.execute_streamed("SELECT * FROM t")
+        result_set = await client.execute("SELECT * FROM t")
+        it = result_set.fetchall_arrow_streamed()
         first = await it.__anext__()
         assert first is not arrowbricks_core.HEARTBEAT
         with pytest.raises(StopAsyncIteration):

@@ -1,7 +1,6 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, BinaryIO
 
-def ping() -> str: ...
 def write_ipc_stream(stream: Any, buf: BinaryIO) -> None: ...  # stream: anything implementing __arrow_c_stream__
 def read_ipc_stream(data: bytes) -> Any: ...  # Arrow table (__arrow_c_stream__)
 
@@ -21,10 +20,6 @@ class ResultSet:
     async def fetchall_arrow(self) -> Any: ...  # Arrow table (__arrow_c_stream__)
     def fetchall_arrow_streamed(self, total_timeout_s: float | None = None) -> FetchallArrowStreamedIter: ...
     async def schema(self) -> list[tuple[str, str]] | None: ...  # real schema, known after >=1 fetch
-
-class ExecuteStreamedIter:
-    def __aiter__(self) -> ExecuteStreamedIter: ...
-    async def __anext__(self) -> ResultSet | _Heartbeat: ...
 
 class FetchallArrowStreamedIter:
     def __aiter__(self) -> FetchallArrowStreamedIter: ...
@@ -48,13 +43,6 @@ class Client:
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
     ) -> None: ...
-    async def execute_arrow(
-        self,
-        statement: str,
-        catalog: str | None = None,
-        schema: str | None = None,
-        parameters: list[dict[str, Any]] | None = None,
-    ) -> Any: ...  # Arrow table (__arrow_c_stream__)
     async def execute(
         self,
         statement: str,
@@ -62,21 +50,6 @@ class Client:
         schema: str | None = None,
         parameters: list[dict[str, Any]] | None = None,
     ) -> ResultSet: ...
-    def execute_streamed(
-        self,
-        statement: str,
-        catalog: str | None = None,
-        schema: str | None = None,
-        parameters: list[dict[str, Any]] | None = None,
-        total_timeout_s: float | None = None,
-    ) -> ExecuteStreamedIter: ...
-    async def execute_json(
-        self,
-        statement: str,
-        catalog: str | None = None,
-        schema: str | None = None,
-        parameters: list[dict[str, Any]] | None = None,
-    ) -> list[list[Any]]: ...
     async def upload_volume_file(self, volume_path: str, data: bytes) -> None: ...
     async def delete_volume_file(self, volume_path: str) -> None: ...
     def stream_ndjson_lines(

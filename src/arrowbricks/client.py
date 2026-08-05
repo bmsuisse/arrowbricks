@@ -40,24 +40,22 @@ class DatabricksClient:
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
-        self.warehouse_id = warehouse_id
-        self.http_timeout = http_timeout
-        self.wait_timeout = wait_timeout
-        # Each concurrent fetch slot holds a whole chunk's raw bytes in
-        # memory. 64 -- tuned for the Rust core's real OS-thread parallelism,
-        # which scales well past what asyncio+GIL concurrency used to buy;
-        # measured against a real 400-chunk/5.6M-row table (see client.rs's
-        # own comment for the numbers).
-        self.chunk_fetch_concurrency = chunk_fetch_concurrency
-        self.warehouse_start_timeout = warehouse_start_timeout
-        # Requests LZ4-compressed cloud-fetch chunks (matches
-        # databricks-sql-connector's own enable_query_result_lz4_compression
-        # default) -- measured ~2x faster chunk-fetch time against a real
-        # 120-column/100k-row table, since network transfer, not local
-        # Arrow-IPC decode, is the bottleneck for a result that size. Set
-        # False if your link to the warehouse is fast/low-latency enough that
-        # decompression CPU time stops paying for itself.
-        self.compress_results = compress_results
+        # All of these (and warehouse_id) are only ever needed by the Rust
+        # core's own Client below, which holds the authoritative copies --
+        # nothing here reads them back, so they aren't kept on self too.
+        # chunk_fetch_concurrency: each concurrent fetch slot holds a whole
+        # chunk's raw bytes in memory. 64 -- tuned for the Rust core's real
+        # OS-thread parallelism, which scales well past what asyncio+GIL
+        # concurrency used to buy; measured against a real 400-chunk/
+        # 5.6M-row table (see client.rs's own comment for the numbers).
+        # compress_results: requests LZ4-compressed cloud-fetch chunks
+        # (matches databricks-sql-connector's own
+        # enable_query_result_lz4_compression default) -- measured ~2x
+        # faster chunk-fetch time against a real 120-column/100k-row table,
+        # since network transfer, not local Arrow-IPC decode, is the
+        # bottleneck for a result that size. Set False if your link to the
+        # warehouse is fast/low-latency enough that decompression CPU time
+        # stops paying for itself.
         self._core_client = _core.Client(
             host,
             warehouse_id,

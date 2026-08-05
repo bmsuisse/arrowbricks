@@ -110,7 +110,8 @@ async def test_static_token_still_works():
         client = arrowbricks_core.Client(
             host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fixed-token"
         )
-        table = await client.execute_arrow("SELECT * FROM t")
+        result = await client.execute("SELECT * FROM t")
+        table = await result.fetchall_arrow()
         assert table.num_rows == 15
         assert seen and all(t == "fixed-token" for t in seen)
     finally:
@@ -131,7 +132,8 @@ async def test_sync_token_provider_called_fresh_every_request():
         client = arrowbricks_core.Client(
             host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token_provider=provider
         )
-        table = await client.execute_arrow("SELECT * FROM t")
+        result = await client.execute("SELECT * FROM t")
+        table = await result.fetchall_arrow()
         assert table.num_rows == 30
         # warehouse status + submit + one chunk-index resolve per chunk
         assert len(seen) == 2 + 6
