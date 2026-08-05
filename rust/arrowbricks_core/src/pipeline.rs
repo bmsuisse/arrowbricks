@@ -387,8 +387,14 @@ fn patch_non_finite_floats(batches: &[RecordBatch], lines: &mut [String]) {
             .iter()
             .enumerate()
             .filter_map(|(field_index, field)| match field.data_type() {
-                DataType::Float64 => Some(FloatColumn::F64(field_index, batch.column(field_index).as_primitive::<Float64Type>())),
-                DataType::Float32 => Some(FloatColumn::F32(field_index, batch.column(field_index).as_primitive::<Float32Type>())),
+                DataType::Float64 => Some(FloatColumn::F64(
+                    field_index,
+                    batch.column(field_index).as_primitive::<Float64Type>(),
+                )),
+                DataType::Float32 => Some(FloatColumn::F32(
+                    field_index,
+                    batch.column(field_index).as_primitive::<Float32Type>(),
+                )),
                 _ => None,
             })
             .collect();

@@ -688,7 +688,10 @@ impl DbClient {
                 if link.external_link.is_empty() {
                     continue;
                 }
-                pre_resolved.entry(link.chunk_index).or_default().push(link.external_link);
+                pre_resolved
+                    .entry(link.chunk_index)
+                    .or_default()
+                    .push(link.external_link);
             }
         }
         let chunk_metas = manifest
@@ -770,9 +773,13 @@ impl DbClient {
                         let meta = { queue.lock().unwrap().pop_front() };
                         let Some(meta) = meta else { return Ok(()) };
                         let fetched = if meta.pre_resolved_links.is_empty() {
-                            client.fetch_chunk_index(&statement_id, meta.chunk_index, compressed).await
+                            client
+                                .fetch_chunk_index(&statement_id, meta.chunk_index, compressed)
+                                .await
                         } else {
-                            client.fetch_pre_resolved_links(&meta.pre_resolved_links, compressed).await
+                            client
+                                .fetch_pre_resolved_links(&meta.pre_resolved_links, compressed)
+                                .await
                         };
                         match fetched {
                             Ok(blobs) => {
@@ -995,7 +1002,9 @@ mod tests {
         tokio::spawn(async move {
             let mut attempt = 0u32;
             loop {
-                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
                 attempt += 1;
                 let mut buf = [0u8; 1024];
                 let _ = socket.read(&mut buf).await;

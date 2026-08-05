@@ -232,12 +232,16 @@ async fn pre_resolved_chunk0_link_skips_the_extra_resolution_get() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"^/_data/chunk-0$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"),
+        )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/_data/chunk-1$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"),
+        )
         .mount(&server)
         .await;
 
@@ -298,12 +302,16 @@ async fn pre_resolved_links_supports_multiple_links_for_the_same_chunk_index() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"^/_data/chunk-0a$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"),
+        )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/_data/chunk-0b$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"),
+        )
         .mount(&server)
         .await;
 
@@ -363,7 +371,9 @@ async fn pre_resolved_link_with_omitted_chunk_index_defaults_to_chunk_zero() {
         .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/_data/chunk-0$"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"),
+        )
         .mount(&server)
         .await;
 
