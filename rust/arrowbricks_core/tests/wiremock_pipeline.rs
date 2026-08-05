@@ -173,6 +173,207 @@ async fn execute_statement_omits_compression_when_disabled() {
     );
 }
 
+/// Regression test for the SEA "embedded first chunk" optimization: a real
+/// workspace's SUCCEEDED statement response already carries chunk 0's
+/// presigned URL directly in `result.external_links`, so the client must
+/// skip that chunk's own `GET .../result/chunks/0` resolution call entirely
+/// and go straight to downloading the blob. `.expect(0)` on that mock fails
+/// the test (on `MockServer` drop) if it's ever hit -- proves the round trip
+/// is actually skipped, not just that the pipeline still produces correct
+/// rows some other way. Chunk 1 has no embedded link, so it must still go
+/// through the normal resolution path -- proves both branches coexist
+/// correctly in the same statement.
+#[tokio::test]
+async fn pre_resolved_chunk0_link_skips_the_extra_resolution_get() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [{"chunk_index": 0, "row_count": 5}, {"chunk_index": 1, "row_count": 5}],
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+            "result": {
+                "external_links": [{"chunk_index": 0, "external_link": format!("{uri}/_data/chunk-0")}]
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    // Never mounted for chunk 0 -- `pre_resolved_link` must mean the fetch
+    // worker never even attempts this request.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/0")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"external_links": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/1")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "external_links": [{"external_link": format!("{uri}/_data/chunk-1")}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-1$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    assert_eq!(summary.num_chunks, 2);
+    assert_eq!(summary.num_rows(), 10);
+    assert_ids_in_order(&summary.batches, 10);
+}
+
+/// Regression test for a bug caught in code review before it shipped:
+/// `pre_resolved` was originally a plain `HashMap<i64, String>`, which keeps
+/// only the *last* entry when `result.external_links` has more than one for
+/// the same `chunk_index` (a real, supported shape -- `fetch_chunk_index`'s
+/// own resolution path already returns `Vec<Bytes>` per chunk for exactly
+/// this reason). Two links for chunk_index 0 here -- if the fix regresses
+/// back to losing all but the last, this comes back with 5 rows instead of
+/// 10.
+#[tokio::test]
+async fn pre_resolved_links_supports_multiple_links_for_the_same_chunk_index() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [{"chunk_index": 0, "row_count": 10}],
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+            "result": {
+                "external_links": [
+                    {"chunk_index": 0, "external_link": format!("{uri}/_data/chunk-0a")},
+                    {"chunk_index": 0, "external_link": format!("{uri}/_data/chunk-0b")},
+                ]
+            },
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/0")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"external_links": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0a$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0b$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    assert_eq!(
+        summary.num_rows(),
+        10,
+        "both pre-resolved links for chunk_index 0 must be fetched, not just the last one"
+    );
+}
+
+/// Regression test for a bug caught in code review before it shipped: an
+/// omitempty-style server serializer could drop a zero-valued `chunk_index`
+/// field entirely rather than emit `0` -- exactly chunk 0, the chunk this
+/// optimization targets most. Before `chunk_index` had `#[serde(default)]`,
+/// this would either fail the whole `StatementResponseBody` parse (turning
+/// an optional fast path into a hard failure for the entire statement) or
+/// -- depending on the exact fix -- misattribute the link to the wrong
+/// chunk. Omitting `chunk_index` here must still resolve to chunk 0.
+#[tokio::test]
+async fn pre_resolved_link_with_omitted_chunk_index_defaults_to_chunk_zero() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [{"chunk_index": 0, "row_count": 5}],
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+            // "chunk_index" deliberately omitted, not set to 0.
+            "result": {
+                "external_links": [{"external_link": format!("{uri}/_data/chunk-0")}]
+            },
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/0")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"external_links": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    assert_eq!(summary.num_rows(), 5);
+    assert_ids_in_order(&summary.batches, 5);
+}
+
 #[tokio::test]
 async fn full_pipeline_happy_path() {
     let server = MockServer::start().await;

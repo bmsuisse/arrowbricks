@@ -33,7 +33,7 @@ class DatabricksClient:
         token_provider: TokenProvider | None = None,
         http_timeout: float = 60.0,
         wait_timeout: str = "30s",
-        chunk_fetch_concurrency: int = 32,
+        chunk_fetch_concurrency: int = 64,
         warehouse_start_timeout: float = 300.0,
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
@@ -44,8 +44,10 @@ class DatabricksClient:
         self.http_timeout = http_timeout
         self.wait_timeout = wait_timeout
         # Each concurrent fetch slot holds a whole chunk's raw bytes in
-        # memory. 32 -- tuned for the Rust core's real OS-thread parallelism,
-        # which scales well past what asyncio+GIL concurrency used to buy.
+        # memory. 64 -- tuned for the Rust core's real OS-thread parallelism,
+        # which scales well past what asyncio+GIL concurrency used to buy;
+        # measured against a real 400-chunk/5.6M-row table (see client.rs's
+        # own comment for the numbers).
         self.chunk_fetch_concurrency = chunk_fetch_concurrency
         self.warehouse_start_timeout = warehouse_start_timeout
         # Requests LZ4-compressed cloud-fetch chunks (matches

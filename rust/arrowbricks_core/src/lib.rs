@@ -213,7 +213,7 @@ impl PyDbClient {
         warehouse_id,
         token=None,
         token_provider=None,
-        chunk_fetch_concurrency=32,
+        chunk_fetch_concurrency=64,
         http_timeout=60.0,
         wait_timeout="30s".to_string(),
         warehouse_start_timeout=300.0,

@@ -41,7 +41,7 @@ class Client:
         warehouse_id: str,
         token: str | None = None,
         token_provider: Callable[[], str | Awaitable[str]] | None = None,
-        chunk_fetch_concurrency: int = 32,
+        chunk_fetch_concurrency: int = 64,
         http_timeout: float = 60.0,
         wait_timeout: str = "30s",
         warehouse_start_timeout: float = 300.0,

@@ -84,6 +84,41 @@ struct StatementResponseBody {
     status: StatementStatusBody,
     #[serde(default)]
     manifest: Option<ManifestBody>,
+    /// SEA embeds whichever chunks are already ready straight in the
+    /// submit/poll response body -- confirmed against a real workspace: a
+    /// SUCCEEDED response's `result.external_links` already contained chunk
+    /// 0's presigned URL, disposition EXTERNAL_LINKS same as always. Used to
+    /// skip that chunk's own `GET .../result/chunks/{i}` resolution request
+    /// entirely (see `ChunkMeta::pre_resolved_links`) -- a full round trip
+    /// saved for whichever chunks land here, which for a fast/small query is
+    /// a meaningful fraction of total latency.
+    #[serde(default)]
+    result: Option<ResultBody>,
+}
+
+#[derive(Deserialize)]
+struct ResultLinkBody {
+    // `#[serde(default)]` (not `Option<i64>`) deliberately: an omitempty-style
+    // server serializer would drop a zero-valued `chunk_index` field entirely
+    // rather than emit `0` -- exactly the chunk this optimization targets
+    // most (chunk 0), and exactly the case that would otherwise turn one
+    // optional fast-path field into a hard parse failure for the *whole*
+    // statement response (`authed_json` fails the entire `StatementResponseBody`
+    // deserialize on any missing required field, no retry). Defaulting to 0
+    // reconstructs the omitted value correctly either way.
+    #[serde(default)]
+    chunk_index: i64,
+    // Same reasoning, plus an empty link is filtered out where this is
+    // consumed (`execute_statement`) rather than trusted -- a link that
+    // somehow came through empty is worse than just re-resolving normally.
+    #[serde(default)]
+    external_link: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ResultBody {
+    #[serde(default)]
+    external_links: Vec<ResultLinkBody>,
 }
 
 #[derive(Deserialize)]
@@ -149,10 +184,38 @@ impl ApiError {
         }
     }
 
-    fn from_reqwest(e: reqwest::Error) -> Self {
+    /// `idempotent` must be `true` only when replaying the *whole* request is
+    /// actually safe -- a GET, or a PUT/DELETE whose retried body is byte-for-
+    /// byte the same operation either way (`upload_volume_file`'s
+    /// overwrite=true PUT, `delete_volume_file`'s DELETE). It must be `false`
+    /// for the statement-submit POST: a decode/mid-flight-send failure there
+    /// means the server may have already accepted and started executing the
+    /// statement before the response broke -- for arbitrary caller SQL
+    /// (INSERT/MERGE/COPY INTO), blindly replaying that POST risks a second,
+    /// duplicate execution, not just a duplicate read. `is_decode()` alone
+    /// isn't the whole idempotent-failure surface either -- `is_request()`
+    /// (excluding `is_connect()`/`is_timeout()`, already handled) also covers
+    /// hyper's own "connection closed before message completed" pooled-
+    /// connection-reuse race, which fires before any body is even read and
+    /// is equally safe to retry on an idempotent request.
+    fn from_reqwest(e: reqwest::Error, idempotent: bool) -> Self {
+        // `is_decode()` (reqwest's `Kind::Decode`) isn't only content-decoding
+        // -- `Response::bytes()`/`.text()`/`.json()` also wrap a body read
+        // that fails mid-stream (connection reset, truncated transfer) in
+        // the same `Kind::Decode`, message "error decoding response body"
+        // (see reqwest's `async_impl::response::Response::do_bytes` and
+        // `error::decode`). Confirmed against a real workspace: a 400-chunk/
+        // 5.6M-row fetch hit exactly this on one of many large concurrent
+        // blob downloads, and it reproduced identically before this change
+        // existed -- a genuine transient network blip, not a permanent
+        // problem with the request. Connect/timeout errors stay non-transient,
+        // unchanged from before -- those mean the endpoint genuinely isn't
+        // responding, where failing fast on the caller's own timeout is still
+        // right.
+        let transient = idempotent && (e.is_decode() || (e.is_request() && !e.is_connect() && !e.is_timeout()));
         Self {
             message: e.to_string(),
-            transient: false,
+            transient,
         }
     }
 
@@ -181,6 +244,16 @@ pub(crate) fn join_error(e: tokio::task::JoinError) -> ApiError {
 pub struct ChunkMeta {
     pub chunk_index: i64,
     pub row_count: Option<i64>,
+    /// Set when the statement submit/poll response already embedded one or
+    /// more of this chunk's presigned URLs (see `StatementResponseBody::result`)
+    /// -- the fetch worker downloads them directly instead of first resolving
+    /// via `GET .../result/chunks/{i}`. `Vec`, not `Option<String>` -- a
+    /// `chunk_index` can carry more than one blob (same reason
+    /// `fetch_chunk_index` returns `Vec<Bytes>` and `ReorderBuffer` keys on
+    /// `VecDeque`, not a single item: collapsing to one would silently drop
+    /// every link but the last for the same index). Empty means "not
+    /// pre-resolved, fetch it the normal way."
+    pub pre_resolved_links: Vec<String>,
 }
 
 /// What submitting a statement gets you before any chunk is fetched:
@@ -233,10 +306,15 @@ pub struct ChunkItem {
 /// `out` reads every frame without reconstructing a decoder per frame.
 fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
     use std::io::Read;
-    // Decompressed size is always >= compressed size for real chunk data, so
-    // this is a real (if approximate) lower bound, not a guess -- avoids
-    // repeated doubling-and-copy growth across frames.
-    let mut out = Vec::with_capacity(compressed.len());
+    // `compressed.len()` is a real lower bound, but LZ4 on Arrow-IPC data
+    // (long dictionary/offset-buffer runs, mostly-repeated bytes) typically
+    // compresses several-fold -- estimating just the lower bound means the
+    // real decompressed size almost always blows past initial capacity,
+    // paying for repeated doubling-and-copy growth on every chunk. `* 4` is
+    // a heuristic, not a guarantee (`Vec` still grows normally if it's wrong
+    // either way) -- just a better starting point than the guaranteed-too-
+    // small lower bound.
+    let mut out = Vec::with_capacity(compressed.len() * 4);
     let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
     loop {
         let before = out.len();
@@ -315,18 +393,22 @@ impl DbClient {
             wait_timeout: "30s".to_string(),
             // Python's DatabricksClient defaults to 6, tuned for asyncio+GIL
             // where higher concurrency stops paying off past single digits
-            // (see its own comment). Ad hoc benchmarking against a mocked
-            // warehouse (80 chunks, 8ms simulated per-chunk latency) showed
-            // this Rust core's real OS-thread parallelism keeps improving up
-            // to ~64 concurrent fetches (119ms@8, 70ms@16, 48ms@32, 42ms@64),
-            // regressing slightly at 128 once concurrency exceeds the chunk
-            // count -- not reproducible from a script in this repo, so take
-            // the specific numbers as directional, not a checked-in
-            // benchmark. 32 is a reasonable default headroom below that peak
-            // without chasing a number that's workload-shaped; callers with
-            // very large chunk counts
+            // (see its own comment). This Rust core's real OS-thread
+            // parallelism keeps paying off well past that -- measured against
+            // a real 400-chunk/5.6M-row/120-column table, repeated runs (full
+            // download time, same query, same warehouse): 16=140s,
+            // 32=~113s (avg of 3), 64=114s, 96=~102s (avg of 2), 128=122s.
+            // 16 is clearly worse and 128 clearly regresses (concurrency
+            // outrunning what the warehouse/network can actually keep fed);
+            // 32-96 all land in roughly the same band with 96 nominally
+            // fastest on this table/warehouse, but the gap over 32 is modest
+            // (~10%) and the exact peak is workload/warehouse-shaped, not a
+            // fixed constant -- 64 is picked as a safe middle-ground default
+            // headroom above the old value with no observed downside, not
+            // a claim that 64 is the true optimum. A caller with a very
+            // large chunk count or a fast/low-latency link to the warehouse
             // may still want to raise it further.
-            chunk_fetch_concurrency: 32,
+            chunk_fetch_concurrency: 64,
             warehouse_start_timeout: Duration::from_secs(300),
             warehouse_confirmed_running_ttl: Duration::from_secs(30),
             warehouse_confirmed_running_at: Mutex::new(None),
@@ -394,6 +476,11 @@ impl DbClient {
         url: &str,
         body: Option<&Value>,
     ) -> Result<T, ApiError> {
+        // Only a GET is safe to blindly replay on a decode/mid-flight-send
+        // failure -- see `ApiError::from_reqwest`'s doc. The only POSTs this
+        // crate makes through here are statement submission and
+        // warehouse-start, neither of which is safe to risk double-executing.
+        let idempotent = method == reqwest::Method::GET;
         retry_call(|| async {
             // Fetched fresh on every attempt, not just once before the retry
             // loop -- matches Python's _bearer_token being called on every
@@ -408,9 +495,9 @@ impl DbClient {
             if let Some(b) = body {
                 req = req.json(b);
             }
-            let resp = req.send().await.map_err(ApiError::from_reqwest)?;
+            let resp = req.send().await.map_err(|e| ApiError::from_reqwest(e, idempotent))?;
             let status = resp.status();
-            let text = resp.text().await.map_err(ApiError::from_reqwest)?;
+            let text = resp.text().await.map_err(|e| ApiError::from_reqwest(e, idempotent))?;
             if !status.is_success() {
                 return Err(ApiError::from_status(status, &text));
             }
@@ -439,13 +526,13 @@ impl DbClient {
                 .timeout(self.http_timeout)
                 .send()
                 .await
-                .map_err(ApiError::from_reqwest)?;
+                .map_err(|e| ApiError::from_reqwest(e, true))?;
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
                 return Err(ApiError::from_status(status, &text));
             }
-            let bytes = resp.bytes().await.map_err(ApiError::from_reqwest)?;
+            let bytes = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
             if !compressed {
                 return Ok(bytes);
             }
@@ -593,10 +680,22 @@ impl DbClient {
 
         let manifest = data.manifest.unwrap_or_default();
         let compressed = manifest.result_compression.as_deref() == Some("LZ4_FRAME");
+        // `Vec` per index, not a plain map entry -- see `ChunkMeta::pre_resolved_links`'s
+        // doc for why collapsing to one would silently lose rows.
+        let mut pre_resolved: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+        if let Some(r) = data.result {
+            for link in r.external_links {
+                if link.external_link.is_empty() {
+                    continue;
+                }
+                pre_resolved.entry(link.chunk_index).or_default().push(link.external_link);
+            }
+        }
         let chunk_metas = manifest
             .chunks
             .into_iter()
             .map(|c| ChunkMeta {
+                pre_resolved_links: pre_resolved.remove(&c.chunk_index).unwrap_or_default(),
                 chunk_index: c.chunk_index,
                 row_count: c.row_count,
             })
@@ -625,6 +724,16 @@ impl DbClient {
         let mut blobs = Vec::with_capacity(data.external_links.len());
         for link in data.external_links {
             blobs.push(self.fetch_link_bytes(&link.external_link, compressed).await?);
+        }
+        Ok(blobs)
+    }
+
+    /// Same shape as `fetch_chunk_index`, but for links the statement submit/
+    /// poll response already embedded -- no resolution GET needed first.
+    async fn fetch_pre_resolved_links(&self, links: &[String], compressed: bool) -> Result<Vec<Bytes>, ApiError> {
+        let mut blobs = Vec::with_capacity(links.len());
+        for link in links {
+            blobs.push(self.fetch_link_bytes(link, compressed).await?);
         }
         Ok(blobs)
     }
@@ -660,10 +769,12 @@ impl DbClient {
                     loop {
                         let meta = { queue.lock().unwrap().pop_front() };
                         let Some(meta) = meta else { return Ok(()) };
-                        match client
-                            .fetch_chunk_index(&statement_id, meta.chunk_index, compressed)
-                            .await
-                        {
+                        let fetched = if meta.pre_resolved_links.is_empty() {
+                            client.fetch_chunk_index(&statement_id, meta.chunk_index, compressed).await
+                        } else {
+                            client.fetch_pre_resolved_links(&meta.pre_resolved_links, compressed).await
+                        };
+                        match fetched {
                             Ok(blobs) => {
                                 for blob in blobs {
                                     let item = ChunkItem {
@@ -713,7 +824,9 @@ impl DbClient {
                 .timeout(self.http_timeout)
                 .send()
                 .await
-                .map_err(ApiError::from_reqwest)?;
+                // `overwrite=true` means retrying this exact PUT is safe --
+                // same idempotency reasoning as a GET.
+                .map_err(|e| ApiError::from_reqwest(e, true))?;
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
@@ -738,7 +851,9 @@ impl DbClient {
                 .timeout(self.http_timeout)
                 .send()
                 .await
-                .map_err(ApiError::from_reqwest)?;
+                // DELETE is naturally idempotent here too (404 is already
+                // treated as success below).
+                .map_err(|e| ApiError::from_reqwest(e, true))?;
             let status = resp.status();
             if status == StatusCode::NOT_FOUND || status.is_success() {
                 return Ok(());
@@ -856,5 +971,56 @@ mod tests {
             "error message should mention the panic: {}",
             err.message
         );
+    }
+
+    /// Regression test for a real bug found against a real workspace: a
+    /// 400-chunk/5.6M-row fetch failed permanently on one of many large
+    /// concurrent blob downloads with reqwest's "error decoding response
+    /// body" -- a connection that closes early mid-body (`Kind::Decode`,
+    /// see `ApiError::from_reqwest`'s comment), not a genuinely dead
+    /// endpoint. Before the fix, `transient` was unconditionally `false` for
+    /// every reqwest error, so `retry_call` never got a second attempt and
+    /// the whole query failed outright. A raw truncated-response server
+    /// (rather than wiremock, which doesn't expose a way to violate its own
+    /// Content-Length) reproduces the same client-side error reqwest raised
+    /// against the real blob storage endpoint.
+    #[tokio::test]
+    async fn fetch_link_bytes_retries_after_a_connection_closed_mid_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut attempt = 0u32;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                attempt += 1;
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                if attempt == 1 {
+                    // Claims 100 bytes, sends 10, then closes -- reqwest's
+                    // `.bytes()` surfaces exactly this as `Kind::Decode`.
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789")
+                        .await;
+                    let _ = socket.shutdown().await;
+                } else {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                        .await;
+                    let _ = socket.shutdown().await;
+                    return;
+                }
+            }
+        });
+
+        let client = DbClient::new(&format!("http://{addr}"), "wh-test", "fake-token");
+        let bytes = client
+            .fetch_link_bytes(&format!("http://{addr}/data"), false)
+            .await
+            .expect("must retry past the truncated first attempt and succeed on the second");
+        assert_eq!(&bytes[..], b"hello");
     }
 }

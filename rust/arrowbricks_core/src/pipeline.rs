@@ -361,30 +361,58 @@ fn non_finite_token(v: f64) -> Option<&'static str> {
     }
 }
 
+/// One top-level Float32/Float64 column, downcast once per batch rather than
+/// once per (row, field) -- see `patch_non_finite_floats`.
+enum FloatColumn<'a> {
+    F64(usize, &'a arrow::array::Float64Array),
+    F32(usize, &'a arrow::array::Float32Array),
+}
+
 /// Rewrites each affected line's `null` (arrow-json's fixed encoding for a
 /// non-finite float, see `encode_ndjson_lines`) to a `"NaN"`/`"Infinity"`/
 /// `"-Infinity"` JSON string, in place. Only scans top-level Float32/Float64
 /// columns -- one row of `lines` per row of the batches, in the same order.
+/// Precomputes each batch's float columns once (schema scan + downcast) up
+/// front instead of redoing both per row -- for a wide, non-float-heavy
+/// schema (this feature's own motivating case: a 120-column real table) that
+/// was a dynamic downcast attempt on every column for every row, the large
+/// majority immediately discarded, and a schema with no float columns at all
+/// still paid for the full row x column scan for nothing.
 fn patch_non_finite_floats(batches: &[RecordBatch], lines: &mut [String]) {
     let mut global_row = 0usize;
     for batch in batches {
         let schema = batch.schema();
+        let float_columns: Vec<FloatColumn> = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(field_index, field)| match field.data_type() {
+                DataType::Float64 => Some(FloatColumn::F64(field_index, batch.column(field_index).as_primitive::<Float64Type>())),
+                DataType::Float32 => Some(FloatColumn::F32(field_index, batch.column(field_index).as_primitive::<Float32Type>())),
+                _ => None,
+            })
+            .collect();
+
+        if float_columns.is_empty() {
+            global_row += batch.num_rows();
+            continue;
+        }
+
         for row_in_batch in 0..batch.num_rows() {
-            for (field_index, field) in schema.fields().iter().enumerate() {
-                let token = match field.data_type() {
-                    DataType::Float64 => {
-                        let arr = batch.column(field_index).as_primitive::<Float64Type>();
+            for col in &float_columns {
+                let (field_index, token) = match col {
+                    FloatColumn::F64(field_index, arr) => (
+                        *field_index,
                         arr.is_valid(row_in_batch)
                             .then(|| non_finite_token(arr.value(row_in_batch)))
-                            .flatten()
-                    }
-                    DataType::Float32 => {
-                        let arr = batch.column(field_index).as_primitive::<Float32Type>();
+                            .flatten(),
+                    ),
+                    FloatColumn::F32(field_index, arr) => (
+                        *field_index,
                         arr.is_valid(row_in_batch)
                             .then(|| non_finite_token(arr.value(row_in_batch) as f64))
-                            .flatten()
-                    }
-                    _ => None,
+                            .flatten(),
+                    ),
                 };
                 if let Some(token) = token {
                     lines[global_row] = replace_nth_top_level_null(&lines[global_row], field_index, token);

@@ -65,7 +65,7 @@ unlike the table object itself.
 
 ## API
 
-- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=32, http_timeout=60.0, wait_timeout="30s", warehouse_start_timeout=300.0, warehouse_confirmed_running_ttl_s=30.0, compress_results=True)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching. `compress_results` requests LZ4-compressed cloud-fetch chunks (see above); set `False` to opt out.
+- `Client(host, warehouse_id, *, token=None, token_provider=None, chunk_fetch_concurrency=64, http_timeout=60.0, wait_timeout="30s", warehouse_start_timeout=300.0, warehouse_confirmed_running_ttl_s=30.0, compress_results=True)` -- exactly one of `token`/`token_provider`. `token_provider` is a callable (sync or async) returning a token string, called fresh on every request, no caching. `compress_results` requests LZ4-compressed cloud-fetch chunks (see above); set `False` to opt out.
 - `Client.execute_arrow(statement, *, catalog=None, schema=None, parameters=None) -> Table` -- eager: fetches and assembles the whole result before returning. `parameters` is Databricks' own named-parameter format (`[{"name":..., "value":..., "type":...}]`), passed straight through.
 - `Client.execute(statement, *, catalog=None, schema=None, parameters=None) -> ResultSet` -- submits and starts background chunk fetching without pulling anything yet.
   - `ResultSet.fetchmany_arrow(n) -> Table` -- pulls/decodes only as many chunks as needed for `n` rows, buffering the rest; may return fewer than `n` once exhausted.
