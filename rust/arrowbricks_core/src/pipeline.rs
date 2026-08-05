@@ -109,9 +109,34 @@ impl ExecuteResult {
 /// writes it, not this crate), decoded batches now slice directly into the
 /// same allocation `blob` already held since the network fetch, cutting out
 /// a second full copy of every chunk's bytes; `require_alignment` stays at
-/// its default `false`, so a misaligned buffer still falls back to a copy
-/// automatically rather than erroring (arrow-ipc's own documented behavior).
+/// its default `false`, so a misaligned *fixed-width* buffer still falls back
+/// to a copy automatically rather than erroring (arrow-ipc's own documented
+/// behavior) -- variable-width values, null bitmaps, and nested/dictionary
+/// children all stay zero-copy regardless. One exception this doesn't cover:
+/// if a `RecordBatch` message declared IPC *buffer*-level compression (a
+/// different, unrelated feature from this crate's own cloud-fetch
+/// `result_compression` unwrap in `client.rs`, which already ran before this
+/// function ever sees the bytes), `arrow-ipc`'s own reader always
+/// decompresses into fresh buffers there -- not something Databricks has
+/// been observed to use in this format, but not something this crate
+/// controls either.
+///
+/// A zero-length `blob` is rejected explicitly rather than handed to
+/// `StreamDecoder`: found in code review that an empty buffer makes the
+/// `while` loop below a no-op and `decoder.finish()` sees a still-pristine
+/// decoder state, which its own `Ok(())` arm treats as a *clean, empty*
+/// stream -- silently returning zero batches with no error at all, the same
+/// silent-truncation failure mode as the real multi-frame LZ4 bug this crate
+/// already shipped once (see the `result_compression` invariant above). The
+/// old `StreamReader`-based version failed loudly on this input instead
+/// ("Expected schema message, found empty stream"); this restores that.
 fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
+    if blob.is_empty() {
+        return Err(ApiError {
+            message: "empty Arrow IPC chunk: expected at least a schema message".to_string(),
+            transient: false,
+        });
+    }
     let mut buffer = ArrowBuffer::from(blob.clone());
     let mut decoder = StreamDecoder::new();
     let mut batches = Vec::new();
@@ -857,6 +882,74 @@ mod tests {
         );
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
+    }
+
+    /// Regression test for a bug caught in code review before it shipped: an
+    /// empty (zero-byte) blob made `StreamDecoder`'s decode loop a no-op and
+    /// `decoder.finish()` saw a still-pristine state, which it treats as a
+    /// clean empty stream -- silently returning zero batches with no error at
+    /// all, instead of the loud failure the old `StreamReader`-based version
+    /// gave on the same input ("Expected schema message, found empty
+    /// stream"). Same silent-truncation shape as the real multi-frame LZ4 bug
+    /// this crate already shipped once (see `client.rs`'s
+    /// `decompress_lz4_frame` doc comment) -- a genuinely empty chunk blob
+    /// must never be mistaken for "legitimately zero rows".
+    #[test]
+    fn decode_chunk_rejects_an_empty_blob() {
+        let err = decode_chunk(&Bytes::new()).expect_err("an empty blob must error, not silently decode to zero rows");
+        assert!(
+            err.message.contains("empty"),
+            "error should mention the blob was empty: {}",
+            err.message
+        );
+    }
+
+    /// Companion to `decode_chunk_rejects_an_empty_blob` -- proves the empty-
+    /// blob check doesn't overcorrect: a *non-empty* stream containing only a
+    /// schema message and no `RecordBatch` at all (a legitimate shape for a
+    /// genuinely empty query result) must still decode successfully to zero
+    /// batches, not error.
+    #[test]
+    fn decode_chunk_accepts_a_schema_only_stream_with_zero_batches() {
+        use arrow::datatypes::{Field, Schema};
+        use arrow::ipc::writer::StreamWriter;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let batches = decode_chunk(&Bytes::from(buf)).unwrap();
+        assert_eq!(
+            batches.len(),
+            0,
+            "a schema-only stream with no batches is valid, not an error"
+        );
+    }
+
+    /// Regression/documentation test for a real behavior change found in code
+    /// review: `StreamDecoder` (unlike the old `StreamReader`) hard-errors on
+    /// any bytes left over after a stream's own EOS marker, instead of
+    /// silently ignoring them. Locking this in deliberately -- erroring beats
+    /// silently dropping whatever came after the truncation point, same
+    /// reasoning as the empty-blob check above -- even though real Databricks
+    /// chunks have not been observed to have trailing bytes.
+    #[test]
+    fn decode_chunk_errors_on_trailing_bytes_after_a_complete_stream() {
+        use arrow::ipc::writer::StreamWriter;
+
+        let batch = make_batch(vec![1, 2], vec![1.0, 2.0]);
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        buf.extend_from_slice(&[0xAA; 8]);
+
+        decode_chunk(&Bytes::from(buf)).expect_err("trailing bytes after a complete stream's EOS marker must error");
     }
 
     /// Diagnostic only, not a correctness check (relative timing is too
