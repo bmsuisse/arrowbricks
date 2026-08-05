@@ -197,7 +197,18 @@ impl ApiError {
     /// (excluding `is_connect()`/`is_timeout()`, already handled) also covers
     /// hyper's own "connection closed before message completed" pooled-
     /// connection-reuse race, which fires before any body is even read and
-    /// is equally safe to retry on an idempotent request.
+    /// is equally safe to retry on an idempotent request. Unlike `is_decode()`
+    /// (hit for real on a 400-chunk fetch and reproduced with a directed
+    /// test), this specific race is reasoned from reqwest/hyper's own source,
+    /// not independently reproduced -- a directed attempt to force it
+    /// self-healed 20/20 times (hyper's own idle-connection health check
+    /// evidently detects a closed peer and opens a fresh connection before
+    /// ever handing the dead one out for reuse, at least under a simple,
+    /// low-concurrency test). Kept anyway since it's safe regardless (scoped
+    /// to idempotent requests only) and the window may still be reachable
+    /// under real production concurrency even though a quick local test
+    /// couldn't force it -- treat as a plausible defensive measure, not a
+    /// confirmed fix for an observed failure.
     fn from_reqwest(e: reqwest::Error, idempotent: bool) -> Self {
         // `is_decode()` (reqwest's `Kind::Decode`) isn't only content-decoding
         // -- `Response::bytes()`/`.text()`/`.json()` also wrap a body read

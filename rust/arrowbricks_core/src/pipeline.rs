@@ -952,6 +952,61 @@ mod tests {
         decode_chunk(&Bytes::from(buf)).expect_err("trailing bytes after a complete stream's EOS marker must error");
     }
 
+    /// Regression/coverage test: a dictionary-encoded column is written as a
+    /// separate `DictionaryBatch` IPC message *before* the `RecordBatch`
+    /// message that references it -- `StreamDecoder::decode` consumes that
+    /// message internally (updating its own dictionary table) and returns
+    /// `Ok(None)` for it, not `Ok(Some(_))`. A prior review verified by
+    /// reading `StreamDecoder`'s source that `decode_chunk`'s `Ok(None) => {}`
+    /// branch handles this correctly without ending the loop early, but no
+    /// test exercised it -- this proves it end to end, not just by source
+    /// inspection: round-trips real dictionary keys/values through
+    /// `decode_chunk`, not just an empty or single-message stream.
+    #[test]
+    fn decode_chunk_round_trips_a_dictionary_encoded_column() {
+        use arrow::array::{DictionaryArray, Int32Array, StringArray};
+        use arrow::datatypes::{Field, Int32Type, Schema};
+        use arrow::ipc::writer::StreamWriter;
+
+        let keys = Int32Array::from(vec![0, 1, 0, 2]);
+        let values = StringArray::from(vec!["a", "b", "c"]);
+        let dict = DictionaryArray::<Int32Type>::try_new(keys, Arc::new(values)).unwrap();
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "d",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(dict)]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let batches = decode_chunk(&Bytes::from(buf)).unwrap();
+        assert_eq!(
+            batches.len(),
+            1,
+            "the dictionary message itself must not be mistaken for the record batch"
+        );
+        let col = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int32Type>>()
+            .expect("column must still be a dictionary array after round-tripping");
+        let dict_values = col.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let decoded: Vec<&str> = col
+            .keys()
+            .values()
+            .iter()
+            .map(|&k| dict_values.value(k as usize))
+            .collect();
+        assert_eq!(decoded, vec!["a", "b", "a", "c"]);
+    }
+
     /// Diagnostic only, not a correctness check (relative timing is too
     /// flaky for CI) -- `cargo test --release -- --ignored --nocapture
     /// decode_chunk_speed` to compare the current `StreamDecoder`-based
