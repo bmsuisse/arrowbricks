@@ -2,12 +2,12 @@
 //! decode of the reordered chunk stream via arrow-rs.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Cursor as IoCursor;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
+use arrow::buffer::Buffer as ArrowBuffer;
 use arrow::datatypes::{DataType, Float32Type, Float64Type, SchemaRef};
-use arrow::ipc::reader::StreamReader;
+use arrow::ipc::reader::StreamDecoder;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use serde_json::Value;
@@ -97,15 +97,41 @@ impl ExecuteResult {
     }
 }
 
+/// Decodes a chunk's raw Arrow-IPC stream bytes into batches. Uses
+/// `StreamDecoder`'s push-based interface fed by an `arrow::buffer::Buffer`
+/// built directly from `blob` (`Buffer::from(bytes::Bytes)`, confirmed
+/// zero-copy in arrow-buffer's own source -- `bytes.rs`'s
+/// `impl From<bytes::Bytes> for Bytes` stores the original `bytes::Bytes` via
+/// `Deallocation::Custom`, no memcpy) instead of the higher-level
+/// `StreamReader` (reads via `std::io::Read` into freshly allocated buffers,
+/// copying every column's data out of `blob` on every decode -- what this
+/// used before). For properly aligned IPC data (the normal case -- Databricks
+/// writes it, not this crate), decoded batches now slice directly into the
+/// same allocation `blob` already held since the network fetch, cutting out
+/// a second full copy of every chunk's bytes; `require_alignment` stays at
+/// its default `false`, so a misaligned buffer still falls back to a copy
+/// automatically rather than erroring (arrow-ipc's own documented behavior).
 fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
-    let reader = StreamReader::try_new(IoCursor::new(&blob[..]), None).map_err(|e| ApiError {
+    let mut buffer = ArrowBuffer::from(blob.clone());
+    let mut decoder = StreamDecoder::new();
+    let mut batches = Vec::new();
+    while !buffer.is_empty() {
+        match decoder.decode(&mut buffer) {
+            Ok(Some(batch)) => batches.push(batch),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(ApiError {
+                    message: format!("Arrow IPC decode error: {e}"),
+                    transient: false,
+                });
+            }
+        }
+    }
+    decoder.finish().map_err(|e| ApiError {
         message: format!("bad Arrow IPC stream: {e}"),
         transient: false,
     })?;
-    reader.collect::<Result<Vec<_>, _>>().map_err(|e| ApiError {
-        message: format!("Arrow IPC decode error: {e}"),
-        transient: false,
-    })
+    Ok(batches)
 }
 
 /// Caps how many chunks `ResultStream::fetch_at_least` will pull/decode
@@ -795,6 +821,121 @@ mod tests {
         assert_eq!(
             lines[0], r#"{"id":1,"value":null}"#,
             "a real NULL must stay null, never become a string"
+        );
+    }
+
+    /// Regression test for the switch from `StreamReader` to the push-based
+    /// `StreamDecoder` (see `decode_chunk`'s doc comment): a single chunk can
+    /// contain more than one Arrow-IPC `RecordBatch` message back to back in
+    /// the same stream, and `StreamDecoder::decode` only ever returns one
+    /// batch per call -- `decode_chunk` must keep calling it until the whole
+    /// buffer is drained, not stop after the first. `StreamReader`'s own
+    /// `Iterator` impl made this automatic; the lower-level API doesn't, so
+    /// this is exactly the kind of thing that regresses silently (a single-
+    /// batch-per-chunk bug would still pass every other test in this suite,
+    /// since none of them writes more than one batch per chunk).
+    #[test]
+    fn decode_chunk_reads_every_record_batch_in_a_multi_batch_stream() {
+        use arrow::ipc::writer::StreamWriter;
+
+        let batch_a = make_batch(vec![1, 2], vec![1.0, 2.0]);
+        let batch_b = make_batch(vec![3, 4, 5], vec![3.0, 4.0, 5.0]);
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &batch_a.schema()).unwrap();
+            writer.write(&batch_a).unwrap();
+            writer.write(&batch_b).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let batches = decode_chunk(&Bytes::from(buf)).unwrap();
+        assert_eq!(
+            batches.len(),
+            2,
+            "both record batches in the stream must be decoded, not just the first"
+        );
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 5);
+    }
+
+    /// Diagnostic only, not a correctness check (relative timing is too
+    /// flaky for CI) -- `cargo test --release -- --ignored --nocapture
+    /// decode_chunk_speed` to compare the current `StreamDecoder`-based
+    /// `decode_chunk` against the old `StreamReader`-based approach it
+    /// replaced, on a batch shaped like a real chunk (120 columns, mixed
+    /// types, 50k rows -- this session's own real-table benchmark).
+    #[test]
+    #[ignore]
+    fn decode_chunk_speed_vs_stream_reader() {
+        use arrow::array::{Float64Array, Int64Array, StringArray};
+        use arrow::datatypes::{Field, Schema};
+        use arrow::ipc::writer::StreamWriter;
+        use std::io::Cursor as IoCursor;
+        use std::time::Instant;
+
+        const ROWS: usize = 50_000;
+        const COLS: usize = 120;
+
+        let mut fields = Vec::with_capacity(COLS);
+        let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(COLS);
+        for i in 0..COLS {
+            match i % 3 {
+                0 => {
+                    fields.push(Field::new(format!("c{i}"), DataType::Int64, false));
+                    columns.push(Arc::new(Int64Array::from((0..ROWS as i64).collect::<Vec<_>>())));
+                }
+                1 => {
+                    fields.push(Field::new(format!("c{i}"), DataType::Float64, false));
+                    columns.push(Arc::new(Float64Array::from(
+                        (0..ROWS).map(|r| r as f64 * 1.5).collect::<Vec<_>>(),
+                    )));
+                }
+                _ => {
+                    fields.push(Field::new(format!("c{i}"), DataType::Utf8, false));
+                    columns.push(Arc::new(StringArray::from(
+                        (0..ROWS).map(|r| format!("row-{r}")).collect::<Vec<_>>(),
+                    )));
+                }
+            }
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let blob = Bytes::from(buf);
+
+        const ITERS: u32 = 30;
+
+        // Old approach: StreamReader over an IoCursor -- copies every
+        // column's data into freshly allocated buffers on every decode.
+        let old_start = Instant::now();
+        for _ in 0..ITERS {
+            let reader = arrow::ipc::reader::StreamReader::try_new(IoCursor::new(&blob[..]), None).unwrap();
+            let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(batches[0].num_rows(), ROWS);
+        }
+        let old_elapsed = old_start.elapsed();
+
+        // New approach: this file's actual decode_chunk.
+        let new_start = Instant::now();
+        for _ in 0..ITERS {
+            let batches = decode_chunk(&blob).unwrap();
+            assert_eq!(batches[0].num_rows(), ROWS);
+        }
+        let new_elapsed = new_start.elapsed();
+
+        println!(
+            "decode_chunk speed ({COLS} cols x {ROWS} rows, {ITERS} iters): \
+             StreamReader (old) = {old_elapsed:?} ({:?}/iter), \
+             StreamDecoder (new) = {new_elapsed:?} ({:?}/iter)",
+            old_elapsed / ITERS,
+            new_elapsed / ITERS,
         );
     }
 }
