@@ -615,6 +615,74 @@ async fn drive_thrift_fetch_loop(
     }
 }
 
+/// One `resultLinks` entry plus the `chunk_index` it was assigned at
+/// discovery time (in strict `FetchResults` order, which is also true row
+/// order -- see this module's own reasoning on `ReorderBuffer` not needing
+/// to reorder anything on the *discovery* side, only the download side now
+/// that downloads happen out of order across batches).
+struct ThriftLinkWork {
+    chunk_index: i64,
+    row_count: i64,
+    file_link: String,
+}
+
+/// Downloads (and truncates -- see `truncate_to_declared_row_count`) one
+/// `resultLinks` entry and sends the resulting `ChunkItem`, shared by every
+/// download worker spawned in `run_thrift_fetch_loop`.
+async fn fetch_and_truncate_thrift_link(
+    client: Arc<DbClient>,
+    work: ThriftLinkWork,
+    compressed: bool,
+) -> Result<ChunkItem, ApiError> {
+    let blob = client.fetch_link_bytes(&work.file_link, compressed).await?;
+    // See `truncate_to_declared_row_count`'s own doc comment -- a real,
+    // confirmed-against-a-live-workspace Databricks behavior: a cloud-fetch
+    // file for a `LIMIT`-bounded query can contain more rows than the
+    // link's own declared `rowCount`, and must be truncated to it, or the
+    // caller silently gets more rows than the query asked for.
+    let row_count = work.row_count;
+    let blob = tokio::task::spawn_blocking(move || truncate_to_declared_row_count(blob, row_count))
+        .await
+        .map_err(join_error)??;
+    Ok(ChunkItem {
+        blob,
+        row_count: Some(work.row_count),
+        chunk_index: work.chunk_index,
+    })
+}
+
+/// Drives the sequential `FetchResults(orientation: FETCH_NEXT)` loop
+/// (Thrift's own cursor semantics require this side to stay strictly
+/// sequential -- concurrent `FetchResults` calls on one operation aren't a
+/// thing this protocol supports) while a separate, bounded worker pool
+/// downloads previously-discovered `resultLinks` concurrently, across
+/// *every* batch discovered so far, not just the current one.
+///
+/// This is the fix for a real, measured problem: the first version of this
+/// function fully awaited one batch's downloads before ever asking for the
+/// next batch's links, capping effective download concurrency at "however
+/// many links one `FetchResults` response happens to contain" instead of
+/// `chunk_fetch_concurrency` -- confirmed against a real workspace
+/// (`dim_article`, `LIMIT 500000`, 4 warm runs each): SEA (which knows its
+/// whole chunk manifest upfront and fans out `chunk_fetch_concurrency`
+/// downloads across the *entire* result immediately, see
+/// `client.rs`'s `fetch_chunks_with_backpressure`) averaged 11.8s; this
+/// batch-serialized Thrift loop averaged 20.5s for the identical query, a
+/// consistent ~1.7x slower across every run, not noise.
+///
+/// The producer (this function's own `FetchResults` loop) pushes each
+/// discovered link into a bounded `mpsc` channel instead of downloading it
+/// directly -- `Sender::send` naturally backpressures once the buffer is
+/// full, so the producer can still race ahead discovering more batches
+/// (a cheap metadata-only round trip) while a fixed pool of
+/// `chunk_fetch_concurrency` workers pulls from the *same* channel (shared
+/// via `Arc<tokio::sync::Mutex<Receiver>>`, the standard way to turn one
+/// `mpsc::Receiver` into an effective multi-consumer queue) and downloads
+/// concurrently across however many batches have been discovered so far.
+/// Downloads completing out of order (across or within a batch) is exactly
+/// what `ReorderBuffer` already exists to handle -- `chunk_index` is
+/// assigned once, deterministically, at discovery time in the producer,
+/// never at download-completion time.
 async fn run_thrift_fetch_loop(
     client: &Arc<DbClient>,
     operation: &thrift::OperationHandle,
@@ -623,19 +691,41 @@ async fn run_thrift_fetch_loop(
     initial_rowset: Option<(thrift::RowSet, bool)>,
     tx: &mpsc::Sender<Result<ChunkItem, ApiError>>,
 ) {
+    let concurrency = client.chunk_fetch_concurrency.max(1);
+    let (link_tx, link_rx) = mpsc::channel::<ThriftLinkWork>(concurrency);
+    let link_rx = Arc::new(tokio::sync::Mutex::new(link_rx));
+
+    let mut worker_handles = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let client = client.clone();
+        let link_rx = link_rx.clone();
+        let out_tx = tx.clone();
+        let compressed = lz4_compressed;
+        worker_handles.push(tokio::spawn(async move {
+            loop {
+                let work = { link_rx.lock().await.recv().await };
+                let Some(work) = work else { return };
+                let result = fetch_and_truncate_thrift_link(client.clone(), work, compressed).await;
+                if out_tx.send(result).await.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
     let mut chunk_index: i64 = 0;
     let mut pending = initial_rowset;
     loop {
         let (row_set, has_more) = if let Some(v) = pending.take() {
             v
         } else {
-            match client.thrift_fetch_results_raw(&operation).await {
+            match client.thrift_fetch_results_raw(operation).await {
                 Ok(fr) => {
                     if let Some(e) = fr.status.error() {
                         let _ = tx
                             .send(Err(ApiError::permanent(format!("Thrift FetchResults failed: {e}"))))
                             .await;
-                        return;
+                        break;
                     }
                     if let Some(meta) = &fr.result_set_metadata {
                         if schema_bytes.is_none() {
@@ -647,7 +737,7 @@ async fn run_thrift_fetch_loop(
                 }
                 Err(e) => {
                     let _ = tx.send(Err(e)).await;
-                    return;
+                    break;
                 }
             }
         };
@@ -668,72 +758,46 @@ async fn run_thrift_fetch_loop(
                     };
                     chunk_index += 1;
                     if tx.send(Ok(item)).await.is_err() {
-                        return;
+                        break;
                     }
                 }
                 Ok(Err(e)) | Err(e) => {
                     let _ = tx.send(Err(e)).await;
-                    return;
+                    break;
                 }
             }
         }
 
-        if !row_set.result_links.is_empty() {
-            let mut handles = Vec::with_capacity(row_set.result_links.len());
-            for link in row_set.result_links {
-                let idx = chunk_index;
-                chunk_index += 1;
-                let client = client.clone();
-                let compressed = lz4_compressed;
-                handles.push((
-                    idx,
-                    link.row_count,
-                    tokio::spawn(async move { client.fetch_link_bytes(&link.file_link, compressed).await }),
-                ));
-            }
-            for (idx, row_count, handle) in handles {
-                let blob = match handle.await {
-                    Ok(Ok(blob)) => blob,
-                    Ok(Err(e)) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                    Err(join_err) => {
-                        let _ = tx.send(Err(join_error(join_err))).await;
-                        return;
-                    }
-                };
-                // See `truncate_to_declared_row_count`'s own doc comment --
-                // a real, confirmed-against-a-live-workspace Databricks
-                // behavior: a cloud-fetch file for a `LIMIT`-bounded query
-                // can contain more rows than the link's own declared
-                // `rowCount`, and must be truncated to it, or the caller
-                // silently gets more rows than the query asked for.
-                let truncate_result =
-                    tokio::task::spawn_blocking(move || truncate_to_declared_row_count(blob, row_count))
-                        .await
-                        .map_err(join_error);
-                let blob = match truncate_result {
-                    Ok(Ok(b)) => b,
-                    Ok(Err(e)) | Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                };
-                let item = ChunkItem {
-                    blob,
-                    row_count: Some(row_count),
-                    chunk_index: idx,
-                };
-                if tx.send(Ok(item)).await.is_err() {
-                    return;
-                }
+        for link in row_set.result_links {
+            let idx = chunk_index;
+            chunk_index += 1;
+            let work = ThriftLinkWork {
+                chunk_index: idx,
+                row_count: link.row_count,
+                file_link: link.file_link,
+            };
+            // Backpressure, not an error path: a full buffer just means
+            // every worker is currently busy, so this await is exactly the
+            // same "peak buffered stays at ~concurrency" trade-off
+            // `fetch_chunks_with_backpressure`'s own doc comment describes.
+            // The receiving end only ever closes once every worker returns,
+            // which only happens after this sender side is dropped -- so a
+            // closed-channel send here would mean every worker already
+            // exited (e.g. all panicked), not a normal condition; still
+            // handled without panicking regardless.
+            if link_tx.send(work).await.is_err() {
+                break;
             }
         }
 
         if !has_more {
             break;
         }
+    }
+
+    drop(link_tx); // lets every worker's `recv()` return `None` once the queue drains
+    for handle in worker_handles {
+        let _ = handle.await;
     }
 }
 
