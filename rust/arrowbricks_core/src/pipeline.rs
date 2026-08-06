@@ -672,7 +672,7 @@ async fn fetch_thrift_link(
     work: ThriftLinkWork,
     compressed: bool,
 ) -> Result<ChunkItem, ApiError> {
-    let blob = client.fetch_link_bytes(&work.file_link, compressed).await?;
+    let blob = client.fetch_link_bytes_budgeted(&work.file_link, compressed).await?;
     Ok(ChunkItem {
         blob,
         row_count: Some(work.row_count),
