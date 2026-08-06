@@ -66,12 +66,18 @@ def _start_server(chunk_values: list[list[int]], *, chunk_delay_s: dict[int, flo
                     self.wfile.write(body)
                     return
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def do_POST(self):
+            # Drain the body on every branch, even the 404 fallback -- an
+            # unread body desyncs the next request on a kept-alive
+            # connection, and no Content-Length on a bodyless response
+            # leaves the client hanging until its own timeout.
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
             if self.path == "/api/2.0/sql/statements":
-                length = int(self.headers.get("Content-Length", 0))
-                self.rfile.read(length)
+                del body
                 chunks = [{"chunk_index": i, "row_count": len(v)} for i, v in enumerate(chunk_values)]
                 return self._json(
                     {
@@ -81,6 +87,7 @@ def _start_server(chunk_values: list[list[int]], *, chunk_delay_s: dict[int, flo
                     }
                 )
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)

@@ -4,13 +4,14 @@
 //! correctness itself is unit-tested in `pipeline.rs`; this only proves the
 //! HTTP submit->poll->fetch->decode path is wired correctly end to end.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use arrowbricks_core::client::DbClient;
+use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY};
 use arrowbricks_core::pipeline::{execute_lazy, execute_lazy_prefer_inline, run_json_pipeline, run_pipeline};
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
@@ -1040,4 +1041,334 @@ fn assert_ids_in_order(batches: &[RecordBatch], n_rows: i64) {
         ids.extend(col.values().iter().copied());
     }
     assert_eq!(ids, (0..n_rows).collect::<Vec<_>>());
+}
+
+async fn mount_warehouse_running(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn session_is_created_once_and_reused_across_sequential_statements() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+
+    let session_calls = Arc::new(AtomicUsize::new(0));
+    let session_calls_for_mock = session_calls.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = session_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"session_id": format!("sess-{n}")}))
+        })
+        .mount(&server)
+        .await;
+
+    let submitted_bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let submitted_for_mock = submitted_bodies.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            submitted_for_mock.lock().unwrap().push(parsed);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "statement_id": STATEMENT_ID,
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": []},
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    run_pipeline(client.clone(), "SELECT 1", Some("cat1"), None, None)
+        .await
+        .unwrap();
+    run_pipeline(client, "SELECT 2", Some("cat1"), None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        session_calls.load(Ordering::SeqCst),
+        1,
+        "a second statement on the same (catalog, schema) key must reuse the pooled session, not create a new one"
+    );
+    let bodies = submitted_bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    for body in bodies.iter() {
+        assert_eq!(body["session_id"], "sess-0");
+        assert!(
+            body.get("catalog").is_none(),
+            "session_id and catalog must never both be set: {body}"
+        );
+        assert!(
+            body.get("schema").is_none(),
+            "session_id and schema must never both be set: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_creation_failure_falls_back_to_catalog_on_the_statement_body() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    // Deliberately no mock for POST /api/2.0/sql/sessions -- wiremock 404s
+    // any unmatched request, exercising `checkout_session`'s creation-failure
+    // fallback exactly the same as a real transient session-service error.
+
+    let submitted_bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let submitted_for_mock = submitted_bodies.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            submitted_for_mock.lock().unwrap().push(parsed);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "statement_id": STATEMENT_ID,
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": []},
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    run_pipeline(client, "SELECT 1", Some("cat1"), Some("sch1"), None)
+        .await
+        .expect("a failed session creation must fall back transparently, not surface an error");
+
+    let bodies = submitted_bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["catalog"], "cat1");
+    assert_eq!(bodies[0]["schema"], "sch1");
+    assert!(bodies[0].get("session_id").is_none());
+}
+
+#[tokio::test]
+async fn concurrent_statements_on_the_same_key_each_get_their_own_pooled_session() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+
+    let session_calls = Arc::new(AtomicUsize::new(0));
+    let session_calls_for_mock = session_calls.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = session_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"session_id": format!("sess-{n}")}))
+        })
+        .mount(&server)
+        .await;
+
+    let submitted_session_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let submitted_for_mock = submitted_session_ids.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            if let Some(id) = parsed.get("session_id").and_then(|v| v.as_str()) {
+                submitted_for_mock.lock().unwrap().push(id.to_string());
+            }
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "statement_id": STATEMENT_ID,
+                    "status": {"state": "SUCCEEDED"},
+                    "manifest": {"chunks": []},
+                }))
+                .set_delay(std::time::Duration::from_millis(80))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let handles: Vec<_> = (0..3)
+        .map(|i| {
+            let client = client.clone();
+            tokio::spawn(async move { run_pipeline(client, &format!("SELECT {i}"), Some("cat1"), None, None).await })
+        })
+        .collect();
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    assert_eq!(
+        session_calls.load(Ordering::SeqCst),
+        3,
+        "3 genuinely concurrent statements on one key must each get a distinct session, not share one"
+    );
+    let ids = submitted_session_ids.lock().unwrap();
+    assert_eq!(ids.len(), 3);
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        3,
+        "no two concurrent statements may have used the same session_id: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_pool_exhaustion_falls_back_to_session_less_submission() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+
+    let session_calls = Arc::new(AtomicUsize::new(0));
+    let session_calls_for_mock = session_calls.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = session_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"session_id": format!("sess-{n}")}))
+        })
+        .mount(&server)
+        .await;
+
+    let submitted_bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let submitted_for_mock = submitted_bodies.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            submitted_for_mock.lock().unwrap().push(parsed);
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "statement_id": STATEMENT_ID,
+                    "status": {"state": "SUCCEEDED"},
+                    "manifest": {"chunks": []},
+                }))
+                .set_delay(std::time::Duration::from_millis(150))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let n = MAX_SESSIONS_PER_KEY + 1;
+    let handles: Vec<_> = (0..n)
+        .map(|i| {
+            let client = client.clone();
+            tokio::spawn(async move { run_pipeline(client, &format!("SELECT {i}"), Some("cat1"), None, None).await })
+        })
+        .collect();
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    assert_eq!(
+        session_calls.load(Ordering::SeqCst),
+        MAX_SESSIONS_PER_KEY,
+        "must never create more than MAX_SESSIONS_PER_KEY sessions for one key"
+    );
+    let bodies = submitted_bodies.lock().unwrap();
+    assert_eq!(bodies.len(), n);
+    let with_session = bodies.iter().filter(|b| b.get("session_id").is_some()).count();
+    let with_catalog_fallback = bodies.iter().filter(|b| b.get("catalog").is_some()).count();
+    assert_eq!(with_session, MAX_SESSIONS_PER_KEY);
+    assert_eq!(
+        with_catalog_fallback, 1,
+        "the one caller that couldn't get a pooled session must fall back to a plain catalog-bearing submission"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_statement_discards_its_session_instead_of_returning_it_to_the_pool() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+
+    let session_calls = Arc::new(AtomicUsize::new(0));
+    let session_calls_for_mock = session_calls.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = session_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"session_id": format!("sess-{n}")}))
+        })
+        .mount(&server)
+        .await;
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_for_mock = call_count.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = call_count_for_mock.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "statement_id": "stmt-fail",
+                    "status": {"state": "FAILED", "error": {"error_code": "SYNTAX_ERROR", "message": "bad sql"}},
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "statement_id": STATEMENT_ID,
+                    "status": {"state": "SUCCEEDED"},
+                    "manifest": {"chunks": []},
+                }))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let result = run_pipeline(client.clone(), "not valid sql", Some("cat1"), None, None).await;
+    let err = match result {
+        Ok(_) => panic!("expected the FAILED statement to surface as an error"),
+        Err(e) => e,
+    };
+    assert!(err.message.contains("SYNTAX_ERROR"));
+
+    run_pipeline(client, "SELECT 1", Some("cat1"), None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        session_calls.load(Ordering::SeqCst),
+        2,
+        "the session behind a FAILED statement must be discarded, not handed to the next caller on the same key"
+    );
+}
+
+#[tokio::test]
+async fn close_all_sessions_deletes_every_idle_pooled_session() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"session_id": "sess-0"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": []},
+        })))
+        .mount(&server)
+        .await;
+
+    let delete_calls: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let delete_calls_for_mock = delete_calls.clone();
+    Mock::given(method("DELETE"))
+        .and(path("/api/2.0/sql/sessions/sess-0"))
+        .respond_with(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            delete_calls_for_mock.lock().unwrap().push(parsed);
+            ResponseTemplate::new(200).set_body_json(json!({}))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    run_pipeline(client.clone(), "SELECT 1", Some("cat1"), None, None)
+        .await
+        .unwrap();
+    client.close_all_sessions().await;
+
+    let calls = delete_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "the idle pooled session must be closed exactly once");
+    assert_eq!(calls[0]["warehouse_id"], WAREHOUSE_ID);
 }

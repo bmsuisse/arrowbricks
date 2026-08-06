@@ -35,13 +35,20 @@ def _start_server(captured_bodies: list):
         def do_GET(self):
             if self.path == f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}":
                 return self._json({"state": "RUNNING"})
+            # Content-Length: 0 explicit -- HTTP/1.1 keep-alive with no body
+            # and no Content-Length leaves the client hanging until its own
+            # timeout, since it can't tell the response is complete.
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def do_POST(self):
+            # Drain the body on every branch, even the 404 fallback -- an
+            # unread body desyncs the next request on a kept-alive connection.
+            length = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(length)
             if self.path == "/api/2.0/sql/statements":
-                length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(raw_body or b"{}")
                 captured_bodies.append(body)
                 return self._json(
                     {
@@ -51,6 +58,7 @@ def _start_server(captured_bodies: list):
                     }
                 )
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)

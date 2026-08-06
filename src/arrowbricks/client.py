@@ -72,9 +72,13 @@ class DatabricksClient:
         )
 
     async def aclose(self) -> None:
-        """No-op, kept for backward compatibility -- the Rust core's
-        connection pool is cleaned up on garbage collection, nothing to
-        explicitly close."""
+        """Closes every currently-idle pooled SEA session this client opened
+        (see `execute`'s own use of one per (catalog, schema) pair) --
+        best-effort, never raises; anything left open just falls to
+        Databricks' own server-side session TTL instead. HTTP connections
+        themselves still need no explicit close -- the Rust core's
+        connection pool is cleaned up on garbage collection."""
+        await self._core_client.close_sessions()
 
     async def __aenter__(self) -> DatabricksClient:
         return self

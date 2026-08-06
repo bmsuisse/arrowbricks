@@ -61,13 +61,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"external_links": [{"external_link": f"{self.server.owner.host}/_data/chunk-0"}]})
         if self.path == "/_data/chunk-0":
             return self._bytes(SAMPLE_CHUNK_BYTES, "application/vnd.apache.arrow.stream")
+        # Content-Length: 0 explicit -- see do_POST's fallback for why.
         self.send_response(404)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
+        # Every branch drains the request body first, even the 404 fallback
+        # -- with HTTP/1.1 keep-alive, leaving unread bytes in the socket
+        # desyncs the next request on the same connection.
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
         if self.path == "/api/2.0/sql/statements":
-            length = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(length)  # request body unused -- fixed one-chunk response regardless of the SQL sent
+            del body  # unused -- fixed one-chunk response regardless of the SQL sent
             return self._json(
                 {
                     "statement_id": STATEMENT_ID,
@@ -75,7 +81,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     "manifest": {"chunks": [{"chunk_index": 0, "row_count": 5}]},
                 }
             )
+        # Explicit Content-Length: 0 -- with no body and no Content-Length,
+        # HTTP/1.1 keep-alive leaves the client unable to tell the response
+        # is actually complete (nothing here closes the connection either),
+        # so it just hangs waiting for more until its own timeout fires.
+        # Found via the SEA session pool, whose session-creation POST is the
+        # first thing to ever hit this fallback branch on this fixture.
         self.send_response(404)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
 

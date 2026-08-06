@@ -354,6 +354,18 @@ impl PyDbClient {
         })
     }
 
+    /// Best-effort close of every currently-idle pooled SEA session (see
+    /// `DbClient::close_all_sessions`) -- meant to be called from
+    /// `DatabricksClient.aclose()`. Never raises: a session that fails to
+    /// close is simply left for Databricks' own server-side TTL to reap.
+    fn close_sessions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.close_all_sessions().await;
+            Ok(())
+        })
+    }
+
     /// Chunk-at-a-time counterpart to `execute`+`fetchall_arrow`, entirely
     /// backing `stream_query_json`: yields `HEARTBEAT` while waiting on each
     /// still-in-flight chunk (not just the initial statement wait), then a

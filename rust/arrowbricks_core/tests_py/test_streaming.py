@@ -64,12 +64,18 @@ def _start_fast_server(n_chunks: int, rows_per_chunk: int):
                 self.wfile.write(body)
                 return
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def do_POST(self):
+            # Drain the body on every branch, even the 404 fallback -- an
+            # unread body desyncs the next request on a kept-alive
+            # connection, and no Content-Length on a bodyless response
+            # leaves the client hanging until its own timeout.
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
             if self.path == "/api/2.0/sql/statements":
-                length = int(self.headers.get("Content-Length", 0))
-                self.rfile.read(length)
+                del body
                 return self._json(
                     {
                         "statement_id": STATEMENT_ID,
@@ -78,6 +84,7 @@ def _start_fast_server(n_chunks: int, rows_per_chunk: int):
                     }
                 )
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -120,12 +127,18 @@ def _start_stalls_on_chunk_fetch_server():
                 time.sleep(30)  # far longer than any total_timeout_s used below
                 return self._json({"external_links": []})
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def do_POST(self):
+            # Drain the body on every branch, even the 404 fallback -- an
+            # unread body desyncs the next request on a kept-alive
+            # connection, and no Content-Length on a bodyless response
+            # leaves the client hanging until its own timeout.
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
             if self.path == "/api/2.0/sql/statements":
-                length = int(self.headers.get("Content-Length", 0))
-                self.rfile.read(length)
+                del body
                 return self._json(
                     {
                         "statement_id": STATEMENT_ID,
@@ -134,6 +147,7 @@ def _start_stalls_on_chunk_fetch_server():
                     }
                 )
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)

@@ -49,10 +49,17 @@ def _start_server(n_chunks: int, rows_per_chunk: int, seen_tokens: list):
         def log_message(self, *a):
             pass
 
-        def _json(self, payload, code=200):
+        def _record_token(self):
+            # Recorded for *every* authenticated request, matched or not --
+            # not just inside `_json` -- so this fixture's token-per-request
+            # count stays accurate even for a request this handler doesn't
+            # recognize (e.g. SEA session creation, 404s here but still
+            # fetches and sends a real bearer token).
             auth = self.headers.get("Authorization", "")
             if auth.startswith("Bearer "):
                 seen_tokens.append(auth.removeprefix("Bearer "))
+
+        def _json(self, payload, code=200):
             body = json.dumps(payload).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -61,6 +68,7 @@ def _start_server(n_chunks: int, rows_per_chunk: int, seen_tokens: list):
             self.wfile.write(body)
 
         def do_GET(self):
+            self._record_token()
             if self.path == f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}":
                 return self._json({"state": "RUNNING"})
             m = re.match(rf"^/api/2\.0/sql/statements/{STATEMENT_ID}/result/chunks/(\d+)$", self.path)
@@ -77,13 +85,21 @@ def _start_server(n_chunks: int, rows_per_chunk: int, seen_tokens: list):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            # Content-Length: 0 explicit -- HTTP/1.1 keep-alive with no body
+            # and no Content-Length leaves the client hanging until its own
+            # timeout, since it can't tell the response is complete.
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def do_POST(self):
+            self._record_token()
+            # Drain the body on every branch, even the 404 fallback -- an
+            # unread body desyncs the next request on a kept-alive connection.
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
             if self.path == "/api/2.0/sql/statements":
-                length = int(self.headers.get("Content-Length", 0))
-                self.rfile.read(length)
+                del body
                 chunks = [{"chunk_index": i, "row_count": rows_per_chunk} for i in range(n_chunks)]
                 return self._json(
                     {
@@ -93,6 +109,7 @@ def _start_server(n_chunks: int, rows_per_chunk: int, seen_tokens: list):
                     }
                 )
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -135,8 +152,8 @@ async def test_sync_token_provider_called_fresh_every_request():
         result = await client.execute("SELECT * FROM t")
         table = await result.fetchall_arrow()
         assert table.num_rows == 30
-        # warehouse status + submit + one chunk-index resolve per chunk
-        assert len(seen) == 2 + 6
+        # warehouse status + SEA session creation + submit + one chunk-index resolve per chunk
+        assert len(seen) == 3 + 6
         assert len(set(seen)) == len(seen), f"token_provider must not be cached: {seen}"
     finally:
         server.shutdown()

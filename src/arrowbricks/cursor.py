@@ -229,9 +229,12 @@ class Cursor:
 class Connection:
     """One Databricks SQL warehouse endpoint -- see DatabricksClient for the
     constructor args (auth, timeouts, chunk_fetch_concurrency). Statements are
-    independent REST calls with no server-side session state, so `cursor()`
-    can be called as many times as you like; `close()` is a no-op kept for
-    context-manager parity with a real DB-API connection."""
+    independent REST calls -- `cursor()` can be called as many times as you
+    like, each one free to run concurrently with the others. `close()`
+    releases whichever SEA sessions the client opened internally to speed up
+    repeated statement execution (see `DatabricksClient.aclose`) -- optional
+    (Databricks reaps them on its own TTL regardless), but tidy to call when
+    you're done with a `Connection`, same as any other context manager."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.client = DatabricksClient(*args, **kwargs)
@@ -240,7 +243,7 @@ class Connection:
         return Cursor(self.client)
 
     async def close(self) -> None:
-        pass
+        await self.client.aclose()
 
     async def __aenter__(self) -> Connection:
         return self
