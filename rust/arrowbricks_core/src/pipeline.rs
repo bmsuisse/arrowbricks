@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::client::{
     ApiError, ChunkItem, ColumnDescription, DbClient, InlineOrExternal, StatementSubmitResult, join_error,
 };
+use crate::thrift;
 
 /// Same dict-of-lists-keyed-by-index shape as `_ResultSet._pending`: a
 /// `chunk_index` can carry more than one blob (multiple `external_links` per
@@ -357,6 +358,489 @@ fn result_stream_from_submitted(client: Arc<DbClient>, submitted: StatementSubmi
         exhausted: false,
         poisoned: false,
     }
+}
+
+/// Encodes 16 raw bytes (a THandleIdentifier's guid) as lowercase hex --
+/// used only to give a Thrift result stream a human-readable `statement_id`
+/// string for `ResultSet.statement_id`/logging parity with the SEA path
+/// (which gets a real `statement_id` straight from the REST API). Not
+/// pulling in a `hex` crate for this: it's a handful of lines and the only
+/// place this crate needs hex encoding at all.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Submit -> (maybe poll) -> start background chunk fetching for the
+/// `protocol="thrift"` backend -- see `client::Protocol::Thrift`'s own doc
+/// comment for the wire-format background and why this is faster than SEA
+/// for small queries. Produces the exact same `ResultStream` shape as
+/// `execute_lazy`/`execute_lazy_prefer_inline` (same `fetchmany_arrow`/
+/// `fetchall_arrow`/`schema` contract, same `ReorderBuffer`/`decode_chunk`
+/// underneath), so `PyResultSet` and everything above it needs zero
+/// Thrift-specific handling.
+///
+/// Session handling mirrors the SEA session pool (`client::SessionPool`)
+/// exactly, with one necessary difference: Thrift's `TExecuteStatementReq`
+/// *requires* a `sessionHandle` (unlike SEA's optional `session_id`), so
+/// pool exhaustion/creation failure can't fall back to a session-less
+/// submission the way SEA does -- instead, a fresh, unpooled session is
+/// opened just for this one call and closed again immediately afterward.
+/// This is a genuinely necessary fallback, not a shortcut: without it, a
+/// caller who exhausts `MAX_SESSIONS_PER_KEY` concurrent statements would
+/// get a hard failure instead of the same "a bit more session-creation
+/// overhead, but still works" degradation SEA gets.
+///
+/// A session is only needed for the initial `ExecuteStatement` call --
+/// every subsequent RPC (`GetOperationStatus`/`FetchResults`/
+/// `CloseOperation`) addresses the operation directly by its own handle, so
+/// the session is checked back in (or closed, if it was a throwaway) right
+/// after `ExecuteStatement` returns, not held for the statement's whole
+/// lifetime the way one might expect from a "session" name.
+/// What's known once a Thrift statement has reached a terminal state and is
+/// ready to hand off to `drive_thrift_fetch_loop` -- a small bundle so
+/// `execute_lazy_thrift`'s own error paths (see its doc comment) have one
+/// single point to close a throwaway session on, instead of repeating that
+/// cleanup at every `return Err(...)`.
+struct ThriftStatementReady {
+    operation: thrift::OperationHandle,
+    schema_bytes: Option<bytes::Bytes>,
+    lz4_compressed: bool,
+    initial_rowset: Option<(thrift::RowSet, bool)>,
+    already_closed: bool,
+}
+
+async fn submit_and_await_thrift_statement(
+    client: &Arc<DbClient>,
+    session: &thrift::SessionHandle,
+    statement: &str,
+    parameters: Option<&Value>,
+) -> Result<ThriftStatementReady, ApiError> {
+    let resp = client
+        .thrift_execute_statement_raw(session, statement, parameters)
+        .await?;
+
+    let operation = resp
+        .operation_handle
+        .ok_or_else(|| ApiError::permanent("Thrift ExecuteStatement succeeded with no operationHandle".to_string()))?;
+
+    let mut schema_bytes: Option<bytes::Bytes> = None;
+    // Fallback guess before any `TGetResultSetMetadataResp` has actually
+    // confirmed compression -- overwritten the moment one arrives, same
+    // "trust the response's stated value over what we asked for" pattern as
+    // `client.rs`'s own `execute_statement`.
+    let mut lz4_compressed = client.compress_results();
+    let mut initial_rowset: Option<(thrift::RowSet, bool)> = None;
+    let mut already_finished = false;
+    let mut already_closed = false;
+
+    if let Some(direct) = resp.direct_results {
+        already_closed = direct.already_closed;
+        if let Some(meta) = &direct.result_set_metadata {
+            schema_bytes = meta.arrow_schema.clone();
+            lz4_compressed = meta.lz4_compressed;
+        }
+        if let Some(op_status) = &direct.operation_status {
+            if let Some(e) = op_status.terminal_error() {
+                return Err(ApiError::permanent(format!("Thrift statement failed: {e}")));
+            }
+            already_finished = op_status.is_finished();
+        }
+        if let Some(fr) = direct.result_set {
+            if let Some(e) = fr.status.error() {
+                return Err(ApiError::permanent(format!("Thrift FetchResults (direct) failed: {e}")));
+            }
+            if let Some(meta) = &fr.result_set_metadata {
+                if schema_bytes.is_none() {
+                    schema_bytes = meta.arrow_schema.clone();
+                }
+                lz4_compressed = meta.lz4_compressed;
+            }
+            let has_more = fr.has_more_rows;
+            if let Some(rs) = fr.results {
+                initial_rowset = Some((rs, has_more));
+            }
+        }
+    }
+
+    if !already_finished {
+        loop {
+            let status = client.thrift_get_operation_status_raw(&operation).await?;
+            if let Some(e) = status.terminal_error() {
+                return Err(ApiError::permanent(format!("Thrift statement failed: {e}")));
+            }
+            if status.is_finished() {
+                break;
+            }
+            tokio::time::sleep(crate::client::THRIFT_POLL_INTERVAL).await;
+        }
+    }
+
+    Ok(ThriftStatementReady {
+        operation,
+        schema_bytes,
+        lz4_compressed,
+        initial_rowset,
+        already_closed,
+    })
+}
+
+/// Submit -> (maybe poll) -> start background chunk fetching for the
+/// `protocol="thrift"` backend. See `client::Protocol::Thrift`'s own doc
+/// comment for the wire-format background.
+///
+/// **A session checked out for this call (whether pooled or a throwaway,
+/// see `client::ThriftSessionPool`'s doc comment) must stay open until the
+/// operation it created is fully drained and closed -- not just until the
+/// statement reaches a terminal "finished" state.** Found the hard way by
+/// testing genuine concurrent load against the real warehouse: closing a
+/// throwaway session immediately after `ExecuteStatement` returned (the
+/// original version of this function) intermittently (~20-30% of runs, once
+/// concurrency exceeded `MAX_SESSIONS_PER_KEY`) crashed a *different*,
+/// still-in-flight fetch for the operation that same session had just
+/// created, with `RESOURCE_DOES_NOT_EXIST: Command ... does not exist` --
+/// closing a Thrift session invalidates every operation still open under
+/// it, including its own, regardless of whether that operation has
+/// literally finished fetching yet. Fixed by deferring the throwaway
+/// session's close (and the operation's own close) to
+/// `drive_thrift_fetch_loop`'s single cleanup point, which always runs
+/// after the fetch loop is fully done, on every exit path -- not right
+/// after submission. A *pooled* session is still checked in eagerly, right
+/// after `ExecuteStatement` returns, same as before this fix: that only
+/// returns it to the idle pool for potential reuse by a *different*
+/// operation, it does not close the session, and a HiveServer2-compatible
+/// session is designed to support multiple independently-addressed
+/// operations at once -- the crash above was specifically about *closing*
+/// a session out from under one of its own still-open operations, not
+/// about a session merely being idle/shared.
+pub async fn execute_lazy_thrift(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+) -> Result<ResultStream, ApiError> {
+    let pooled = client.thrift_checkout_session(catalog, schema).await;
+    let (session, from_pool) = match pooled {
+        Some(s) => (s, true),
+        None => (client.thrift_open_session_raw(catalog, schema).await?, false),
+    };
+
+    let ready = submit_and_await_thrift_statement(&client, &session, statement, parameters.as_ref()).await;
+
+    // Exactly one of these two arms ever touches `session` -- a pooled
+    // session is checked in right away (safe: that only makes it available
+    // for a *different* operation, see this function's own doc comment);
+    // a throwaway session that failed to even reach a terminal state is
+    // closed right here, since it'll never be handed to
+    // `drive_thrift_fetch_loop`; a throwaway session that succeeded is
+    // carried forward for that function to close once the fetch loop is
+    // actually done with it.
+    let throwaway_session = if from_pool {
+        client.thrift_checkin_session(catalog, schema, session, ready.is_ok());
+        None
+    } else {
+        match &ready {
+            Ok(_) => Some(session),
+            Err(_) => {
+                client.thrift_close_session_raw(&session).await;
+                None
+            }
+        }
+    };
+    let ready = ready?;
+
+    let statement_id = hex_encode(&ready.operation.operation_id.guid);
+
+    let concurrency = client.chunk_fetch_concurrency.max(1);
+    let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
+    tokio::spawn(drive_thrift_fetch_loop(
+        client,
+        ready.operation,
+        ready.schema_bytes,
+        ready.lz4_compressed,
+        ready.initial_rowset,
+        ready.already_closed,
+        throwaway_session,
+        tx,
+    ));
+
+    Ok(ResultStream {
+        statement_id,
+        num_chunks: 0,
+        schema: None,
+        columns: Vec::new(),
+        reorder: ReorderBuffer::new(rx),
+        pending: VecDeque::new(),
+        pending_rows: 0,
+        exhausted: false,
+        poisoned: false,
+    })
+}
+
+/// Drives the sequential `FetchResults(orientation: FETCH_NEXT)` loop for
+/// one Thrift statement, translating each response's `arrowBatches`
+/// (decoded inline -- see below) or `resultLinks` (cloud-fetch, downloaded
+/// concurrently) into `ChunkItem`s fed to the same `ReorderBuffer`/
+/// `decode_chunk` machinery every other backend uses. Chunk indices are
+/// assigned sequentially in the exact order items are produced here, which
+/// is also true row order (Thrift's `FetchResults` calls are strictly
+/// sequential, unlike SEA's independently-resolved chunk set) -- so
+/// `ReorderBuffer` never actually has to reorder anything on this path, but
+/// reusing it costs nothing and keeps `ResultStream` backend-agnostic.
+/// Owns the two cleanup steps every exit path of `run_thrift_fetch_loop`
+/// needs (closing the operation, and closing a throwaway session if this
+/// call didn't use a pooled one) -- a bare `return` inside that loop must
+/// never bypass either, see `execute_lazy_thrift`'s own doc comment for why
+/// the session-close specifically matters.
+async fn drive_thrift_fetch_loop(
+    client: Arc<DbClient>,
+    operation: thrift::OperationHandle,
+    schema_bytes: Option<bytes::Bytes>,
+    lz4_compressed: bool,
+    initial_rowset: Option<(thrift::RowSet, bool)>,
+    already_closed: bool,
+    throwaway_session: Option<thrift::SessionHandle>,
+    tx: mpsc::Sender<Result<ChunkItem, ApiError>>,
+) {
+    run_thrift_fetch_loop(&client, &operation, schema_bytes, lz4_compressed, initial_rowset, &tx).await;
+    if !already_closed {
+        client.thrift_close_operation_best_effort(&operation).await;
+    }
+    if let Some(session) = throwaway_session {
+        client.thrift_close_session_raw(&session).await;
+    }
+}
+
+async fn run_thrift_fetch_loop(
+    client: &Arc<DbClient>,
+    operation: &thrift::OperationHandle,
+    mut schema_bytes: Option<bytes::Bytes>,
+    mut lz4_compressed: bool,
+    initial_rowset: Option<(thrift::RowSet, bool)>,
+    tx: &mpsc::Sender<Result<ChunkItem, ApiError>>,
+) {
+    let mut chunk_index: i64 = 0;
+    let mut pending = initial_rowset;
+    loop {
+        let (row_set, has_more) = if let Some(v) = pending.take() {
+            v
+        } else {
+            match client.thrift_fetch_results_raw(&operation).await {
+                Ok(fr) => {
+                    if let Some(e) = fr.status.error() {
+                        let _ = tx
+                            .send(Err(ApiError::permanent(format!("Thrift FetchResults failed: {e}"))))
+                            .await;
+                        return;
+                    }
+                    if let Some(meta) = &fr.result_set_metadata {
+                        if schema_bytes.is_none() {
+                            schema_bytes = meta.arrow_schema.clone();
+                        }
+                        lz4_compressed = meta.lz4_compressed;
+                    }
+                    (fr.results.unwrap_or_default(), fr.has_more_rows)
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            }
+        };
+
+        if !row_set.arrow_batches.is_empty() {
+            let schema_for_blob = schema_bytes.clone();
+            let batches = row_set.arrow_batches;
+            let decode_result =
+                tokio::task::spawn_blocking(move || build_inline_blob(schema_for_blob, batches, lz4_compressed))
+                    .await
+                    .map_err(join_error);
+            match decode_result {
+                Ok(Ok((blob, row_count))) => {
+                    let item = ChunkItem {
+                        blob,
+                        row_count: Some(row_count),
+                        chunk_index,
+                    };
+                    chunk_index += 1;
+                    if tx.send(Ok(item)).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(Err(e)) | Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            }
+        }
+
+        if !row_set.result_links.is_empty() {
+            let mut handles = Vec::with_capacity(row_set.result_links.len());
+            for link in row_set.result_links {
+                let idx = chunk_index;
+                chunk_index += 1;
+                let client = client.clone();
+                let compressed = lz4_compressed;
+                handles.push((
+                    idx,
+                    link.row_count,
+                    tokio::spawn(async move { client.fetch_link_bytes(&link.file_link, compressed).await }),
+                ));
+            }
+            for (idx, row_count, handle) in handles {
+                let blob = match handle.await {
+                    Ok(Ok(blob)) => blob,
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                    Err(join_err) => {
+                        let _ = tx.send(Err(join_error(join_err))).await;
+                        return;
+                    }
+                };
+                // See `truncate_to_declared_row_count`'s own doc comment --
+                // a real, confirmed-against-a-live-workspace Databricks
+                // behavior: a cloud-fetch file for a `LIMIT`-bounded query
+                // can contain more rows than the link's own declared
+                // `rowCount`, and must be truncated to it, or the caller
+                // silently gets more rows than the query asked for.
+                let truncate_result =
+                    tokio::task::spawn_blocking(move || truncate_to_declared_row_count(blob, row_count))
+                        .await
+                        .map_err(join_error);
+                let blob = match truncate_result {
+                    Ok(Ok(b)) => b,
+                    Ok(Err(e)) | Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+                let item = ChunkItem {
+                    blob,
+                    row_count: Some(row_count),
+                    chunk_index: idx,
+                };
+                if tx.send(Ok(item)).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+}
+
+/// Concatenates `schema_bytes` (the stream's Arrow-IPC schema message,
+/// captured once from whichever response first carried
+/// `TGetResultSetMetadataResp.arrowSchema`) with every arrow batch's
+/// (LZ4-unwrapped, if `lz4_compressed`) bytes -- producing exactly the same
+/// self-contained "schema message + N record-batch messages" shape
+/// `decode_chunk` already knows how to decode, confirmed against
+/// `databricks-sql-connector`'s own `convert_arrow_based_set_to_arrow_table`
+/// (which does the identical concatenation before calling
+/// `pyarrow.ipc.open_stream`). Runs on `spawn_blocking` -- LZ4 decompression
+/// is real CPU work, same reasoning as `client.rs`'s `fetch_link_bytes`.
+fn build_inline_blob(
+    schema_bytes: Option<bytes::Bytes>,
+    batches: Vec<thrift::ArrowBatch>,
+    lz4_compressed: bool,
+) -> Result<(bytes::Bytes, i64), ApiError> {
+    let mut out = Vec::new();
+    if let Some(s) = &schema_bytes {
+        out.extend_from_slice(s);
+    }
+    let mut row_count = 0i64;
+    for b in batches {
+        row_count += b.row_count;
+        if lz4_compressed {
+            let decoded = crate::client::decompress_lz4_frame(&b.batch)?;
+            out.extend_from_slice(&decoded);
+        } else {
+            out.extend_from_slice(&b.batch);
+        }
+    }
+    Ok((bytes::Bytes::from(out), row_count))
+}
+
+/// Truncates a downloaded Thrift cloud-fetch file (`resultLinks`/
+/// `TSparkArrowResultLink`) down to its own declared `rowCount` if the file
+/// actually contains more rows than that -- a real, confirmed-against-a-live-
+/// workspace Databricks behavior, not a hypothetical: `SELECT * FROM
+/// dim_article LIMIT 500000` came back with 502879 rows end to end (2879
+/// extra) via this crate's own Thrift path, while the *same* query via SEA's
+/// `EXTERNAL_LINKS` chunking came back with exactly 500000. This isn't a
+/// bug in this crate's decode -- `databricks-sql-connector`'s own
+/// `ResultSetDownloadHandler.run` has an identical check with the identical
+/// justification in its own comment: "The server rarely prepares the exact
+/// number of rows requested by the client in cloud fetch. Subsequently, we
+/// drop the extraneous rows in the last file if more rows are retrieved
+/// than requested." Silently handing back more rows than a `LIMIT` (or any
+/// other row-count-bounded query) asked for is exactly the "silent
+/// incorrectness" this crate's own testing discipline exists to catch --
+/// this must be fixed here, not deferred, once confirmed.
+///
+/// Only ever *drops* rows, never guesses at which ones to keep beyond "the
+/// first `declared_row_count`, in order" -- if `declared_row_count` is `<= 0`
+/// (not populated, or genuinely zero) truncation is skipped entirely rather
+/// than assumed; a file with fewer or exactly as many rows as declared is
+/// returned unchanged (the overwhelmingly common case -- this only actually
+/// re-encodes when asked to do real work). Runs the full decode-truncate-
+/// re-encode on `spawn_blocking`, same reasoning as `build_inline_blob` and
+/// `client.rs`'s own `fetch_link_bytes`: real CPU work, shouldn't run inline
+/// on the async task driving the rest of this fetch loop.
+fn truncate_to_declared_row_count(blob: Bytes, declared_row_count: i64) -> Result<Bytes, ApiError> {
+    if declared_row_count <= 0 {
+        return Ok(blob);
+    }
+    let batches = decode_chunk(&blob)?;
+    let total_rows: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
+    if total_rows <= declared_row_count {
+        return Ok(blob);
+    }
+
+    let mut kept = Vec::with_capacity(batches.len());
+    let mut remaining = declared_row_count;
+    for batch in batches {
+        if remaining <= 0 {
+            break;
+        }
+        if (batch.num_rows() as i64) <= remaining {
+            remaining -= batch.num_rows() as i64;
+            kept.push(batch);
+        } else {
+            kept.push(batch.slice(0, remaining as usize));
+            remaining = 0;
+        }
+    }
+
+    let schema = kept.first().map(|b| b.schema()).ok_or_else(|| {
+        ApiError::permanent("truncate_to_declared_row_count: no batches survived truncation".to_string())
+    })?;
+    let mut out = Vec::new();
+    {
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut out, &schema).map_err(|e| ApiError {
+            message: format!("Arrow IPC re-encode error while truncating an overshot cloud-fetch file: {e}"),
+            transient: false,
+        })?;
+        for batch in &kept {
+            writer.write(batch).map_err(|e| ApiError {
+                message: format!("Arrow IPC re-encode error while truncating an overshot cloud-fetch file: {e}"),
+                transient: false,
+            })?;
+        }
+        writer.finish().map_err(|e| ApiError {
+            message: format!("Arrow IPC re-encode error while truncating an overshot cloud-fetch file: {e}"),
+            transient: false,
+        })?;
+    }
+    Ok(Bytes::from(out))
 }
 
 /// Like `execute_lazy`, but first tries `disposition: INLINE` + `format:
@@ -920,6 +1404,82 @@ mod tests {
             vec![Arc::new(Int64Array::from(id)), Arc::new(Float64Array::from(values))],
         )
         .unwrap()
+    }
+
+    fn write_stream(batches: &[RecordBatch]) -> Bytes {
+        use arrow::ipc::writer::StreamWriter;
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &batches[0].schema()).unwrap();
+            for b in batches {
+                writer.write(b).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        Bytes::from(buf)
+    }
+
+    /// Regression test for a real behavior found by testing this crate's own
+    /// Thrift path against a real workspace: `SELECT * FROM dim_article
+    /// LIMIT 500000` came back with 502879 rows (2879 too many) via a
+    /// cloud-fetch `resultLink` whose own declared `rowCount` was 500000 --
+    /// `databricks-sql-connector` has an identical truncation step for the
+    /// identical documented reason (see this function's own doc comment).
+    /// Straddles a batch boundary on purpose (declared count lands
+    /// mid-batch) -- the simpler "drop whole extra batches only" bug would
+    /// pass a test where the boundary landed exactly on a batch edge.
+    #[test]
+    fn truncate_to_declared_row_count_slices_the_straddling_batch() {
+        let batch_a = make_batch(vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
+        let batch_b = make_batch(vec![4, 5, 6], vec![4.0, 5.0, 6.0]);
+        let blob = write_stream(&[batch_a, batch_b]);
+
+        let truncated = truncate_to_declared_row_count(blob, 4).unwrap();
+        let batches = decode_chunk(&truncated).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 4,
+            "must keep exactly the declared row count, not the file's real count"
+        );
+
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_primitive::<arrow::datatypes::Int64Type>()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4],
+            "must keep the first N rows in order, not an arbitrary subset"
+        );
+    }
+
+    /// A file that already matches (or undershoots) its declared row count
+    /// must be returned unchanged -- the overwhelmingly common case, and
+    /// truncation must not be triggered speculatively.
+    #[test]
+    fn truncate_to_declared_row_count_is_a_no_op_when_not_needed() {
+        let batch = make_batch(vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
+        let blob = write_stream(&[batch]);
+        let untouched = truncate_to_declared_row_count(blob.clone(), 3).unwrap();
+        assert_eq!(
+            untouched, blob,
+            "must not re-encode when the file already matches the declared count"
+        );
+    }
+
+    /// `declared_row_count <= 0` means "no authoritative bound known" --
+    /// must never be treated as "truncate to zero rows."
+    #[test]
+    fn truncate_to_declared_row_count_skips_truncation_when_bound_is_unknown() {
+        let batch = make_batch(vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
+        let blob = write_stream(&[batch]);
+        let untouched = truncate_to_declared_row_count(blob.clone(), 0).unwrap();
+        assert_eq!(untouched, blob);
     }
 
     /// Regression test for a real behavior found by testing edge-case data

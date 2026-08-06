@@ -2,6 +2,7 @@ pub mod client;
 pub mod heartbeat;
 pub mod json_convert;
 pub mod pipeline;
+pub mod thrift;
 
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +17,7 @@ use pyo3_arrow::input::AnyRecordBatch;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
-use client::{ApiError, DbClient, TokenFuture, TokenProvider};
+use client::{ApiError, DbClient, Protocol, TokenFuture, TokenProvider};
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
 use pipeline::{NdjsonStream, ResultStream};
 
@@ -230,6 +231,7 @@ impl PyDbClient {
         warehouse_start_timeout=300.0,
         warehouse_confirmed_running_ttl_s=30.0,
         compress_results=true,
+        protocol="sea".to_string(),
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -243,7 +245,9 @@ impl PyDbClient {
         warehouse_start_timeout: f64,
         warehouse_confirmed_running_ttl_s: f64,
         compress_results: bool,
+        protocol: String,
     ) -> PyResult<Self> {
+        let protocol = Protocol::parse(&protocol).map_err(PyValueError::new_err)?;
         let db_client = match (token, token_provider) {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(
@@ -268,7 +272,8 @@ impl PyDbClient {
                     .with_wait_timeout(wait_timeout)
                     .with_warehouse_start_timeout(warehouse_start_timeout)
                     .with_warehouse_confirmed_running_ttl(warehouse_confirmed_running_ttl_s)
-                    .with_compress_results(compress_results),
+                    .with_compress_results(compress_results)
+                    .with_protocol(protocol),
             ),
         })
     }
@@ -286,7 +291,11 @@ impl PyDbClient {
     /// if that expectation turns out wrong (too big, or an unsupported
     /// column type). Default `False`: unconditionally pays for two
     /// executions in that fallback case, which isn't worth it for a caller
-    /// with no reason to expect a small result.
+    /// with no reason to expect a small result. Ignored (a silent no-op, not
+    /// an error) when this client was constructed with `protocol="thrift"`
+    /// -- Thrift has no INLINE-disposition equivalent, and its own
+    /// `getDirectResults` mechanism already gets small-query latency
+    /// without it (see `client::Protocol::Thrift`'s own doc comment).
     #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, prefer_inline=false))]
     fn execute<'py>(
         &self,
@@ -300,7 +309,10 @@ impl PyDbClient {
         let client = self.inner.clone();
         let parameters = parameters_to_value(py, parameters)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = if prefer_inline {
+            let stream = if client.protocol == Protocol::Thrift {
+                pipeline::execute_lazy_thrift(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
+                    .await
+            } else if prefer_inline {
                 pipeline::execute_lazy_prefer_inline(
                     client,
                     &statement,
@@ -354,14 +366,18 @@ impl PyDbClient {
         })
     }
 
-    /// Best-effort close of every currently-idle pooled SEA session (see
-    /// `DbClient::close_all_sessions`) -- meant to be called from
-    /// `DatabricksClient.aclose()`. Never raises: a session that fails to
-    /// close is simply left for Databricks' own server-side TTL to reap.
+    /// Best-effort close of every currently-idle pooled session -- both the
+    /// SEA pool (`DbClient::close_all_sessions`) and the Thrift pool
+    /// (`DbClient::close_all_thrift_sessions`); whichever one this client's
+    /// `protocol` never used is simply empty and closes nothing. Meant to be
+    /// called from `DatabricksClient.aclose()`. Never raises: a session that
+    /// fails to close is simply left for Databricks' own server-side TTL to
+    /// reap.
     fn close_sessions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client.close_all_sessions().await;
+            client.close_all_thrift_sessions().await;
             Ok(())
         })
     }

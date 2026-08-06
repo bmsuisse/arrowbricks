@@ -42,6 +42,7 @@ class Client:
         warehouse_start_timeout: float = 300.0,
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
+        protocol: str = "sea",
     ) -> None: ...
     async def execute(
         self,

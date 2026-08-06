@@ -37,6 +37,7 @@ class DatabricksClient:
         warehouse_start_timeout: float = 300.0,
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
+        protocol: str = "sea",
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
@@ -58,6 +59,19 @@ class DatabricksClient:
         # bottleneck for a result that size. Set False if your link to the
         # warehouse is fast/low-latency enough that decompression CPU time
         # stops paying for itself.
+        # protocol: "sea" (default, unchanged) submits statements via the
+        # REST Statement Execution API. "thrift" instead speaks the same
+        # HiveServer2-compatible Thrift-over-HTTPS protocol
+        # databricks-sql-connector uses by *default* (when its own
+        # `use_sea` isn't set) -- measurably faster for small queries,
+        # since its ExecuteStatement RPC can return a small result inline
+        # in the same call that submits the statement (`getDirectResults`),
+        # where SEA always needs at least one further poll/fetch round
+        # trip. `prefer_inline` has no effect under `protocol="thrift"`
+        # (silently ignored, not an error) -- Thrift has no
+        # INLINE-disposition equivalent, and doesn't need one.
+        if protocol not in ("sea", "thrift"):
+            raise ValueError(f'DatabricksClient protocol must be "sea" or "thrift", got {protocol!r}')
         self._core_client = _core.Client(
             host,
             warehouse_id,
@@ -69,15 +83,17 @@ class DatabricksClient:
             warehouse_start_timeout=warehouse_start_timeout,
             warehouse_confirmed_running_ttl_s=warehouse_confirmed_running_ttl_s,
             compress_results=compress_results,
+            protocol=protocol,
         )
 
     async def aclose(self) -> None:
-        """Closes every currently-idle pooled SEA session this client opened
-        (see `execute`'s own use of one per (catalog, schema) pair) --
-        best-effort, never raises; anything left open just falls to
-        Databricks' own server-side session TTL instead. HTTP connections
-        themselves still need no explicit close -- the Rust core's
-        connection pool is cleaned up on garbage collection."""
+        """Closes every currently-idle pooled session this client opened
+        (see `execute`'s own use of one per (catalog, schema) pair) -- both
+        the SEA session pool and, if `protocol="thrift"` was used, the
+        Thrift session pool; best-effort, never raises; anything left open
+        just falls to Databricks' own server-side session TTL instead. HTTP
+        connections themselves still need no explicit close -- the Rust
+        core's connection pool is cleaned up on garbage collection."""
         await self._core_client.close_sessions()
 
     async def __aenter__(self) -> DatabricksClient:

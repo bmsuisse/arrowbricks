@@ -13,6 +13,8 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::thrift;
+
 /// Typed response shapes -- replaces navigating a dynamic `serde_json::Value`
 /// tree with `.get("...").and_then(|v| v.as_str())` chains everywhere. Same
 /// data, but serde deserializes straight into these instead of building an
@@ -210,7 +212,7 @@ impl std::fmt::Display for ApiError {
 impl std::error::Error for ApiError {}
 
 impl ApiError {
-    fn permanent(msg: impl Into<String>) -> Self {
+    pub(crate) fn permanent(msg: impl Into<String>) -> Self {
         Self {
             message: msg.into(),
             transient: false,
@@ -375,7 +377,7 @@ pub struct ChunkItem {
 /// decoder's position in the underlying byte slice carries over across
 /// calls) -- so looping `read_to_end` on one decoder until it stops growing
 /// `out` reads every frame without reconstructing a decoder per frame.
-fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
+pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
     use std::io::Read;
     // `compressed.len()` is a real lower bound, but LZ4 on Arrow-IPC data
     // (long dictionary/offset-buffer runs, mostly-repeated bytes) typically
@@ -428,6 +430,34 @@ where
     }
 }
 
+/// Which wire protocol/backend `execute()` talks to Databricks with -- an
+/// opt-in choice on `Client`/`DatabricksClient` (`protocol: "sea" | "thrift"`),
+/// SEA staying the unchanged default. `Thrift` speaks the same
+/// HiveServer2-compatible `TCLIService` protocol `databricks-sql-connector`
+/// uses by *default* (when `use_sea` isn't set) -- plain HTTPS POST,
+/// `TBinaryProtocol`-encoded, no framing beyond HTTP itself (see `thrift.rs`).
+/// Measurably faster than this crate's own SEA path for small queries
+/// (closing the remaining gap `prefer_inline`/SEA-session-pooling didn't --
+/// see those entries' own closing notes in `AGENTS.md`), primarily because
+/// `TExecuteStatementReq`'s `getDirectResults` can return a small result's
+/// data inline in the *same* RPC that submits the statement, where SEA
+/// always needs at least a separate poll/fetch round trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    Sea,
+    Thrift,
+}
+
+impl Protocol {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "sea" => Ok(Protocol::Sea),
+            "thrift" => Ok(Protocol::Thrift),
+            other => Err(format!("unknown protocol {other:?} -- expected \"sea\" or \"thrift\"")),
+        }
+    }
+}
+
 pub struct DbClient {
     http: Client,
     host: String,
@@ -443,10 +473,47 @@ pub struct DbClient {
     /// compression on every statement -- see `execute_statement`. Runtime
     /// toggle (not a compile-time constant) so a caller who wants to
     /// benchmark or rule out compression as a variable doesn't need to
-    /// rebuild the extension to do it.
+    /// rebuild the extension to do it. Also doubles, on the Thrift path, as
+    /// `TExecuteStatementReq.canDecompressLZ4Result`.
     compress_results: bool,
     session_pool: SessionPool,
+    pub protocol: Protocol,
+    thrift_session_pool: ThriftSessionPool,
 }
+
+/// Session pool for the Thrift backend -- same checkout/checkin shape and
+/// the exact same two hard constraints as `SessionPool` above (a session is
+/// created *for* one (catalog, schema) pair and can't be redirected; Thrift's
+/// session model is *mandatory* per statement, unlike SEA's optional
+/// `session_id`, and this crate has not independently confirmed whether
+/// concurrent statements on one Thrift session are safe against a real
+/// workspace the way the SEA crash was -- so this pool exists defensively,
+/// following the same proven-safe pattern regardless of whether the
+/// analogous crash reproduces here. Unlike SEA, there is no "sessionless"
+/// fallback available at all -- `TExecuteStatementReq.sessionHandle` is
+/// required by the protocol -- so a pool-exhaustion/creation-failure `None`
+/// here means the caller must open one throwaway session for that single
+/// call and close it again immediately after (see `execute_lazy_thrift`).
+#[derive(Default)]
+struct ThriftSessionPool {
+    idle: Mutex<HashMap<(Option<String>, Option<String>), Vec<thrift::SessionHandle>>>,
+    total: Mutex<HashMap<(Option<String>, Option<String>), usize>>,
+}
+
+/// How long the Thrift path polls `GetOperationStatus` when a statement
+/// doesn't finish within its `getDirectResults` budget (see
+/// `execute_lazy_thrift`) -- shorter than SEA's `POLL_INTERVAL` (2s) since
+/// this path exists specifically to be fast for small/quick queries; a
+/// query slow enough to need many polls pays a modest, bounded amount of
+/// extra round trips either way.
+pub(crate) const THRIFT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Request hints on `TExecuteStatementReq.getDirectResults`/`TFetchResultsReq` --
+/// how much of the result the server should try to hand back in one RPC.
+/// The server decides real batch sizes regardless (same as SEA's chunk
+/// sizes); these are just generous upper bounds so a small/medium result
+/// has a real chance of coming back in a single round trip.
+const THRIFT_DIRECT_RESULTS_MAX_ROWS: i64 = 1_000_000;
+const THRIFT_DIRECT_RESULTS_MAX_BYTES: i64 = 100 * 1024 * 1024;
 
 /// A SEA session (`POST /api/2.0/sql/sessions`) pinned to one (catalog,
 /// schema) pair, reused across statement submissions instead of the
@@ -537,11 +604,21 @@ impl DbClient {
             warehouse_confirmed_running_at: Mutex::new(None),
             compress_results: true,
             session_pool: SessionPool::default(),
+            protocol: Protocol::Sea,
+            thrift_session_pool: ThriftSessionPool::default(),
         }
     }
 
     pub fn with_concurrency(mut self, n: usize) -> Self {
         self.chunk_fetch_concurrency = n.max(1);
+        self
+    }
+
+    /// Selects the wire protocol/backend -- `Protocol::Sea` (default,
+    /// unchanged) or `Protocol::Thrift` (opt-in, see `Protocol`'s own doc
+    /// comment).
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
         self
     }
 
@@ -557,6 +634,13 @@ impl DbClient {
     pub fn with_compress_results(mut self, enabled: bool) -> Self {
         self.compress_results = enabled;
         self
+    }
+
+    /// Read-back for the Thrift path's fallback `lz4_compressed` guess
+    /// (`pipeline.rs`'s `execute_lazy_thrift`) before any
+    /// `TGetResultSetMetadataResp` has confirmed the real value.
+    pub(crate) fn compress_results(&self) -> bool {
+        self.compress_results
     }
 
     /// Matches Python's `DatabricksClient(..., http_timeout=60.0)` -- the
@@ -642,7 +726,7 @@ impl DbClient {
     /// would block this task's tokio worker thread from polling anything
     /// else scheduled on it -- other concurrent chunk fetches, heartbeat
     /// timers -- for however long that takes.
-    async fn fetch_link_bytes(&self, url: &str, compressed: bool) -> Result<Bytes, ApiError> {
+    pub(crate) async fn fetch_link_bytes(&self, url: &str, compressed: bool) -> Result<Bytes, ApiError> {
         retry_call(|| async {
             let resp = self
                 .http
@@ -800,6 +884,223 @@ impl DbClient {
         for id in ids {
             self.delete_session(&id).await;
         }
+    }
+
+    // ---- Thrift backend (opt-in `protocol="thrift"`) --------------------
+
+    fn thrift_url(&self) -> String {
+        format!("{}/sql/1.0/warehouses/{}", self.host, self.warehouse_id)
+    }
+
+    /// Raw Thrift-over-HTTP POST: `Content-Type: application/x-thrift`, the
+    /// same Bearer-token auth header as every other request in this crate,
+    /// no framing beyond HTTP itself (confirmed against
+    /// `databricks-sql-connector`'s own `THttpClient` -- see `thrift.rs`'s
+    /// own module doc comment). `idempotent` gates transience exactly like
+    /// `authed_json`'s -- `OpenSession`/`ExecuteStatement`/`FetchResults`
+    /// (which advances a server-side cursor with `orientation: FETCH_NEXT`,
+    /// so blindly replaying it on an ambiguous failure risks silently
+    /// skipping or double-fetching rows) must never be retried blindly;
+    /// `GetOperationStatus`/`CloseOperation`/`CloseSession`/`CancelOperation`
+    /// are safe to retry (read-only or naturally idempotent).
+    async fn thrift_call(&self, body: Bytes, idempotent: bool) -> Result<Bytes, ApiError> {
+        let url = self.thrift_url();
+        retry_call(|| async {
+            let token = self.token_provider.get_token().await?;
+            let resp = self
+                .http
+                .post(&url)
+                .bearer_auth(&token)
+                .header("Content-Type", "application/x-thrift")
+                .header("User-Agent", "PyDatabricksSqlConnector/4.4.0 arrowbricks-thrift-rs")
+                .body(body.clone())
+                .timeout(self.http_timeout)
+                .send()
+                .await
+                .map_err(|e| ApiError::from_reqwest(e, idempotent))?;
+            let status = resp.status();
+            let bytes = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, idempotent))?;
+            if !status.is_success() {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                return Err(ApiError::from_status(status, &text, idempotent));
+            }
+            Ok(bytes)
+        })
+        .await
+    }
+
+    fn thrift_parse_error(e: thrift::ThriftError) -> ApiError {
+        ApiError::permanent(format!("bad thrift response: {e}"))
+    }
+
+    pub(crate) async fn thrift_open_session_raw(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<thrift::SessionHandle, ApiError> {
+        let namespace = if catalog.is_some() || schema.is_some() {
+            Some(thrift::Namespace {
+                catalog_name: catalog,
+                schema_name: schema,
+            })
+        } else {
+            None
+        };
+        let req = thrift::OpenSessionReq {
+            namespace,
+            configuration: &[("spark.thriftserver.arrowBasedRowSet.timestampAsString", "false")],
+        };
+        let body = Bytes::from(thrift::build_open_session(&req));
+        // Not idempotent: an ambiguous failure here may have already
+        // created a session server-side; blindly retrying would leak it
+        // (harmless correctness-wise, but not "safe to replay" in the
+        // sense this flag means elsewhere in this file).
+        let resp_bytes = self.thrift_call(body, false).await?;
+        let resp = thrift::parse_open_session(&resp_bytes).map_err(Self::thrift_parse_error)?;
+        if let Some(e) = resp.status.error() {
+            return Err(ApiError::permanent(format!("Thrift OpenSession failed: {e}")));
+        }
+        resp.session_handle
+            .ok_or_else(|| ApiError::permanent("Thrift OpenSession succeeded with no sessionHandle".to_string()))
+    }
+
+    pub(crate) async fn thrift_close_session_raw(&self, session: &thrift::SessionHandle) {
+        let body = Bytes::from(thrift::build_close_session(session));
+        // Best-effort, same as SEA's `delete_session` -- a failed close just
+        // leaves the session for Databricks' own server-side TTL to reap.
+        let _ = self.thrift_call(body, true).await;
+    }
+
+    /// Same checkout contract as SEA's `checkout_session` (see
+    /// `ThriftSessionPool`'s doc comment): `None` means the caller must open
+    /// its own throwaway session for this one call (Thrift has no
+    /// session-less submission mode to fall back to).
+    pub(crate) async fn thrift_checkout_session(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+    ) -> Option<thrift::SessionHandle> {
+        let key = (catalog.map(str::to_string), schema.map(str::to_string));
+        {
+            let mut idle = self.thrift_session_pool.idle.lock().unwrap();
+            if let Some(ids) = idle.get_mut(&key)
+                && let Some(id) = ids.pop()
+            {
+                return Some(id);
+            }
+        }
+        {
+            let mut total = self.thrift_session_pool.total.lock().unwrap();
+            let count = total.entry(key.clone()).or_insert(0);
+            if *count >= MAX_SESSIONS_PER_KEY {
+                return None;
+            }
+            *count += 1;
+        }
+        match self.thrift_open_session_raw(catalog, schema).await {
+            Ok(handle) => Some(handle),
+            Err(_) => {
+                let mut total = self.thrift_session_pool.total.lock().unwrap();
+                if let Some(count) = total.get_mut(&key) {
+                    *count = count.saturating_sub(1);
+                }
+                None
+            }
+        }
+    }
+
+    pub(crate) fn thrift_checkin_session(
+        &self,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        session: thrift::SessionHandle,
+        keep: bool,
+    ) {
+        let key = (catalog.map(str::to_string), schema.map(str::to_string));
+        if keep {
+            self.thrift_session_pool
+                .idle
+                .lock()
+                .unwrap()
+                .entry(key)
+                .or_default()
+                .push(session);
+        } else {
+            let mut total = self.thrift_session_pool.total.lock().unwrap();
+            if let Some(count) = total.get_mut(&key) {
+                *count = count.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Best-effort close of every currently-idle pooled Thrift session --
+    /// same contract as `close_all_sessions` (SEA).
+    pub async fn close_all_thrift_sessions(&self) {
+        let sessions: Vec<thrift::SessionHandle> = {
+            let mut idle = self.thrift_session_pool.idle.lock().unwrap();
+            idle.drain().flat_map(|(_, v)| v).collect()
+        };
+        for s in sessions {
+            self.thrift_close_session_raw(&s).await;
+        }
+    }
+
+    pub(crate) async fn thrift_execute_statement_raw(
+        &self,
+        session: &thrift::SessionHandle,
+        statement: &str,
+        parameters: Option<&Value>,
+    ) -> Result<thrift::ExecuteStatementResp, ApiError> {
+        let params_vec = parameters.map(thrift::parameters_from_json).unwrap_or_default();
+        let req = thrift::ExecuteStatementReq {
+            session_handle: session,
+            statement,
+            can_decompress_lz4: self.compress_results,
+            direct_results_max_rows: THRIFT_DIRECT_RESULTS_MAX_ROWS,
+            direct_results_max_bytes: THRIFT_DIRECT_RESULTS_MAX_BYTES,
+            parameters: &params_vec,
+        };
+        let body = Bytes::from(thrift::build_execute_statement(&req));
+        // Not idempotent -- same double-execution risk as SEA's
+        // statement-submit POST (arbitrary caller SQL, e.g. INSERT/MERGE).
+        let resp_bytes = self.thrift_call(body, false).await?;
+        let resp = thrift::parse_execute_statement(&resp_bytes).map_err(Self::thrift_parse_error)?;
+        if let Some(e) = resp.status.error() {
+            return Err(ApiError::permanent(format!("Thrift ExecuteStatement failed: {e}")));
+        }
+        Ok(resp)
+    }
+
+    pub(crate) async fn thrift_get_operation_status_raw(
+        &self,
+        op: &thrift::OperationHandle,
+    ) -> Result<thrift::OperationStatusResp, ApiError> {
+        let body = Bytes::from(thrift::build_get_operation_status(op));
+        // Idempotent -- read-only.
+        let resp_bytes = self.thrift_call(body, true).await?;
+        thrift::parse_get_operation_status(&resp_bytes).map_err(Self::thrift_parse_error)
+    }
+
+    pub(crate) async fn thrift_fetch_results_raw(
+        &self,
+        op: &thrift::OperationHandle,
+    ) -> Result<thrift::FetchResultsResp, ApiError> {
+        let body = Bytes::from(thrift::build_fetch_results(
+            op,
+            THRIFT_DIRECT_RESULTS_MAX_ROWS,
+            THRIFT_DIRECT_RESULTS_MAX_BYTES,
+        ));
+        // Not idempotent -- see `thrift_call`'s own doc comment: this
+        // advances a server-side cursor (`orientation: FETCH_NEXT`).
+        let resp_bytes = self.thrift_call(body, false).await?;
+        thrift::parse_fetch_results(&resp_bytes).map_err(Self::thrift_parse_error)
+    }
+
+    /// Best-effort -- mirrors `delete_session`'s reasoning: a failed close
+    /// just leaves the operation for Databricks' own server-side cleanup.
+    pub(crate) async fn thrift_close_operation_best_effort(&self, op: &thrift::OperationHandle) {
+        let body = Bytes::from(thrift::build_close_operation(op));
+        let _ = self.thrift_call(body, true).await;
     }
 
     /// Submit + poll an EXTERNAL_LINKS/ARROW_STREAM statement to terminal
