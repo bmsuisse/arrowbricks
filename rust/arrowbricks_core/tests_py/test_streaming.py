@@ -161,7 +161,9 @@ def _start_stalls_on_chunk_fetch_server():
 async def test_fetchall_arrow_streamed_yields_one_table_no_heartbeats():
     server, port = _start_fast_server(n_chunks=6, rows_per_chunk=5)
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         result_set = await client.execute("SELECT * FROM t")
         items = [item async for item in result_set.fetchall_arrow_streamed()]
         assert len(items) == 1
@@ -178,7 +180,9 @@ async def test_fetchall_arrow_streamed_heartbeat_identity_and_timeout():
     fast without waiting through the real 15s interval."""
     server, port = _start_stalls_on_chunk_fetch_server()
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         result_set = await client.execute("SELECT * FROM t")
         seen_heartbeat = False
         with pytest.raises(RuntimeError, match="timeout"):
@@ -196,7 +200,9 @@ async def test_heartbeat_is_a_true_singleton():
     # must be the *same* object -- callers do `item is HEARTBEAT`.
     server, port = _start_stalls_on_chunk_fetch_server()
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         result_set = await client.execute("SELECT * FROM t")
         first = await result_set.fetchall_arrow_streamed(total_timeout_s=0.01).__anext__()
         second_result_set = await client.execute("SELECT * FROM t")
@@ -212,7 +218,9 @@ async def test_heartbeat_is_a_true_singleton():
 async def test_streamed_iterator_stops_after_yielding_once():
     server, port = _start_fast_server(n_chunks=1, rows_per_chunk=3)
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         result_set = await client.execute("SELECT * FROM t")
         it = result_set.fetchall_arrow_streamed()
         first = await it.__anext__()

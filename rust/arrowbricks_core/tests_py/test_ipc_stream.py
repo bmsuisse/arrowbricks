@@ -43,10 +43,12 @@ def test_write_ipc_stream_is_uncompressed():
 
 
 def test_read_ipc_stream_parses_bytes_written_by_write_ipc_stream():
-    table = core.Table.from_pydict({
-        "id": core.Array([1, 2, 3], type=core.DataType.int64()),
-        "label": core.Array(["a", "b", "c"], type=core.DataType.string()),
-    })
+    table = core.Table.from_pydict(
+        {
+            "id": core.Array([1, 2, 3], type=core.DataType.int64()),
+            "label": core.Array(["a", "b", "c"], type=core.DataType.string()),
+        }
+    )
     buf = io.BytesIO()
     arrowbricks_core.write_ipc_stream(table, buf)
 

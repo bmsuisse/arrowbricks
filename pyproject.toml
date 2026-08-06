@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "2.0.1"
+version = "3.0.0"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
 readme = "README.md"
 license = "MIT"
@@ -52,9 +52,26 @@ include = ["LICENSE"]
 # synthetic Arrow-IPC chunk bytes so tests exercise a real Arrow IPC round
 # trip. The package itself has no runtime dependency on them (or anything
 # else) -- see rust/arrowbricks_core's own Arrow/NDJSON encoding.
+#
+# databricks-sql-connector is likewise test-only: tests/conftest.py's Thrift
+# mock server (protocol="thrift") builds/parses real TBinaryProtocol wire
+# bytes using this package's installed, Apache-Thrift-compiler-generated
+# `databricks.sql.thrift_api.TCLIService` module (ttypes.py's real structs +
+# TCLIService.py's real Processor dispatch) rather than hand-rolling a
+# second Python Thrift codec to duplicate rust/arrowbricks_core/src/
+# thrift.rs's own hand-rolled one -- that ttypes.py module is in fact the
+# exact ground truth thrift.rs's own field IDs were read from (see its
+# module doc comment), so building mock responses against it directly, byte
+# for byte, is strictly more trustworthy than a second hand-written parser
+# that could itself have independent bugs. Never imported by the shipped
+# package -- rust/arrowbricks_core/src/thrift.rs's own hand-rolled
+# TBinaryProtocol (no `thrift` crate, no databricks-sql-connector) is what
+# actually ships; see that module's doc comment for why a real dependency
+# was deliberately not pulled in there.
 dev = [
     "arro3-core>=0.8",
     "arro3-io>=0.8",
+    "databricks-sql-connector>=4.4.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",

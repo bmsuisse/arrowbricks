@@ -45,7 +45,9 @@ def _start_server(*, delete_status: int = 204):
 async def test_upload_volume_file_sends_overwrite_and_body():
     server, port, seen = _start_server()
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         await client.upload_volume_file("/Volumes/cat/schema/vol/f.bin", b"hello world")
         assert "overwrite=true" in seen["path"]
         assert seen["content_type"] == "application/octet-stream"
@@ -58,7 +60,9 @@ async def test_upload_volume_file_sends_overwrite_and_body():
 async def test_delete_volume_file_treats_404_as_success():
     server, port, _seen = _start_server(delete_status=404)
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         await client.delete_volume_file("/Volumes/cat/schema/vol/already-gone.bin")  # must not raise
     finally:
         server.shutdown()

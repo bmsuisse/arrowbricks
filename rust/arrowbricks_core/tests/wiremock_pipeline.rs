@@ -11,7 +11,7 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY};
+use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol};
 use arrowbricks_core::pipeline::{execute_lazy, execute_lazy_prefer_inline, run_json_pipeline, run_pipeline};
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
@@ -119,7 +119,7 @@ async fn execute_statement_requests_lz4_frame_compression() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     let body = captured_body
@@ -159,7 +159,11 @@ async fn execute_statement_omits_compression_when_disabled() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_compress_results(false));
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_compress_results(false)
+            .with_protocol(Protocol::Sea),
+    );
     run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     let body = captured_body
@@ -246,7 +250,7 @@ async fn pre_resolved_chunk0_link_skips_the_extra_resolution_get() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.num_chunks, 2);
@@ -323,7 +327,7 @@ async fn lazy_pipeline_skips_the_extra_resolution_get_for_a_pre_resolved_chunk()
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
 
@@ -394,7 +398,7 @@ async fn pre_resolved_links_supports_multiple_links_for_the_same_chunk_index() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(
@@ -456,7 +460,7 @@ async fn pre_resolved_link_with_omitted_chunk_index_defaults_to_chunk_zero() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.num_rows(), 5);
@@ -468,7 +472,7 @@ async fn full_pipeline_happy_path() {
     let server = MockServer::start().await;
     install_mock_warehouse(&server, 3, 5, false).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.statement_id, STATEMENT_ID);
@@ -485,7 +489,11 @@ async fn full_pipeline_survives_reverse_arrival() {
     // genuine out-of-order completion over real async I/O timing.
     install_mock_warehouse(&server, 5, 4, true).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_concurrency(4)
+            .with_protocol(Protocol::Sea),
+    );
     let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.num_chunks, 5);
@@ -506,7 +514,7 @@ async fn lazy_fetchmany_never_pulls_more_chunks_than_consumed() {
     // next call.
     install_mock_warehouse(&server, 6, 5, false).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
     assert_eq!(stream.num_chunks, 6);
 
@@ -539,7 +547,7 @@ async fn lazy_fetchall_drains_beyond_the_per_batch_chunk_cap() {
     let server = MockServer::start().await;
     install_mock_warehouse(&server, 50, 3, false).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
@@ -617,7 +625,11 @@ async fn lazy_fetchall_errors_instead_of_silently_truncating_after_a_cancelled_f
             .await;
     }
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(1));
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_concurrency(1)
+            .with_protocol(Protocol::Sea),
+    );
     let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     // Real cancellation, not a simulated flag -- `timeout` drops the
@@ -642,7 +654,11 @@ async fn lazy_fetchmany_survives_reverse_arrival() {
     let server = MockServer::start().await;
     install_mock_warehouse(&server, 5, 4, true).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_concurrency(4)
+            .with_protocol(Protocol::Sea),
+    );
     let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
@@ -707,7 +723,7 @@ async fn json_pipeline_happy_path() {
     let server = MockServer::start().await;
     install_mock_warehouse_json(&server, 3, 5, false).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let result = run_json_pipeline(client, "SELECT * FROM t", None, None, None)
         .await
         .unwrap();
@@ -728,7 +744,11 @@ async fn json_pipeline_survives_reverse_arrival() {
     let server = MockServer::start().await;
     install_mock_warehouse_json(&server, 5, 4, true).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(4));
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_concurrency(4)
+            .with_protocol(Protocol::Sea),
+    );
     let result = run_json_pipeline(client, "SELECT * FROM t", None, None, None)
         .await
         .unwrap();
@@ -829,7 +849,7 @@ async fn compressed_pipeline_decompresses_lz4_frame_chunks() {
     let server = MockServer::start().await;
     install_mock_warehouse_compressed(&server, 3, 5).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let summary = run_pipeline(client, "SELECT * FROM t", None, None, None).await.unwrap();
 
     assert_eq!(summary.num_chunks, 3);
@@ -849,7 +869,7 @@ async fn lazy_pipeline_decompresses_lz4_frame_chunks() {
     let server = MockServer::start().await;
     install_mock_warehouse_compressed(&server, 3, 5).await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
     let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
 
@@ -916,7 +936,7 @@ async fn prefer_inline_uses_the_embedded_data_array_with_zero_further_requests()
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
         .await
         .unwrap();
@@ -975,7 +995,7 @@ async fn prefer_inline_falls_back_to_external_links_on_byte_limit_exceeded() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
         .await
         .unwrap();
@@ -1012,7 +1032,7 @@ async fn prefer_inline_falls_back_to_external_links_on_unsupported_column_type()
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
         .await
         .unwrap();
@@ -1083,7 +1103,7 @@ async fn session_is_created_once_and_reused_across_sequential_statements() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     run_pipeline(client.clone(), "SELECT 1", Some("cat1"), None, None)
         .await
         .unwrap();
@@ -1135,7 +1155,7 @@ async fn session_creation_failure_falls_back_to_catalog_on_the_statement_body() 
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     run_pipeline(client, "SELECT 1", Some("cat1"), Some("sch1"), None)
         .await
         .expect("a failed session creation must fall back transparently, not surface an error");
@@ -1183,7 +1203,7 @@ async fn concurrent_statements_on_the_same_key_each_get_their_own_pooled_session
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let handles: Vec<_> = (0..3)
         .map(|i| {
             let client = client.clone();
@@ -1245,7 +1265,7 @@ async fn session_pool_exhaustion_falls_back_to_session_less_submission() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let n = MAX_SESSIONS_PER_KEY + 1;
     let handles: Vec<_> = (0..n)
         .map(|i| {
@@ -1311,7 +1331,7 @@ async fn a_failed_statement_discards_its_session_instead_of_returning_it_to_the_
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let result = run_pipeline(client.clone(), "not valid sql", Some("cat1"), None, None).await;
     let err = match result {
         Ok(_) => panic!("expected the FAILED statement to surface as an error"),
@@ -1362,7 +1382,7 @@ async fn close_all_sessions_deletes_every_idle_pooled_session() {
         .mount(&server)
         .await;
 
-    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     run_pipeline(client.clone(), "SELECT 1", Some("cat1"), None, None)
         .await
         .unwrap();

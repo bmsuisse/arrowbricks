@@ -14,7 +14,7 @@ async def test_stream_query_json_preserves_order_despite_out_of_order_chunks(moc
     # reverse_arrival) -- this is the scenario that silently breaks ORDER BY
     # if a caller doesn't reorder before emitting.
     server, _route = mock_warehouse(n_chunks=4, rows_per_chunk=5, reverse_arrival=True)
-    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
 
     rows = [json.loads(row) async for row in stream_query_json(client, "SELECT * FROM whatever ORDER BY id")]
 
@@ -24,7 +24,7 @@ async def test_stream_query_json_preserves_order_despite_out_of_order_chunks(moc
 @pytest.mark.asyncio
 async def test_stream_query_json_row_shape(mock_warehouse):
     server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=3)
-    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
 
     rows = [json.loads(row) async for row in stream_query_json(client, "SELECT * FROM whatever")]
 
@@ -42,7 +42,7 @@ async def test_client_stream_query_json_method_matches_the_free_function(mock_wa
     `self` instead of the first positional argument. Must produce identical
     output, not just "also work"."""
     server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=3)
-    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
 
     rows = [json.loads(row) async for row in client.stream_query_json("SELECT * FROM whatever")]
 
@@ -89,7 +89,7 @@ async def test_stream_query_json_survives_duplicate_index_and_a_gap(mock_server,
     server.get("/_data/0a").mock(Response(content=chunk_bytes_builder(0, 2)))
     server.get("/_data/0b").mock(Response(content=chunk_bytes_builder(10, 12)))
     server.get("/_data/2").mock(Response(content=chunk_bytes_builder(20, 22)))
-    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
 
     rows = [json.loads(row) async for row in stream_query_json(client, "SELECT * FROM whatever")]
 

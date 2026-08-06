@@ -37,7 +37,7 @@ class DatabricksClient:
         warehouse_start_timeout: float = 300.0,
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
-        protocol: str = "sea",
+        protocol: str = "thrift",
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
@@ -59,17 +59,23 @@ class DatabricksClient:
         # bottleneck for a result that size. Set False if your link to the
         # warehouse is fast/low-latency enough that decompression CPU time
         # stops paying for itself.
-        # protocol: "sea" (default, unchanged) submits statements via the
-        # REST Statement Execution API. "thrift" instead speaks the same
+        # protocol: "thrift" (the default, as of this crate's own
+        # benchmarking against a real production warehouse -- see
+        # AGENTS.md's design-invariant entry on this) speaks the same
         # HiveServer2-compatible Thrift-over-HTTPS protocol
         # databricks-sql-connector uses by *default* (when its own
         # `use_sea` isn't set) -- measurably faster for small queries,
         # since its ExecuteStatement RPC can return a small result inline
         # in the same call that submits the statement (`getDirectResults`),
         # where SEA always needs at least one further poll/fetch round
-        # trip. `prefer_inline` has no effect under `protocol="thrift"`
-        # (silently ignored, not an error) -- Thrift has no
-        # INLINE-disposition equivalent, and doesn't need one.
+        # trip -- and never slower than SEA on any query shape tested.
+        # "sea" submits statements via the REST Statement Execution API
+        # instead -- still fully supported, opt in with `protocol="sea"`
+        # if you have a reason to prefer it (e.g. matching prior behavior,
+        # or a workspace/network shape where SEA measures faster for you).
+        # `prefer_inline` has no effect under `protocol="thrift"` (silently
+        # ignored, not an error) -- Thrift has no INLINE-disposition
+        # equivalent, and doesn't need one.
         if protocol not in ("sea", "thrift"):
             raise ValueError(f'DatabricksClient protocol must be "sea" or "thrift", got {protocol!r}')
         self._core_client = _core.Client(

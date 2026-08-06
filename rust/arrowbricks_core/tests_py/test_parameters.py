@@ -73,7 +73,9 @@ async def test_execute_forwards_parameters_to_request_body():
     captured: list = []
     server, port = _start_server(captured)
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         params = [{"name": "min_id", "value": "5", "type": "INT"}]
         await client.execute("SELECT * FROM t WHERE id > :min_id", parameters=params)
         assert len(captured) == 1
@@ -87,7 +89,9 @@ async def test_execute_omits_parameters_key_when_not_given():
     captured: list = []
     server, port = _start_server(captured)
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         await client.execute("SELECT * FROM t")
         assert "parameters" not in captured[0]
     finally:

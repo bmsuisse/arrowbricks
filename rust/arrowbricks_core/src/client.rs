@@ -353,6 +353,16 @@ pub struct ChunkItem {
     pub blob: Bytes,
     pub row_count: Option<i64>,
     pub chunk_index: i64,
+    /// Set only by the Thrift cloud-fetch path (`pipeline.rs`'s
+    /// `fetch_thrift_link`) -- a declared row-count bound this chunk's own
+    /// decoded batches must be sliced down to if they exceed it, since a
+    /// Thrift `resultLinks` file (like SEA's own cloud-fetch files) can
+    /// legitimately contain more rows than its own declared count for a
+    /// `LIMIT`-bounded query (see `pipeline.rs`'s `decode_chunk_item`).
+    /// `None` for every other producer (SEA's own chunk fetch, Thrift's
+    /// inline `arrowBatches`) -- their row counts are never overshot the
+    /// same way, so there's nothing to slice.
+    pub truncate_to: Option<i64>,
 }
 
 /// Unwraps one downloaded chunk file's outer LZ4 Frame compression --
@@ -430,18 +440,39 @@ where
     }
 }
 
-/// Which wire protocol/backend `execute()` talks to Databricks with -- an
-/// opt-in choice on `Client`/`DatabricksClient` (`protocol: "sea" | "thrift"`),
-/// SEA staying the unchanged default. `Thrift` speaks the same
-/// HiveServer2-compatible `TCLIService` protocol `databricks-sql-connector`
-/// uses by *default* (when `use_sea` isn't set) -- plain HTTPS POST,
+/// Which wire protocol/backend `execute()` talks to Databricks with -- a
+/// choice on `Client`/`DatabricksClient` (`protocol: "sea" | "thrift"`),
+/// **`Thrift` is the default as of the benchmarking work documented in
+/// AGENTS.md's own design-invariant entry** (SEA remains fully supported,
+/// explicit `protocol="sea"`) -- it speaks the same HiveServer2-compatible
+/// `TCLIService` protocol `databricks-sql-connector` uses by *default*
+/// (when its own `use_sea` isn't set) -- plain HTTPS POST,
 /// `TBinaryProtocol`-encoded, no framing beyond HTTP itself (see `thrift.rs`).
 /// Measurably faster than this crate's own SEA path for small queries
 /// (closing the remaining gap `prefer_inline`/SEA-session-pooling didn't --
 /// see those entries' own closing notes in `AGENTS.md`), primarily because
 /// `TExecuteStatementReq`'s `getDirectResults` can return a small result's
 /// data inline in the *same* RPC that submits the statement, where SEA
-/// always needs at least a separate poll/fetch round trip.
+/// always needs at least a separate poll/fetch round trip. Never slower
+/// than SEA on any query shape tested, real or mocked.
+///
+/// `DbClient::new`'s own internal struct literal initializes `protocol:
+/// Protocol::Thrift` too, matching this crate's real user-facing default one
+/// layer up (`lib.rs`'s `PyDbClient::new` `#[pyo3(signature = ...)]` and
+/// `client.py`'s `DatabricksClient.__init__`, which both default their own
+/// `protocol` kwarg to `"thrift"`) -- deliberately kept as one single
+/// default rather than two independently-set ones that happened to agree:
+/// an earlier version of this had `DbClient::new` default to `Protocol::Sea`
+/// while only the PyO3/Python layer defaulted to `"thrift"`, on the
+/// reasoning that Rust-only callers (this crate's own test suite) always
+/// call `.with_protocol` explicitly anyway -- found in review that this
+/// left a real, if narrow, foot-gun for any *future* Rust-only caller who
+/// constructs a `DbClient` directly and forgets to call `.with_protocol`,
+/// silently getting SEA while believing they're on the new default. Every
+/// SEA-testing call site in this crate's own test suite already sets
+/// `.with_protocol(Protocol::Sea)` explicitly (see `tests/wiremock_pipeline.rs`),
+/// so making this the same default as the public-facing one costs nothing
+/// and removes the divergence entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Sea,
@@ -509,11 +540,37 @@ struct ThriftSessionPool {
 pub(crate) const THRIFT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Request hints on `TExecuteStatementReq.getDirectResults`/`TFetchResultsReq` --
 /// how much of the result the server should try to hand back in one RPC.
-/// The server decides real batch sizes regardless (same as SEA's chunk
-/// sizes); these are just generous upper bounds so a small/medium result
-/// has a real chance of coming back in a single round trip.
+/// `THRIFT_DIRECT_RESULTS_MAX_BYTES` is honored essentially exactly, up to a
+/// hard server-side ceiling of ~1 GiB per response, measured in *uncompressed*
+/// `bytesNum` (e.g. a 500k-row result whose LZ4-compressed download is only
+/// ~302 MiB still counts as ~669 MiB against this budget) -- **this used to
+/// say "the server decides real batch sizes regardless (same as SEA's chunk
+/// sizes)," which was wrong and cost real round trips**: raising this from
+/// its original 100 MiB (self-inflicted 10x throttle) to 1 GiB dropped a
+/// `LIMIT 2000000` query's sequential `FetchResults` discovery calls from 29
+/// down to 2, confirmed against a real workspace; values above 1 GiB
+/// (tested up to `i64::MAX`) measured identically to 1 GiB, so that's the
+/// real ceiling to document, not paper over with an unbounded-looking
+/// constant. `THRIFT_DIRECT_RESULTS_MAX_ROWS`, by contrast, **does not
+/// govern the `resultLinks` (cloud-fetch) path at all** -- confirmed by
+/// requesting as few as 10 rows on a 2M-row query and still getting every
+/// link back; it only bounds the small-result *inline* `arrowBatches` path
+/// (which the server switches to independently, at roughly 2-3 MiB of
+/// actual Arrow bytes, regardless of either hint -- so raising
+/// `MAX_BYTES` cannot accidentally turn a medium result into a giant inline
+/// payload). Leave `MAX_ROWS` alone; there is nothing to tune there.
+///
+/// One real, bounded trade-off from raising `MAX_BYTES`: each link's own
+/// `expiryTime` is ~900s from the response that issued it, so a much larger
+/// batch issues more not-yet-downloaded links earlier, marginally
+/// tightening the deadline for a very slow, caller-paced consumer
+/// (`Cursor.fetchmany`) -- bounded by the download worker pool's own
+/// channel capacity (`chunk_fetch_concurrency`), not unbounded, and there is
+/// no re-resolution path for an already-expired Thrift link (the
+/// `FETCH_NEXT` cursor has already advanced past it) if this ever bites in
+/// practice.
 const THRIFT_DIRECT_RESULTS_MAX_ROWS: i64 = 1_000_000;
-const THRIFT_DIRECT_RESULTS_MAX_BYTES: i64 = 100 * 1024 * 1024;
+const THRIFT_DIRECT_RESULTS_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 
 /// A SEA session (`POST /api/2.0/sql/sessions`) pinned to one (catalog,
 /// schema) pair, reused across statement submissions instead of the
@@ -604,7 +661,7 @@ impl DbClient {
             warehouse_confirmed_running_at: Mutex::new(None),
             compress_results: true,
             session_pool: SessionPool::default(),
-            protocol: Protocol::Sea,
+            protocol: Protocol::Thrift,
             thrift_session_pool: ThriftSessionPool::default(),
         }
     }
@@ -614,9 +671,11 @@ impl DbClient {
         self
     }
 
-    /// Selects the wire protocol/backend -- `Protocol::Sea` (default,
-    /// unchanged) or `Protocol::Thrift` (opt-in, see `Protocol`'s own doc
-    /// comment).
+    /// Selects the wire protocol/backend -- `Protocol::Sea` (this bare
+    /// `DbClient` constructor's own internal starting value, see
+    /// `Protocol`'s own doc comment for why that's not the same thing as
+    /// "the user-facing default") or `Protocol::Thrift` (the actual
+    /// user-facing default as of this session's benchmarking work).
     pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = protocol;
         self
@@ -1437,6 +1496,7 @@ impl DbClient {
                                         blob,
                                         row_count: meta.row_count,
                                         chunk_index: meta.chunk_index,
+                                        truncate_to: None,
                                     };
                                     if worker_tx.send(Ok(item)).await.is_err() {
                                         return Ok(());
@@ -1545,6 +1605,19 @@ async fn join_first_error(handles: Vec<tokio::task::JoinHandle<Result<(), ApiErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the exact value, not just "some big number" -- found in review
+    /// that nothing caught an accidental revert (e.g. during a merge
+    /// conflict) back toward the old, too-small 100 MiB default, which
+    /// would silently reintroduce the round-trip regression documented on
+    /// this constant's own doc comment (a 2M-row query needing 29
+    /// `FetchResults` calls instead of 2). 1 GiB is the real, measured
+    /// server-side ceiling -- see that doc comment for the numbers -- so
+    /// this isn't an arbitrary value to protect, it's the actual limit.
+    #[test]
+    fn thrift_direct_results_max_bytes_is_the_measured_one_gib_ceiling() {
+        assert_eq!(THRIFT_DIRECT_RESULTS_MAX_BYTES, 1024 * 1024 * 1024);
+    }
 
     /// Regression test for a real bug found by testing against an actual
     /// Databricks workspace (not just synthetic single-frame test data): a

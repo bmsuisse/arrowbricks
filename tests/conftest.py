@@ -254,6 +254,29 @@ def mock_warehouse(mock_server):
 
 
 @pytest.fixture
+def mock_thrift_server():
+    """The Thrift-speaking analogue of `mock_server` -- a real local
+    `ThreadingHTTPServer` (see `thrift_mock.ThriftMockServer`) for
+    `protocol="thrift"` tests. Not imported at module level (like
+    `chunk_bytes_builder`'s own lazy arro3 import) so this file stays
+    importable with `databricks-sql-connector` absent -- it's a dev-only
+    dependency (see pyproject.toml's `dependency-groups.dev` comment), used
+    only to build/parse real Thrift wire bytes in tests, never shipped."""
+    from thrift_mock import ThriftMockServer
+
+    servers: list[ThriftMockServer] = []
+
+    def _make(warehouse_id: str = WAREHOUSE_ID) -> ThriftMockServer:
+        server = ThriftMockServer(warehouse_id)
+        servers.append(server)
+        return server
+
+    yield _make
+    for server in servers:
+        server.shutdown()
+
+
+@pytest.fixture
 def mock_volume_files(mock_server):
     """Spins up a real local server for the Files API's PUT (upload)/DELETE
     endpoints -- returns (server, put_route, delete_route)."""

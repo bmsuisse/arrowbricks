@@ -890,7 +890,23 @@ impl OperationStatusResp {
                 (1, ttype::STRUCT) => status = Some(Status::read(r)?),
                 (2, ttype::I32) => operation_state = Some(r.read_i32()?),
                 (5, ttype::STRING) => error_message = Some(r.read_string()?),
-                (12, ttype::STRING) => display_message = Some(r.read_string()?),
+                // Field 1281, not 12 -- found while building the Thrift
+                // mock test infra (this session) by cross-checking against
+                // `databricks-sql-connector`'s own real, installed,
+                // Apache-Thrift-compiler-generated `ttypes.py`: its
+                // `TGetOperationStatusResp.thrift_spec` has no field 12 at
+                // all; `displayMessage` is field 1281. Before this fix, a
+                // real server's `GetOperationStatus.displayMessage` was
+                // silently skipped by the `(_, ft) => r.skip(ft)?` catch-all
+                // below (an unrecognized field id, not an error) --
+                // `terminal_error()` still worked correctly in practice
+                // because it checks the *top-level* `Status.display_message`
+                // (field 6 of `TStatus`, correctly mapped, see `Status::read`
+                // above) before ever falling back to this
+                // operation-state-specific one, so this was a real but
+                // narrow, never-observed-in-practice bug, not a regression
+                // in any existing test or real-workspace verification.
+                (1281, ttype::STRING) => display_message = Some(r.read_string()?),
                 (_, ft) => r.skip(ft)?,
             }
         }
@@ -1231,5 +1247,32 @@ mod tests {
         assert_eq!(params[0].value.as_deref(), Some("5"));
         assert_eq!(params[0].sql_type.as_deref(), Some("INT"));
         assert_eq!(params[1].value.as_deref(), Some("3.5"));
+    }
+
+    /// Regression test for a real field-id bug found via cross-checking
+    /// `databricks-sql-connector`'s own real, installed `ttypes.py` while
+    /// building this session's Thrift mock test infra: `displayMessage` on
+    /// `TGetOperationStatusResp` is field **1281**, not 12 -- see the fix's
+    /// own comment on the `(1281, ttype::STRING)` arm above for the full
+    /// story (a real but narrow, never-observed-in-practice bug, since
+    /// `terminal_error()` falls back to the top-level `TStatus.display_message`,
+    /// correctly mapped at field 6, before ever reaching this one).
+    #[test]
+    fn operation_status_resp_reads_display_message_from_field_1281_not_12() {
+        let mut w = Writer::new();
+        w.write_field_begin(ttype::STRUCT, 1);
+        w.write_field_begin(ttype::I32, 1);
+        w.write_i32(status_code::SUCCESS);
+        w.write_field_stop();
+        w.write_field_begin(ttype::I32, 2);
+        w.write_i32(operation_state::FINISHED);
+        w.write_field_begin(ttype::STRING, 1281);
+        w.write_string("real display message");
+        w.write_field_stop();
+        let bytes = w.into_bytes();
+
+        let mut r = Reader::new(&bytes);
+        let resp = OperationStatusResp::read(&mut r).unwrap();
+        assert_eq!(resp.display_message.as_deref(), Some("real display message"));
     }
 }

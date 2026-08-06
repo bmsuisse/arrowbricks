@@ -1,10 +1,14 @@
 """A Cursor/Connection surface shaped like databricks-sql-python's (execute,
 fetchone/fetchmany/fetchall, fetchall_arrow/fetchmany_arrow) -- familiar DB-API
-ergonomics on top of the Statement Execution API. The actual submit/poll/
-fetch/reorder/decode work is delegated to `arrowbricks_core` (Rust/PyO3) via
-`DatabricksClient._core_client` -- this module just adapts that result to the
-same public shape as before the cutover (`Cursor.fetchone`/`fetchmany`/
-`fetchall`, `Cursor.description`, etc.), so existing callers see no change.
+ergonomics on top of whichever wire protocol `DatabricksClient(protocol=...)`
+was constructed with: the Statement Execution API (`protocol="sea"`) or the
+Thrift-over-HTTPS `TCLIService` protocol (`protocol="thrift"`, the default --
+see `client.py`'s own `protocol` doc comment and AGENTS.md's design-invariant
+entry). The actual submit/poll/fetch/reorder/decode work is delegated to
+`arrowbricks_core` (Rust/PyO3) via `DatabricksClient._core_client` -- this
+module just adapts that result to the same public shape regardless of which
+backend is in play (`Cursor.fetchone`/`fetchmany`/`fetchall`,
+`Cursor.description`, etc.).
 
 Unlike a real DB-API cursor, this is async throughout (`execute`, `fetchone`,
 etc. are all coroutines) since the underlying client is -- there's no
@@ -228,10 +232,11 @@ class Cursor:
 
 class Connection:
     """One Databricks SQL warehouse endpoint -- see DatabricksClient for the
-    constructor args (auth, timeouts, chunk_fetch_concurrency). Statements are
-    independent REST calls -- `cursor()` can be called as many times as you
-    like, each one free to run concurrently with the others. `close()`
-    releases whichever SEA sessions the client opened internally to speed up
+    constructor args (auth, timeouts, chunk_fetch_concurrency, protocol).
+    Statements are independent calls -- `cursor()` can be called as many
+    times as you like, each one free to run concurrently with the others.
+    `close()` releases whichever sessions the client opened internally
+    (SEA's or Thrift's, whichever `protocol` is in play) to speed up
     repeated statement execution (see `DatabricksClient.aclose`) -- optional
     (Databricks reaps them on its own TTL regardless), but tidy to call when
     you're done with a `Connection`, same as any other context manager."""

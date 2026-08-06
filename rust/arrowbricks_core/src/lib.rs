@@ -231,7 +231,7 @@ impl PyDbClient {
         warehouse_start_timeout=300.0,
         warehouse_confirmed_running_ttl_s=30.0,
         compress_results=true,
-        protocol="sea".to_string(),
+        protocol="thrift".to_string(),
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(

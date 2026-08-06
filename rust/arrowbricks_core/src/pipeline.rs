@@ -267,7 +267,10 @@ impl ResultStream {
                 match self.reorder.next().await? {
                     Some(item) => {
                         estimated_new_rows += item.row_count.unwrap_or(0).max(0) as usize;
-                        decode_handles.push(tokio::task::spawn_blocking(move || decode_chunk(&item.blob)));
+                        let truncate_to = item.truncate_to;
+                        decode_handles.push(tokio::task::spawn_blocking(move || {
+                            decode_chunk_item(&item.blob, truncate_to)
+                        }));
                     }
                     None => self.exhausted = true,
                 }
@@ -626,28 +629,29 @@ struct ThriftLinkWork {
     file_link: String,
 }
 
-/// Downloads (and truncates -- see `truncate_to_declared_row_count`) one
-/// `resultLinks` entry and sends the resulting `ChunkItem`, shared by every
-/// download worker spawned in `run_thrift_fetch_loop`.
-async fn fetch_and_truncate_thrift_link(
+/// Downloads one `resultLinks` entry -- decode and truncation both happen
+/// later, in `decode_chunk_item`, not here, since decoding just to *count*
+/// rows and then possibly re-encoding was pure wasted work for the common
+/// case (a file that already matches its declared count, i.e. every chunk
+/// except the last one of a `LIMIT`-bounded query): every downloaded chunk
+/// used to get a full Arrow-IPC decode here, discarded, and then a second,
+/// real decode downstream in the consumer (`ResultStream::fetch_at_least`
+/// et al.) -- found in review, a pure duplicate-work removal with no
+/// trade-off, not a correctness fix. `ChunkItem::truncate_to` carries the
+/// declared bound forward instead, so truncation (when actually needed)
+/// happens exactly once, on the one decode that was always going to happen
+/// anyway.
+async fn fetch_thrift_link(
     client: Arc<DbClient>,
     work: ThriftLinkWork,
     compressed: bool,
 ) -> Result<ChunkItem, ApiError> {
     let blob = client.fetch_link_bytes(&work.file_link, compressed).await?;
-    // See `truncate_to_declared_row_count`'s own doc comment -- a real,
-    // confirmed-against-a-live-workspace Databricks behavior: a cloud-fetch
-    // file for a `LIMIT`-bounded query can contain more rows than the
-    // link's own declared `rowCount`, and must be truncated to it, or the
-    // caller silently gets more rows than the query asked for.
-    let row_count = work.row_count;
-    let blob = tokio::task::spawn_blocking(move || truncate_to_declared_row_count(blob, row_count))
-        .await
-        .map_err(join_error)??;
     Ok(ChunkItem {
         blob,
         row_count: Some(work.row_count),
         chunk_index: work.chunk_index,
+        truncate_to: Some(work.row_count),
     })
 }
 
@@ -695,17 +699,34 @@ async fn run_thrift_fetch_loop(
     let (link_tx, link_rx) = mpsc::channel::<ThriftLinkWork>(concurrency);
     let link_rx = Arc::new(tokio::sync::Mutex::new(link_rx));
 
+    // Shared, not captured by value at spawn time: found in review (this
+    // session's own concurrency restructuring introduced it) -- workers are
+    // all spawned before the discovery loop below has necessarily seen an
+    // authoritative `TGetResultSetMetadataResp` yet (that only happens once
+    // `already_finished` was false in `submit_and_await_thrift_statement`,
+    // i.e. the query didn't finish inside its own `ExecuteStatement` RPC
+    // window), so a plain `bool` captured once at spawn time would freeze
+    // every worker on `client.compress_results()`'s initial *guess* even
+    // after the loop below learns the real value from the first
+    // `FetchResults` response's metadata -- silently corrupting/failing
+    // decompression for the whole statement if the guess were ever wrong.
+    // Same silent-truncation failure shape as the multi-frame LZ4 bug
+    // already documented above. Workers now read this fresh per work item
+    // instead of once at spawn.
+    let compressed_flag = Arc::new(std::sync::atomic::AtomicBool::new(lz4_compressed));
+
     let mut worker_handles = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
         let client = client.clone();
         let link_rx = link_rx.clone();
         let out_tx = tx.clone();
-        let compressed = lz4_compressed;
+        let compressed_flag = compressed_flag.clone();
         worker_handles.push(tokio::spawn(async move {
             loop {
                 let work = { link_rx.lock().await.recv().await };
                 let Some(work) = work else { return };
-                let result = fetch_and_truncate_thrift_link(client.clone(), work, compressed).await;
+                let compressed = compressed_flag.load(std::sync::atomic::Ordering::Relaxed);
+                let result = fetch_thrift_link(client.clone(), work, compressed).await;
                 if out_tx.send(result).await.is_err() {
                     return;
                 }
@@ -715,6 +736,23 @@ async fn run_thrift_fetch_loop(
 
     let mut chunk_index: i64 = 0;
     let mut pending = initial_rowset;
+    // Found in an independent review pass of the `compressed_flag` fix
+    // above: sharing the flag closes the *captured-once-at-spawn* race, but
+    // leaves a narrower one -- `resultSetMetadata` is its own optional field
+    // on `TFetchResultsResp`, independent of `results.resultLinks`, so
+    // nothing guarantees a response carrying links also carries the
+    // metadata that confirms their real compression. If an earlier response
+    // has links but no metadata, its links would otherwise be queued (and
+    // possibly downloaded) against `client.compress_results()`'s initial
+    // *guess* before a later response ever confirms the real value.
+    // Buffering here, instead of queueing immediately, means no link is
+    // handed to a download worker before compression is authoritatively
+    // known at least once -- if metadata never arrives at all across the
+    // whole statement (legal, if unusual), the buffer is flushed at loop end
+    // using the request's own `canDecompressLZ4Result` value, same fallback
+    // `lz4_compressed` already starts from.
+    let mut metadata_confirmed = false;
+    let mut pending_until_confirmed: Vec<ThriftLinkWork> = Vec::new();
     loop {
         let (row_set, has_more) = if let Some(v) = pending.take() {
             v
@@ -732,6 +770,8 @@ async fn run_thrift_fetch_loop(
                             schema_bytes = meta.arrow_schema.clone();
                         }
                         lz4_compressed = meta.lz4_compressed;
+                        compressed_flag.store(lz4_compressed, std::sync::atomic::Ordering::Relaxed);
+                        metadata_confirmed = true;
                     }
                     (fr.results.unwrap_or_default(), fr.has_more_rows)
                 }
@@ -755,6 +795,7 @@ async fn run_thrift_fetch_loop(
                         blob,
                         row_count: Some(row_count),
                         chunk_index,
+                        truncate_to: None,
                     };
                     chunk_index += 1;
                     if tx.send(Ok(item)).await.is_err() {
@@ -776,21 +817,50 @@ async fn run_thrift_fetch_loop(
                 row_count: link.row_count,
                 file_link: link.file_link,
             };
-            // Backpressure, not an error path: a full buffer just means
-            // every worker is currently busy, so this await is exactly the
-            // same "peak buffered stays at ~concurrency" trade-off
-            // `fetch_chunks_with_backpressure`'s own doc comment describes.
-            // The receiving end only ever closes once every worker returns,
-            // which only happens after this sender side is dropped -- so a
-            // closed-channel send here would mean every worker already
-            // exited (e.g. all panicked), not a normal condition; still
-            // handled without panicking regardless.
-            if link_tx.send(work).await.is_err() {
-                break;
+            if metadata_confirmed {
+                // Backpressure, not an error path: a full buffer just means
+                // every worker is currently busy, so this await is exactly
+                // the same "peak buffered stays at ~concurrency" trade-off
+                // `fetch_chunks_with_backpressure`'s own doc comment
+                // describes. The receiving end only ever closes once every
+                // worker returns, which only happens after this sender side
+                // is dropped -- so a closed-channel send here would mean
+                // every worker already exited (e.g. all panicked), not a
+                // normal condition; still handled without panicking
+                // regardless.
+                if link_tx.send(work).await.is_err() {
+                    break;
+                }
+            } else {
+                // See this function's own comment above `metadata_confirmed`
+                // -- held back until compression is authoritatively known at
+                // least once, rather than risking a download against a
+                // still-unconfirmed guess.
+                pending_until_confirmed.push(work);
+            }
+        }
+
+        if metadata_confirmed {
+            for work in pending_until_confirmed.drain(..) {
+                if link_tx.send(work).await.is_err() {
+                    break;
+                }
             }
         }
 
         if !has_more {
+            break;
+        }
+    }
+
+    // Metadata never arrived across the whole statement (legal, if
+    // unusual) -- flush whatever's left using `lz4_compressed`'s own
+    // fallback value (the request's own `canDecompressLZ4Result`), the same
+    // one `compressed_flag` was initialized from. Nothing more authoritative
+    // is ever coming once the loop above has already seen `has_more_rows ==
+    // false`.
+    for work in pending_until_confirmed.drain(..) {
+        if link_tx.send(work).await.is_err() {
             break;
         }
     }
@@ -833,40 +903,43 @@ fn build_inline_blob(
     Ok((bytes::Bytes::from(out), row_count))
 }
 
-/// Truncates a downloaded Thrift cloud-fetch file (`resultLinks`/
-/// `TSparkArrowResultLink`) down to its own declared `rowCount` if the file
-/// actually contains more rows than that -- a real, confirmed-against-a-live-
-/// workspace Databricks behavior, not a hypothetical: `SELECT * FROM
-/// dim_article LIMIT 500000` came back with 502879 rows end to end (2879
-/// extra) via this crate's own Thrift path, while the *same* query via SEA's
-/// `EXTERNAL_LINKS` chunking came back with exactly 500000. This isn't a
-/// bug in this crate's decode -- `databricks-sql-connector`'s own
+/// Decodes one chunk's blob and, only if `truncate_to` is `Some(n)` and the
+/// decode produced more than `n` rows, slices the batches down to exactly
+/// `n` (in order, no re-encode) -- the single decode every `ChunkItem`
+/// consumer needs, whether or not truncation actually applies. Replaces a
+/// previous design that decoded twice per Thrift cloud-fetch chunk (once
+/// just to *count* rows for truncation, immediately discarding the result
+/// and re-encoding back to bytes if untruncated; once again here, for
+/// real, downstream) -- found in review, a pure duplicate-work removal
+/// with no behavior change, see `fetch_thrift_link`'s own doc comment.
+///
+/// The truncation itself is a real, confirmed-against-a-live-workspace
+/// requirement, not a hypothetical: `SELECT * FROM dim_article LIMIT
+/// 500000` came back with 502879 rows end to end (2879 extra) via the
+/// Thrift cloud-fetch path before this existed, while the *same* query via
+/// SEA's `EXTERNAL_LINKS` chunking came back with exactly 500000. This
+/// isn't a bug in this crate's decode -- `databricks-sql-connector`'s own
 /// `ResultSetDownloadHandler.run` has an identical check with the identical
 /// justification in its own comment: "The server rarely prepares the exact
 /// number of rows requested by the client in cloud fetch. Subsequently, we
 /// drop the extraneous rows in the last file if more rows are retrieved
 /// than requested." Silently handing back more rows than a `LIMIT` (or any
 /// other row-count-bounded query) asked for is exactly the "silent
-/// incorrectness" this crate's own testing discipline exists to catch --
-/// this must be fixed here, not deferred, once confirmed.
+/// incorrectness" this crate's own testing discipline exists to catch.
 ///
 /// Only ever *drops* rows, never guesses at which ones to keep beyond "the
-/// first `declared_row_count`, in order" -- if `declared_row_count` is `<= 0`
-/// (not populated, or genuinely zero) truncation is skipped entirely rather
-/// than assumed; a file with fewer or exactly as many rows as declared is
-/// returned unchanged (the overwhelmingly common case -- this only actually
-/// re-encodes when asked to do real work). Runs the full decode-truncate-
-/// re-encode on `spawn_blocking`, same reasoning as `build_inline_blob` and
-/// `client.rs`'s own `fetch_link_bytes`: real CPU work, shouldn't run inline
-/// on the async task driving the rest of this fetch loop.
-fn truncate_to_declared_row_count(blob: Bytes, declared_row_count: i64) -> Result<Bytes, ApiError> {
-    if declared_row_count <= 0 {
-        return Ok(blob);
-    }
-    let batches = decode_chunk(&blob)?;
+/// first `truncate_to`, in order" -- a `truncate_to` of `None` or `<= 0`
+/// (not populated, or genuinely zero) skips truncation entirely rather than
+/// assumed; a chunk with fewer or exactly as many rows as declared is
+/// returned unchanged (the overwhelmingly common case).
+fn decode_chunk_item(blob: &Bytes, truncate_to: Option<i64>) -> Result<Vec<RecordBatch>, ApiError> {
+    let batches = decode_chunk(blob)?;
+    let Some(declared_row_count) = truncate_to.filter(|n| *n > 0) else {
+        return Ok(batches);
+    };
     let total_rows: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
     if total_rows <= declared_row_count {
-        return Ok(blob);
+        return Ok(batches);
     }
 
     let mut kept = Vec::with_capacity(batches.len());
@@ -883,28 +956,23 @@ fn truncate_to_declared_row_count(blob: Bytes, declared_row_count: i64) -> Resul
             remaining = 0;
         }
     }
-
-    let schema = kept.first().map(|b| b.schema()).ok_or_else(|| {
-        ApiError::permanent("truncate_to_declared_row_count: no batches survived truncation".to_string())
-    })?;
-    let mut out = Vec::new();
-    {
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut out, &schema).map_err(|e| ApiError {
-            message: format!("Arrow IPC re-encode error while truncating an overshot cloud-fetch file: {e}"),
-            transient: false,
-        })?;
-        for batch in &kept {
-            writer.write(batch).map_err(|e| ApiError {
-                message: format!("Arrow IPC re-encode error while truncating an overshot cloud-fetch file: {e}"),
-                transient: false,
-            })?;
-        }
-        writer.finish().map_err(|e| ApiError {
-            message: format!("Arrow IPC re-encode error while truncating an overshot cloud-fetch file: {e}"),
-            transient: false,
-        })?;
-    }
-    Ok(Bytes::from(out))
+    // `declared_row_count > 0` (the early `filter` above) guarantees
+    // `remaining > 0` going into the loop's first iteration, so `kept`
+    // always gets at least one push there -- this can't be empty with the
+    // logic above, but found in review that the old version's explicit
+    // "no batches survived truncation" error (needed back when this
+    // returned re-encoded bytes and had to get a schema from `kept.first()`)
+    // quietly disappeared when this switched to returning batches directly.
+    // A `debug_assert` costs nothing in release builds and still catches a
+    // future edit to the loop above (e.g. the `remaining <= 0` break
+    // condition) that breaks this invariant, during testing rather than
+    // silently in production.
+    debug_assert!(
+        !kept.is_empty(),
+        "decode_chunk_item: truncation produced zero batches despite a positive declared_row_count -- \
+         the loop above's invariant was violated"
+    );
+    Ok(kept)
 }
 
 /// Like `execute_lazy`, but first tries `disposition: INLINE` + `format:
@@ -998,7 +1066,10 @@ pub async fn run_pipeline(
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
     while let Some(item) = reorder.next().await? {
-        decode_handles.push(tokio::task::spawn_blocking(move || decode_chunk(&item.blob)));
+        let truncate_to = item.truncate_to;
+        decode_handles.push(tokio::task::spawn_blocking(move || {
+            decode_chunk_item(&item.blob, truncate_to)
+        }));
     }
 
     let mut batches = Vec::new();
@@ -1222,8 +1293,9 @@ impl NdjsonStream {
         match self.reorder.next().await? {
             Some(item) => {
                 let non_finite_as_string = self.non_finite_as_string;
+                let truncate_to = item.truncate_to;
                 let lines = tokio::task::spawn_blocking(move || {
-                    let batches = decode_chunk(&item.blob)?;
+                    let batches = decode_chunk_item(&item.blob, truncate_to)?;
                     encode_ndjson_lines(&batches, non_finite_as_string)
                 })
                 .await
@@ -1335,6 +1407,7 @@ mod tests {
             blob: Bytes::new(),
             row_count: None,
             chunk_index: idx,
+            truncate_to: None,
         }
     }
 
@@ -1493,13 +1566,12 @@ mod tests {
     /// mid-batch) -- the simpler "drop whole extra batches only" bug would
     /// pass a test where the boundary landed exactly on a batch edge.
     #[test]
-    fn truncate_to_declared_row_count_slices_the_straddling_batch() {
+    fn decode_chunk_item_slices_the_straddling_batch() {
         let batch_a = make_batch(vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
         let batch_b = make_batch(vec![4, 5, 6], vec![4.0, 5.0, 6.0]);
         let blob = write_stream(&[batch_a, batch_b]);
 
-        let truncated = truncate_to_declared_row_count(blob, 4).unwrap();
-        let batches = decode_chunk(&truncated).unwrap();
+        let batches = decode_chunk_item(&blob, Some(4)).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
             total_rows, 4,
@@ -1522,28 +1594,64 @@ mod tests {
         );
     }
 
-    /// A file that already matches (or undershoots) its declared row count
-    /// must be returned unchanged -- the overwhelmingly common case, and
-    /// truncation must not be triggered speculatively.
+    /// A chunk that already matches (or undershoots) its declared row count
+    /// must come back with every row intact -- the overwhelmingly common
+    /// case, and truncation must not be triggered speculatively. Checks
+    /// actual cell values, not just a row count -- found in review that the
+    /// old byte-identity assertion (`assert_eq!(untouched, blob)`, possible
+    /// when this returned re-encoded bytes) got replaced by a row-count-only
+    /// sum when this function switched to returning decoded batches
+    /// directly, silently losing coverage for a value/column-order bug on
+    /// this exact path that a count-only check can't catch.
     #[test]
-    fn truncate_to_declared_row_count_is_a_no_op_when_not_needed() {
+    fn decode_chunk_item_is_a_no_op_when_not_needed() {
         let batch = make_batch(vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
         let blob = write_stream(&[batch]);
-        let untouched = truncate_to_declared_row_count(blob.clone(), 3).unwrap();
+        let batches = decode_chunk_item(&blob, Some(3)).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
-            untouched, blob,
-            "must not re-encode when the file already matches the declared count"
+            total_rows, 3,
+            "must not drop rows when the chunk already matches the declared count"
+        );
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_primitive::<arrow::datatypes::Int64Type>()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3],
+            "values themselves must survive untouched, not just the row count"
         );
     }
 
-    /// `declared_row_count <= 0` means "no authoritative bound known" --
-    /// must never be treated as "truncate to zero rows."
+    /// `truncate_to` of `None` or `<= 0` means "no authoritative bound
+    /// known" -- must never be treated as "truncate to zero rows." Checks
+    /// actual cell values too, same reasoning as
+    /// `decode_chunk_item_is_a_no_op_when_not_needed`'s own doc comment.
     #[test]
-    fn truncate_to_declared_row_count_skips_truncation_when_bound_is_unknown() {
+    fn decode_chunk_item_skips_truncation_when_bound_is_unknown() {
         let batch = make_batch(vec![1, 2, 3], vec![1.0, 2.0, 3.0]);
         let blob = write_stream(&[batch]);
-        let untouched = truncate_to_declared_row_count(blob.clone(), 0).unwrap();
-        assert_eq!(untouched, blob);
+        let ids_for = |batches: &[RecordBatch]| -> Vec<i64> {
+            batches
+                .iter()
+                .flat_map(|b| {
+                    b.column(0)
+                        .as_primitive::<arrow::datatypes::Int64Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect()
+        };
+        let via_none = decode_chunk_item(&blob, None).unwrap();
+        let via_zero = decode_chunk_item(&blob, Some(0)).unwrap();
+        assert_eq!(ids_for(&via_none), vec![1, 2, 3]);
+        assert_eq!(ids_for(&via_zero), vec![1, 2, 3]);
     }
 
     /// Regression test for a real behavior found by testing edge-case data

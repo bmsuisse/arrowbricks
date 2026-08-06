@@ -125,7 +125,7 @@ async def test_static_token_still_works():
     server, port = _start_server(n_chunks=3, rows_per_chunk=5, seen_tokens=seen)
     try:
         client = arrowbricks_core.Client(
-            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fixed-token"
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fixed-token", protocol="sea"
         )
         result = await client.execute("SELECT * FROM t")
         table = await result.fetchall_arrow()
@@ -147,7 +147,7 @@ async def test_sync_token_provider_called_fresh_every_request():
     server, port = _start_server(n_chunks=6, rows_per_chunk=5, seen_tokens=seen)
     try:
         client = arrowbricks_core.Client(
-            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token_provider=provider
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token_provider=provider, protocol="sea"
         )
         result = await client.execute("SELECT * FROM t")
         table = await result.fetchall_arrow()
@@ -183,6 +183,7 @@ async def test_async_token_provider_works_from_nested_worker_tasks():
             warehouse_id=WAREHOUSE_ID,
             token_provider=provider,
             chunk_fetch_concurrency=4,
+            protocol="sea",
         )
         result_set = await client.execute("SELECT * FROM t")
         table = await result_set.fetchall_arrow()
@@ -216,7 +217,7 @@ def test_async_token_provider_survives_a_new_event_loop_across_separate_asyncio_
     server, port = _start_server(n_chunks=3, rows_per_chunk=5, seen_tokens=seen)
     try:
         client = arrowbricks_core.Client(
-            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token_provider=provider
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token_provider=provider, protocol="sea"
         )
 
         async def run_once() -> int:
@@ -236,11 +237,15 @@ def test_async_token_provider_survives_a_new_event_loop_across_separate_asyncio_
 
 def test_client_requires_token_or_token_provider():
     with pytest.raises(ValueError, match="token"):
-        arrowbricks_core.Client(host="https://example.com", warehouse_id=WAREHOUSE_ID)
+        arrowbricks_core.Client(host="https://example.com", warehouse_id=WAREHOUSE_ID, protocol="sea")
 
 
 def test_client_rejects_both_token_and_token_provider():
     with pytest.raises(ValueError, match="not both"):
         arrowbricks_core.Client(
-            host="https://example.com", warehouse_id=WAREHOUSE_ID, token="fake", token_provider=lambda: "fake"
+            host="https://example.com",
+            warehouse_id=WAREHOUSE_ID,
+            token="fake",
+            token_provider=lambda: "fake",
+            protocol="sea",
         )

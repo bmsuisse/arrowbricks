@@ -61,7 +61,7 @@ def test_replayable_arrow_chunk_round_trips(sample_chunk_bytes: bytes) -> None:
 async def test_cursor_fetchall_arrow_streamed_and_description(one_chunk_server, warehouse_id: str) -> None:
     from arrowbricks import HEARTBEAT
 
-    conn = connect(host=one_chunk_server.host, warehouse_id=warehouse_id, token="fake-token")
+    conn = connect(host=one_chunk_server.host, warehouse_id=warehouse_id, token="fake-token", protocol="sea")
     cursor = conn.cursor()
     await cursor.execute("SELECT * FROM whatever")
 

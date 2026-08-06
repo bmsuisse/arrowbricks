@@ -101,7 +101,9 @@ def _start_server(chunk_values: list[list[int]], *, chunk_delay_s: dict[int, flo
 async def test_stream_ndjson_lines_yields_one_chunk_of_lines_in_order():
     server, port = _start_server([[1, 2], [3, 4, 5], [6]])
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         chunks = [item async for item in client.stream_ndjson_lines("SELECT * FROM t")]
         assert all(c is not arrowbricks_core.HEARTBEAT for c in chunks)
         assert [len(c) for c in chunks] == [2, 3, 1]
@@ -116,7 +118,9 @@ async def test_stream_ndjson_lines_preserves_order_despite_out_of_order_arrival(
     # Chunk 0 is slow, chunk 1 resolves first -- must still be yielded 0, 1.
     server, port = _start_server([[1], [2]], chunk_delay_s={0: 0.2})
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         chunks = [item async for item in client.stream_ndjson_lines("SELECT * FROM t")]
         all_ids = [json.loads(line)["id"] for chunk in chunks for line in chunk]
         assert all_ids == [1, 2]
@@ -128,7 +132,9 @@ async def test_stream_ndjson_lines_preserves_order_despite_out_of_order_arrival(
 async def test_stream_ndjson_lines_stops_after_exhausted():
     server, port = _start_server([[1]])
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         it = client.stream_ndjson_lines("SELECT * FROM t")
         first = await it.__anext__()
         assert first == ['{"id":1}']
@@ -146,7 +152,9 @@ async def test_stream_ndjson_lines_heartbeats_on_slow_chunk_then_times_out():
     wrapping."""
     server, port = _start_server([[1]], chunk_delay_s={0: 60.0})
     try:
-        client = arrowbricks_core.Client(host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake")
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token="fake", protocol="sea"
+        )
         seen_heartbeat = False
         with pytest.raises(RuntimeError, match="timeout"):
             async for item in client.stream_ndjson_lines("SELECT * FROM t", total_timeout_s=0.01):
