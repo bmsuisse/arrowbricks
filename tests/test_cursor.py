@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
-from conftest import WAREHOUSE_ID, Response
+from conftest import WAREHOUSE_ID, Request, Response
 
 from arrowbricks import HEARTBEAT, DatabricksClient, QueryTimeout
 from arrowbricks.cursor import Cursor
@@ -87,6 +88,120 @@ async def test_failed_second_execute_clears_the_previous_result_set(mock_server)
     assert cursor.description is None, "description must not still show the previous statement's schema"
     with pytest.raises(RuntimeError, match="no active result set"):
         await cursor.fetchall()
+
+
+@pytest.mark.asyncio
+async def test_prefer_inline_uses_embedded_data_array_with_no_further_requests(mock_server):
+    """End-to-end proof (through the real public Cursor API, not just the
+    Rust-level wiremock tests) that prefer_inline=True skips the chunk-fetch
+    round trip entirely for a small, INLINE-eligible result."""
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+
+    def submit(request: Request) -> Response:
+        body = json.loads(request.body)
+        assert body["disposition"] == "INLINE"
+        assert body["format"] == "JSON_ARRAY"
+        return Response(
+            json_body={
+                "statement_id": "stmt-inline",
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {
+                    "chunks": [],
+                    "schema": {
+                        "columns": [{"name": "id", "type_name": "LONG"}, {"name": "label", "type_name": "STRING"}]
+                    },
+                },
+                "result": {"data_array": [["0", "row_0"], ["1", "row_1"]]},
+            }
+        )
+
+    submit_route = server.post("/api/2.0/sql/statements").mock(side_effect=submit)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    cursor = Cursor(client)
+
+    await cursor.execute("SELECT * FROM t", prefer_inline=True)
+    table = await cursor.fetchall_arrow()
+    assert table.num_rows == 2
+    assert table.column("id").to_pylist() == [0, 1]
+    assert submit_route.call_count == 1, "prefer_inline must not need a second statement execution when it succeeds"
+
+
+@pytest.mark.asyncio
+async def test_prefer_inline_falls_back_when_result_is_too_big_for_inline(mock_server, chunk_bytes_builder):
+    """prefer_inline=True on a result that turns out too big for INLINE must
+    transparently fall back to a second, normal EXTERNAL_LINKS execution and
+    still return the complete, correct result -- not an error, not a
+    truncated one. Built manually (not via the mock_warehouse fixture)
+    since that fixture registers its own POST /statements route first, and
+    routes are matched first-registered-wins -- a second route on the same
+    path registered from the test body would never be selected."""
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+
+    submit_calls: list[dict] = []
+    statement_id = "stmt-fallback"
+
+    def submit(request: Request) -> Response:
+        body = json.loads(request.body)
+        submit_calls.append(body)
+        if body["disposition"] == "INLINE":
+            return Response(
+                json_body={
+                    "statement_id": "stmt-inline-too-big",
+                    "status": {
+                        "state": "FAILED",
+                        "error": {
+                            "error_code": "BAD_REQUEST",
+                            "message": (
+                                "Inline byte limit exceeded. Statements executed with disposition=INLINE can "
+                                "have a result size of at most 26214400 bytes. Please execute the statement "
+                                "with disposition=EXTERNAL_LINKS if you want to download the full result."
+                            ),
+                        },
+                    },
+                }
+            )
+        return Response(
+            json_body={
+                "statement_id": statement_id,
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {
+                    "chunks": [{"chunk_index": 0, "row_count": 5}, {"chunk_index": 1, "row_count": 5}],
+                    "schema": {
+                        "columns": [{"name": "id", "type_name": "LONG"}, {"name": "label", "type_name": "STRING"}]
+                    },
+                },
+            }
+        )
+
+    server.post("/api/2.0/sql/statements").mock(side_effect=submit)
+
+    chunk_bytes = {i: chunk_bytes_builder(i * 5, (i + 1) * 5) for i in range(2)}
+
+    def resolve_chunk(request: Request) -> Response:
+        idx = int(request.path.rsplit("/", 1)[-1])
+        return Response(json_body={"external_links": [{"external_link": f"{server.host}/_data/chunk-{idx}"}]})
+
+    server.get(rf"^/api/2\.0/sql/statements/{statement_id}/result/chunks/\d+$", regex=True).mock(
+        side_effect=resolve_chunk
+    )
+
+    def serve_chunk(request: Request) -> Response:
+        idx = int(request.path.rsplit("-", 1)[-1])
+        return Response(content=chunk_bytes[idx])
+
+    server.get(r"^/_data/chunk-\d+$", regex=True).mock(side_effect=serve_chunk)
+
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    cursor = Cursor(client)
+
+    await cursor.execute("SELECT * FROM whatever", prefer_inline=True)
+    rows = await cursor.fetchall()
+    assert len(rows) == 10, "must fall back to the normal path and still return everything"
+    assert len(submit_calls) == 2
+    assert submit_calls[0]["disposition"] == "INLINE"
+    assert submit_calls[1]["disposition"] == "EXTERNAL_LINKS"
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,9 @@ use bytes::Bytes;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::client::{ApiError, ChunkItem, ColumnDescription, DbClient, join_error};
+use crate::client::{
+    ApiError, ChunkItem, ColumnDescription, DbClient, InlineOrExternal, StatementSubmitResult, join_error,
+};
 
 /// Same dict-of-lists-keyed-by-index shape as `_ResultSet._pending`: a
 /// `chunk_index` can carry more than one blob (multiple `external_links` per
@@ -334,13 +336,17 @@ pub async fn execute_lazy(
     let submitted = client
         .execute_arrow_statement(statement, catalog, schema, parameters)
         .await?;
+    Ok(result_stream_from_submitted(client, submitted))
+}
+
+fn result_stream_from_submitted(client: Arc<DbClient>, submitted: StatementSubmitResult) -> ResultStream {
     let num_chunks = submitted.chunk_metas.len();
     let rx = client.fetch_chunks_with_backpressure(
         submitted.statement_id.clone(),
         submitted.chunk_metas,
         submitted.compressed,
     );
-    Ok(ResultStream {
+    ResultStream {
         statement_id: submitted.statement_id,
         num_chunks,
         schema: None,
@@ -350,7 +356,63 @@ pub async fn execute_lazy(
         pending_rows: 0,
         exhausted: false,
         poisoned: false,
-    })
+    }
+}
+
+/// Like `execute_lazy`, but first tries `disposition: INLINE` + `format:
+/// JSON_ARRAY` via `DbClient::execute_arrow_statement_prefer_inline` -- for
+/// a small result, this skips the chunk-fetch round trip entirely (see that
+/// function's own doc comment for the full reasoning and the confirmed
+/// real-workspace behavior it's based on). Converts the returned JSON_ARRAY
+/// rows into a `RecordBatch` via `json_convert`; if that conversion hits a
+/// column type it doesn't handle, falls back to a **fresh** `execute_lazy`
+/// call (a distinct statement execution, not a retry -- see
+/// `execute_arrow_statement_prefer_inline`'s own doc comment for why that's
+/// safe). Not the default -- opt-in only, via `Cursor.execute(...,
+/// prefer_inline=True)`.
+pub async fn execute_lazy_prefer_inline(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+) -> Result<ResultStream, ApiError> {
+    let outcome = client
+        .execute_arrow_statement_prefer_inline(statement, catalog, schema, parameters.clone())
+        .await?;
+
+    let (statement_id, rows, columns) = match outcome {
+        InlineOrExternal::External(submitted) => return Ok(result_stream_from_submitted(client, submitted)),
+        InlineOrExternal::Inline {
+            statement_id,
+            rows,
+            columns,
+        } => (statement_id, rows, columns),
+    };
+
+    match crate::json_convert::json_array_to_record_batch(&rows, &columns) {
+        Ok(batch) => {
+            let pending_rows = batch.num_rows();
+            let schema = Some(batch.schema());
+            // Sender dropped immediately -- never touched. `exhausted:
+            // true` and `pending` already fully populated below mean
+            // `fetch_at_least`'s own loop condition (`!self.exhausted`)
+            // never calls `self.reorder.next()` at all for this stream.
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(ResultStream {
+                statement_id,
+                num_chunks: 1,
+                schema,
+                columns,
+                reorder: ReorderBuffer::new(rx),
+                pending: VecDeque::from([batch]),
+                pending_rows,
+                exhausted: true,
+                poisoned: false,
+            })
+        }
+        Err(_) => execute_lazy(client, statement, catalog, schema, parameters).await,
+    }
 }
 
 /// Full submit -> poll -> fetch -> reorder -> decode pipeline. Returns the

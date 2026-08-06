@@ -240,11 +240,12 @@ dependencies = [
 
 [[package]]
 name = "arrowbricks_core"
-version = "1.3.3"
+version = "1.4.0"
 dependencies = [
  "arrow",
  "arrow-json",
  "bytes",
+ "chrono",
  "lz4_flex",
  "pyo3",
  "pyo3-arrow",

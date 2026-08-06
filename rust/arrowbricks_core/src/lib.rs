@@ -1,5 +1,6 @@
 pub mod client;
 pub mod heartbeat;
+pub mod json_convert;
 pub mod pipeline;
 
 use std::sync::{Arc, Mutex};
@@ -277,7 +278,16 @@ impl PyDbClient {
     /// `fetchmany_arrow`/`fetchall_arrow`, mirroring `cursor.py`'s
     /// `execute()` + `_ResultSet` split (chunks fetched lazily as the
     /// caller actually needs them, not all upfront).
-    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None))]
+    ///
+    /// `prefer_inline=True` tries `disposition: INLINE` first (see
+    /// `pipeline::execute_lazy_prefer_inline`'s own doc comment) -- for a
+    /// result the caller expects to be small, this can skip the chunk-fetch
+    /// round trip entirely, at the cost of a second full statement execution
+    /// if that expectation turns out wrong (too big, or an unsupported
+    /// column type). Default `False`: unconditionally pays for two
+    /// executions in that fallback case, which isn't worth it for a caller
+    /// with no reason to expect a small result.
+    #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, prefer_inline=false))]
     fn execute<'py>(
         &self,
         py: Python<'py>,
@@ -285,13 +295,24 @@ impl PyDbClient {
         catalog: Option<String>,
         schema: Option<String>,
         parameters: Option<Py<PyAny>>,
+        prefer_inline: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
         let parameters = parameters_to_value(py, parameters)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
+            let stream = if prefer_inline {
+                pipeline::execute_lazy_prefer_inline(
+                    client,
+                    &statement,
+                    catalog.as_deref(),
+                    schema.as_deref(),
+                    parameters,
+                )
                 .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+            } else {
+                pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref(), parameters).await
+            }
+            .map_err(|e| PyRuntimeError::new_err(e.message))?;
             Ok(PyResultSet {
                 statement_id: stream.statement_id.clone(),
                 num_chunks: stream.num_chunks,

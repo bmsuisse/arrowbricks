@@ -11,7 +11,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrowbricks_core::client::DbClient;
-use arrowbricks_core::pipeline::{execute_lazy, run_json_pipeline, run_pipeline};
+use arrowbricks_core::pipeline::{execute_lazy, execute_lazy_prefer_inline, run_json_pipeline, run_pipeline};
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -854,6 +854,174 @@ async fn lazy_pipeline_decompresses_lz4_frame_chunks() {
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 15);
+    assert_ids_in_order(&batches, 15);
+}
+
+/// Regression test for the `prefer_inline` fast path: a SUCCEEDED response
+/// carrying `result.data_array` directly (no `external_links`, no
+/// `manifest.chunks`) must be converted straight to Arrow with *zero*
+/// further HTTP calls -- `.expect(0)` on both the chunk-resolution and
+/// blob-fetch mocks fails the test if either is ever hit, proving the round
+/// trip is genuinely skipped, not just that the data happens to come out
+/// right some other way.
+#[tokio::test]
+async fn prefer_inline_uses_the_embedded_data_array_with_zero_further_requests() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(move |req: &wiremock::Request| {
+            let parsed: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(parsed["disposition"], "INLINE");
+            assert_eq!(parsed["format"], "JSON_ARRAY");
+            ResponseTemplate::new(200).set_body_json(json!({
+                "statement_id": STATEMENT_ID,
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {
+                    "chunks": [],
+                    "schema": {"columns": [
+                        {"name": "id", "type_name": "LONG"},
+                        {"name": "label", "type_name": "STRING"},
+                    ]},
+                },
+                "result": {
+                    "data_array": [["0", "row_0"], ["1", "row_1"], ["2", "row_2"]],
+                },
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    // Never mounted a real handler for either -- `.expect(0)` fails the
+    // test (on `MockServer` drop) if a request ever arrives here.
+    Mock::given(method("GET"))
+        .and(path_regex(format!(
+            r"^/api/2\.0/sql/statements/{STATEMENT_ID}/result/chunks/.*$"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"external_links": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/.*$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 3);
+    assert_ids_in_order(&batches, 3);
+}
+
+/// Matches only a POST whose JSON body has `"disposition": "INLINE"` --
+/// lets a mock built with this matcher coexist with `install_mock_warehouse`'s
+/// own unconditional POST /statements mock (mounted separately) rather than
+/// depending on wiremock's mount-order/priority rules (default priority is
+/// equal for both, and ties go to whichever was mounted *first* -- the
+/// opposite of what an earlier version of these two tests assumed, which is
+/// why they need this matcher instead of a response-closure "fall through"
+/// that wiremock doesn't actually support that way).
+struct HasDisposition(&'static str);
+
+impl wiremock::Match for HasDisposition {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|v| v.get("disposition").and_then(|d| d.as_str().map(str::to_string)))
+            .as_deref()
+            == Some(self.0)
+    }
+}
+
+/// Regression test: exceeding INLINE's byte limit must fall back to a
+/// **fresh** EXTERNAL_LINKS submission (a distinct statement execution, not
+/// a retry -- see `execute_arrow_statement_prefer_inline`'s doc comment),
+/// and still return the correct, complete result via that normal path.
+#[tokio::test]
+async fn prefer_inline_falls_back_to_external_links_on_byte_limit_exceeded() {
+    let server = MockServer::start().await;
+    // Mounted first so its unconditional POST /statements matcher is the
+    // fallback for the second (EXTERNAL_LINKS) submission -- the INLINE-only
+    // mock below only ever matches the first attempt.
+    install_mock_warehouse(&server, 3, 5, false).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .and(HasDisposition("INLINE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": "stmt-inline-too-big",
+            "status": {
+                "state": "FAILED",
+                "error": {
+                    "error_code": "BAD_REQUEST",
+                    "message": "Inline byte limit exceeded. Statements executed with disposition=INLINE can have a result size of at most 26214400 bytes. Please execute the statement with disposition=EXTERNAL_LINKS if you want to download the full result.",
+                },
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 15,
+        "must fall back to the normal EXTERNAL_LINKS path and still return everything"
+    );
+    assert_ids_in_order(&batches, 15);
+}
+
+/// Regression test: an INLINE response whose schema contains a column type
+/// `json_convert` doesn't handle (ARRAY, here) must fall back to a fresh
+/// EXTERNAL_LINKS submission too, not error out or silently mis-convert.
+#[tokio::test]
+async fn prefer_inline_falls_back_to_external_links_on_unsupported_column_type() {
+    let server = MockServer::start().await;
+    install_mock_warehouse(&server, 3, 5, false).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .and(HasDisposition("INLINE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": "stmt-inline-unsupported",
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [],
+                "schema": {"columns": [{"name": "arr", "type_name": "ARRAY"}]},
+            },
+            "result": {"data_array": [["[\"1\",\"2\"]"]]},
+        })))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 15,
+        "must fall back to the normal EXTERNAL_LINKS path, not error or mis-convert"
+    );
     assert_ids_in_order(&batches, 15);
 }
 

@@ -81,11 +81,23 @@ class Cursor:
         catalog: str | None = None,
         schema: str | None = None,
         total_timeout_s: float | None = None,
+        prefer_inline: bool = False,
     ) -> AsyncIterator[Any]:
         """Like execute(), but yields HEARTBEAT while waiting on Databricks
         instead of blocking silently -- for bridging e.g. an SSE connection
         during a possible multi-minute cold warehouse start. Yields HEARTBEAT
-        zero or more times, then this same Cursor once ready to fetch."""
+        zero or more times, then this same Cursor once ready to fetch.
+
+        `prefer_inline` -- if you expect this query's result to be small
+        (a handful of rows, well under Databricks' own 25MiB INLINE result
+        cap), setting this tries fetching it inline in the same round trip
+        as the statement submission itself, skipping the separate chunk-fetch
+        entirely. If the result turns out too big, or has a column type this
+        can't convert inline (nested ARRAY/MAP/STRUCT, VARIANT), it
+        transparently re-runs the query the normal way instead -- meaning a
+        caller who sets this without actually expecting a small result pays
+        for the query twice. Leave this off unless you know the result is
+        small; it changes latency, not correctness, either way."""
         sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
 
         async def _gen() -> AsyncIterator[Any]:
@@ -103,7 +115,9 @@ class Cursor:
             self._schema = None
             self._manifest_description = None
             core_client = self._client._core_client  # noqa: SLF001 -- same package, see client.py
-            submit = core_client.execute(sql, catalog=catalog, schema=schema, parameters=parameters)
+            submit = core_client.execute(
+                sql, catalog=catalog, schema=schema, parameters=parameters, prefer_inline=prefer_inline
+            )
             async for item in await_with_heartbeat(submit, total_timeout_s=total_timeout_s):
                 if item is HEARTBEAT:
                     yield HEARTBEAT
@@ -127,12 +141,14 @@ class Cursor:
         catalog: str | None = None,
         schema: str | None = None,
         total_timeout_s: float | None = None,
+        prefer_inline: bool = False,
     ) -> Cursor:
         """Submits `sql` and waits for it to complete -- a plain blocking
         await, like a real DB-API cursor's execute(). `parameters`, if given,
         is Databricks' own named-parameter format --
         [{"name": ..., "value": ..., "type": ...}] bound against `:name`
-        markers in `sql`, not DB-API's `?`/`%s` placeholder style."""
+        markers in `sql`, not DB-API's `?`/`%s` placeholder style. See
+        `execute_streamed`'s own docstring for what `prefer_inline` does."""
         async for _ in self.execute_streamed(
             sql,
             parameters,
@@ -141,6 +157,7 @@ class Cursor:
             catalog=catalog,
             schema=schema,
             total_timeout_s=total_timeout_s,
+            prefer_inline=prefer_inline,
         ):
             pass
         return self

@@ -56,6 +56,15 @@ pub struct ColumnDescription {
     pub name: String,
     #[serde(default)]
     pub type_name: Option<String>,
+    /// Only present for `type_name == "DECIMAL"` -- needed by
+    /// `json_convert`'s INLINE/JSON_ARRAY-to-Arrow conversion to build a
+    /// correctly-scaled `Decimal128Array`. Absent (and unused) for every
+    /// other type, including on the Arrow-IPC path, which gets its decimal
+    /// precision/scale from the IPC schema itself, not from here.
+    #[serde(default)]
+    pub type_precision: Option<u8>,
+    #[serde(default)]
+    pub type_scale: Option<i8>,
 }
 
 #[derive(Deserialize, Default)]
@@ -119,6 +128,14 @@ struct ResultLinkBody {
 struct ResultBody {
     #[serde(default)]
     external_links: Vec<ResultLinkBody>,
+    /// Only present for `disposition: INLINE` + `format: JSON_ARRAY` -- each
+    /// row a `Vec<Option<String>>` (every non-null value a string,
+    /// Databricks' own JSON_ARRAY contract, same as `execute_json_statement`'s
+    /// normal `EXTERNAL_LINKS`+`JSON_ARRAY` chunks). Consumed by
+    /// `json_convert::json_array_to_record_batch` on the `prefer_inline`
+    /// fast path.
+    #[serde(default)]
+    data_array: Option<Vec<Vec<Option<String>>>>,
 }
 
 #[derive(Deserialize)]
@@ -290,6 +307,23 @@ pub struct StatementSubmitResult {
     /// Whether the server confirmed `LZ4_FRAME` cloud-fetch compression is in
     /// effect for this statement's chunks -- see `ManifestBody::result_compression`.
     pub compressed: bool,
+}
+
+/// What `execute_arrow_statement_prefer_inline` gets you -- either the whole
+/// result inline as raw JSON_ARRAY rows (every non-null value a string,
+/// same contract as `execute_json_statement`; converting these into a real
+/// `RecordBatch` is `pipeline.rs`'s job via `json_convert`, not this
+/// Arrow-agnostic module's -- see this file's own module doc comment), or a
+/// normal `StatementSubmitResult` to fetch chunks for exactly as if
+/// `prefer_inline` had never been asked for. See that function's own doc
+/// comment for when each happens.
+pub enum InlineOrExternal {
+    Inline {
+        statement_id: String,
+        rows: Vec<Vec<Option<String>>>,
+        columns: Vec<ColumnDescription>,
+    },
+    External(StatementSubmitResult),
 }
 
 #[derive(Debug)]
@@ -624,6 +658,101 @@ impl DbClient {
             .await
     }
 
+    /// Tries `disposition: INLINE` + `format: JSON_ARRAY` first -- for a
+    /// small result, Databricks embeds the whole result directly in this
+    /// same submit/poll response (`result.data_array`), skipping the
+    /// separate chunk-resolution-and-blob-fetch round trip the normal
+    /// `EXTERNAL_LINKS` path always needs. Confirmed against a real
+    /// workspace: exceeding INLINE's byte limit (26,214,400 bytes / 25MiB)
+    /// fails the statement cleanly with a specific, matchable error
+    /// message -- never silent truncation -- and `INLINE_OR_EXTERNAL_LINKS`
+    /// ("HYBRID", which would let the server choose per-query) returned a
+    /// clean "not a supported disposition" 400 on that same workspace, so
+    /// isn't used here. `format` must be `JSON_ARRAY` for `INLINE` --
+    /// Databricks rejects `INLINE`+`ARROW_STREAM` outright (also confirmed).
+    /// This module stays Arrow-agnostic on purpose (see its own module doc
+    /// comment) -- `InlineOrExternal::Inline` carries the raw JSON_ARRAY
+    /// rows straight through; converting them into a `RecordBatch` (and
+    /// falling back to a fresh `EXTERNAL_LINKS` submission if that
+    /// conversion hits a column type it doesn't handle) is `pipeline.rs`'s
+    /// job via `json_convert`, same division of responsibility as every
+    /// other decode step in this crate.
+    ///
+    /// Falls back to a **fresh, independent** `execute_arrow_statement` call
+    /// (not a retry of this same submission) whenever INLINE doesn't pan
+    /// out at the HTTP/statement level: the byte limit was exceeded, or
+    /// `data_array` is unexpectedly absent despite SUCCEEDED. This is a
+    /// second, distinct statement execution, not a retry of a possibly-
+    /// already-run one, so it carries none of the double-execution risk
+    /// that made POST retries unsafe elsewhere in this file -- the first
+    /// attempt's outcome is fully known (it reached a terminal state)
+    /// before the second one is ever submitted. A genuine query error (bad
+    /// SQL, permission denied) propagates immediately instead, same as the
+    /// normal path -- no reason to mask it behind a pointless second
+    /// attempt.
+    ///
+    /// Not the default -- opt-in only (`prefer_inline` on the Python-facing
+    /// `execute()`/`Cursor.execute()`), since a caller who doesn't expect a
+    /// small result pays for two full statement executions on the (common,
+    /// for them) fallback path instead of one.
+    pub async fn execute_arrow_statement_prefer_inline(
+        &self,
+        statement: &str,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        parameters: Option<Value>,
+    ) -> Result<InlineOrExternal, ApiError> {
+        let mut body = json!({
+            "warehouse_id": self.warehouse_id,
+            "statement": statement,
+            "disposition": "INLINE",
+            "format": "JSON_ARRAY",
+            "wait_timeout": self.wait_timeout,
+            "on_wait_timeout": "CONTINUE",
+        });
+        if let Some(c) = catalog {
+            body["catalog"] = json!(c);
+        }
+        if let Some(s) = schema {
+            body["schema"] = json!(s);
+        }
+        if let Some(p) = parameters.clone() {
+            body["parameters"] = p;
+        }
+
+        let outcome = self.submit_and_poll(body).await;
+        let data = match outcome {
+            Ok(d) => d,
+            Err(e) if e.message.contains("Inline byte limit exceeded") => {
+                return self
+                    .execute_arrow_statement(statement, catalog, schema, parameters)
+                    .await
+                    .map(InlineOrExternal::External);
+            }
+            Err(e) => return Err(e),
+        };
+
+        let manifest = data.manifest.unwrap_or_default();
+        let columns = manifest.schema.map(|s| s.columns).unwrap_or_default();
+        let data_array = data.result.and_then(|r| r.data_array);
+        match data_array {
+            Some(rows) => Ok(InlineOrExternal::Inline {
+                statement_id: data.statement_id,
+                rows,
+                columns,
+            }),
+            // No data_array despite SUCCEEDED -- shouldn't happen given a
+            // non-error status, but this crate never guesses at a missing
+            // field; a fresh EXTERNAL_LINKS submission is exactly as safe as
+            // the byte-limit fallback above (a distinct statement, not a
+            // retry of this one).
+            None => self
+                .execute_arrow_statement(statement, catalog, schema, parameters)
+                .await
+                .map(InlineOrExternal::External),
+        }
+    }
+
     /// Like `execute_arrow_statement`, fixed to JSON_ARRAY -- each fetched
     /// chunk's bytes are then a JSON array of rows, each row itself an array
     /// of values where every non-null value is a *string* regardless of its
@@ -640,6 +769,41 @@ impl DbClient {
     ) -> Result<StatementSubmitResult, ApiError> {
         self.execute_statement(statement, "JSON_ARRAY", catalog, schema, parameters)
             .await
+    }
+
+    /// Shared by `execute_statement` and `execute_arrow_statement_prefer_inline`:
+    /// POST the statement, poll until a terminal state, and turn FAILED/
+    /// CANCELED into an `Err` -- everything both callers need before they
+    /// diverge on how to interpret a SUCCEEDED response's `result`/`manifest`.
+    async fn submit_and_poll(&self, body: Value) -> Result<StatementResponseBody, ApiError> {
+        self.ensure_warehouse_running().await?;
+        let url = format!("{}/api/2.0/sql/statements", self.host);
+        let mut data: StatementResponseBody = self.authed_json(reqwest::Method::POST, &url, Some(&body)).await?;
+
+        while !matches!(
+            data.status.state.as_str(),
+            "SUCCEEDED" | "FAILED" | "CANCELED" | "CLOSED"
+        ) {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let poll_url = format!("{}/api/2.0/sql/statements/{}", self.host, data.statement_id);
+            data = self.authed_json(reqwest::Method::GET, &poll_url, None).await?;
+        }
+
+        match data.status.state.as_str() {
+            "FAILED" => {
+                let err = data.status.error.unwrap_or(StatementErrorBody {
+                    error_code: None,
+                    message: None,
+                });
+                Err(ApiError::permanent(format!(
+                    "Databricks statement failed [{}]: {}",
+                    err.error_code.as_deref().unwrap_or(""),
+                    err.message.as_deref().unwrap_or(""),
+                )))
+            }
+            "CANCELED" => Err(ApiError::permanent("Databricks statement was canceled")),
+            _ => Ok(data),
+        }
     }
 
     async fn execute_statement(
@@ -678,35 +842,7 @@ impl DbClient {
             body["parameters"] = p;
         }
 
-        self.ensure_warehouse_running().await?;
-        let url = format!("{}/api/2.0/sql/statements", self.host);
-        let mut data: StatementResponseBody = self.authed_json(reqwest::Method::POST, &url, Some(&body)).await?;
-
-        while !matches!(
-            data.status.state.as_str(),
-            "SUCCEEDED" | "FAILED" | "CANCELED" | "CLOSED"
-        ) {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            let poll_url = format!("{}/api/2.0/sql/statements/{}", self.host, data.statement_id);
-            data = self.authed_json(reqwest::Method::GET, &poll_url, None).await?;
-        }
-
-        match data.status.state.as_str() {
-            "FAILED" => {
-                let err = data.status.error.unwrap_or(StatementErrorBody {
-                    error_code: None,
-                    message: None,
-                });
-                return Err(ApiError::permanent(format!(
-                    "Databricks statement failed [{}]: {}",
-                    err.error_code.as_deref().unwrap_or(""),
-                    err.message.as_deref().unwrap_or(""),
-                )));
-            }
-            "CANCELED" => return Err(ApiError::permanent("Databricks statement was canceled")),
-            _ => {}
-        }
-
+        let data = self.submit_and_poll(body).await?;
         let manifest = data.manifest.unwrap_or_default();
         let compressed = manifest.result_compression.as_deref() == Some("LZ4_FRAME");
         // `Vec` per index, not a plain map entry -- see `ChunkMeta::pre_resolved_links`'s
