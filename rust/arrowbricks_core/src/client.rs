@@ -65,6 +65,17 @@ pub struct ColumnDescription {
     pub type_precision: Option<u8>,
     #[serde(default)]
     pub type_scale: Option<i8>,
+    /// Only present for `type_name == "STRUCT"` -- a recursive SQL DDL
+    /// rendering (e.g. `"STRUCT<a: BIGINT NOT NULL, b: STRING>"`), the only
+    /// place the manifest exposes a STRUCT's own field names/types; used by
+    /// `json_convert`'s INLINE/JSON_ARRAY-to-Arrow conversion to build the
+    /// nested `StructArray`. Note this uses SQL DDL type spelling
+    /// (`BIGINT`/`TINYINT`/`SMALLINT`), not this same manifest's own
+    /// top-level `type_name` vocabulary (`LONG`/`BYTE`/`SHORT`) -- confirmed
+    /// against a real workspace, not assumed; `json_convert::parse_one_field`
+    /// remaps the three that differ.
+    #[serde(default)]
+    pub type_text: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
