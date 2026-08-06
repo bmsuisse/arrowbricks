@@ -253,6 +253,84 @@ async fn pre_resolved_chunk0_link_skips_the_extra_resolution_get() {
     assert_ids_in_order(&summary.batches, 10);
 }
 
+/// Regression test for a coverage gap found in code review: the test above
+/// only proves the pre-resolved-link skip through `run_pipeline`, which
+/// became unreachable from Python once `Client.execute_arrow` was removed
+/// as unused surface -- `execute_lazy`/`ResultStream` (backing
+/// `Cursor.fetchall_arrow`, the path every real caller actually takes) is a
+/// separate implementation that had zero coverage of this specific
+/// optimization. Same mock setup (including the `.expect(0)` proving the
+/// resolution GET is genuinely skipped, not just that the pipeline still
+/// produces correct rows some other way), the actually-used path.
+#[tokio::test]
+async fn lazy_pipeline_skips_the_extra_resolution_get_for_a_pre_resolved_chunk() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [{"chunk_index": 0, "row_count": 5}, {"chunk_index": 1, "row_count": 5}],
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+            "result": {
+                "external_links": [{"chunk_index": 0, "external_link": format!("{uri}/_data/chunk-0")}]
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/0")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"external_links": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/1")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "external_links": [{"external_link": format!("{uri}/_data/chunk-1")}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-1$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(5, 10), "application/vnd.apache.arrow.stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 10);
+    assert_ids_in_order(&batches, 10);
+}
+
 /// Regression test for a bug caught in code review before it shipped:
 /// `pre_resolved` was originally a plain `HashMap<i64, String>`, which keeps
 /// only the *last* entry when `result.external_links` has more than one for
@@ -472,6 +550,92 @@ async fn lazy_fetchall_drains_beyond_the_per_batch_chunk_cap() {
     assert_ids_in_order(&batches, 150);
 }
 
+/// Regression test for a bug found in code review: `fetch_at_least` pulls
+/// chunks off the reorder buffer into a *local* `decode_handles` list before
+/// appending decoded batches to `self.pending`/`self.pending_rows` -- if the
+/// whole `fetchall_arrow()` future is dropped mid-flight (exactly what
+/// happens when a Python caller's `asyncio.wait_for`/`task.cancel()` fires,
+/// simulated here with a real `tokio::time::timeout` racing a real delayed
+/// mock response), whatever was in `decode_handles` at that moment is lost
+/// -- already consumed out of the reorder buffer, but never recorded.
+/// Before the fix, a second `fetchall_arrow()` call on the *same* stream
+/// then silently returned a real but truncated row count with no error at
+/// all (fewer rows than the query actually has). The fix poisons the stream
+/// on any early exit from `fetch_at_least`, so this second call must now
+/// error instead of quietly under-reporting.
+#[tokio::test]
+async fn lazy_fetchall_errors_instead_of_silently_truncating_after_a_cancelled_fetch() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let n_chunks = 4i64;
+    let rows_per_chunk = 5i64;
+    let chunks: Vec<_> = (0..n_chunks)
+        .map(|i| json!({"chunk_index": i, "row_count": rows_per_chunk}))
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": chunks},
+        })))
+        .mount(&server)
+        .await;
+
+    for i in 0..n_chunks {
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "external_links": [{"external_link": format!("{uri}/_data/chunk-{i}")}]
+            })))
+            .mount(&server)
+            .await;
+
+        let bytes = build_chunk_bytes(i * rows_per_chunk, (i + 1) * rows_per_chunk);
+        // Every chunk is slow -- with concurrency capped at 1 below, this
+        // guarantees the short timeout below fires mid-fetch (after at most
+        // one chunk has landed), not before anything started or after
+        // everything already finished.
+        Mock::given(method("GET"))
+            .and(path_regex(format!(r"^/_data/chunk-{i}$")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(bytes, "application/vnd.apache.arrow.stream")
+                    .set_delay(std::time::Duration::from_millis(80)),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_concurrency(1));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
+
+    // Real cancellation, not a simulated flag -- `timeout` drops the
+    // `fetchall_arrow()` future the instant it elapses, exactly like
+    // pyo3-async-runtimes propagating a Python-side `task.cancel()` into the
+    // Rust future it wraps.
+    let first = tokio::time::timeout(std::time::Duration::from_millis(20), stream.fetchall_arrow()).await;
+    assert!(
+        first.is_err(),
+        "expected the first fetchall_arrow() to be cancelled by the short timeout"
+    );
+
+    let second = stream.fetchall_arrow().await;
+    assert!(
+        second.is_err(),
+        "a second fetchall_arrow() on the same stream after a cancelled fetch must error, not silently return a truncated result: {second:?}"
+    );
+}
+
 #[tokio::test]
 async fn lazy_fetchmany_survives_reverse_arrival() {
     let server = MockServer::start().await;
@@ -670,6 +834,27 @@ async fn compressed_pipeline_decompresses_lz4_frame_chunks() {
     assert_eq!(summary.num_chunks, 3);
     assert_eq!(summary.num_rows(), 15);
     assert_ids_in_order(&summary.batches, 15);
+}
+
+/// Regression test for a coverage gap found in code review: `run_pipeline`
+/// (used by the test above) became unreachable from Python once
+/// `Client.execute_arrow` was removed as unused surface (nothing in the
+/// shipped package called it) -- `execute_lazy`/`ResultStream` (backing
+/// `Cursor.fetchall_arrow`, the path every real caller actually takes) is a
+/// separate implementation that happened to have zero integration coverage
+/// of LZ4 decompression at all. Same mock setup, the actually-used path.
+#[tokio::test]
+async fn lazy_pipeline_decompresses_lz4_frame_chunks() {
+    let server = MockServer::start().await;
+    install_mock_warehouse_compressed(&server, 3, 5).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 15);
+    assert_ids_in_order(&batches, 15);
 }
 
 /// Concatenates every batch's `id` column and checks it runs 0..n_rows in

@@ -184,6 +184,53 @@ pub struct ResultStream {
     pending: VecDeque<RecordBatch>,
     pending_rows: usize,
     exhausted: bool,
+    /// Set (via `PoisonOnDrop`) if a `fetch_at_least` call ever exits
+    /// without reaching its own end -- see that guard's doc comment.
+    poisoned: bool,
+}
+
+/// Arms on construction, poisons `*poisoned` on `Drop` unless `defuse()` was
+/// called first. `fetch_at_least` arms one of these at the top and only
+/// defuses it right before its own final `Ok(())` -- so *any* early exit
+/// (a genuine `?`-propagated error, or the whole future being dropped
+/// mid-`.await` by Python-side cancellation: `task.cancel()`/
+/// `asyncio.wait_for` timing out) leaves the stream poisoned.
+///
+/// This matters because `fetch_at_least` pulls chunks off `self.reorder`
+/// (removing them from it) into a *local* `decode_handles` list before
+/// decoding and only appending decoded batches to `self.pending`/
+/// `self.pending_rows` afterwards -- an early exit (any early exit, not
+/// just cancellation) abandons whatever was in `decode_handles` at that
+/// moment. Those chunks are gone for good (already consumed out of the
+/// reorder buffer, decode results discarded with nothing left holding
+/// their `JoinHandle`s), but `self.exhausted`/`self.reorder`'s own internal
+/// bookkeeping has already moved past them. Found in code review and
+/// reproduced: a `fetchall()` cancelled or timed out mid-download, then
+/// retried on the *same* `Cursor`/`ResultStream`, silently returned a real
+/// but truncated row count (20 of 30 expected) with no error at all --
+/// `fetch_at_least` checking `poisoned` up front turns that into a loud,
+/// immediate error on the next use instead.
+struct PoisonOnDrop<'a> {
+    poisoned: &'a mut bool,
+    armed: bool,
+}
+
+impl<'a> PoisonOnDrop<'a> {
+    fn new(poisoned: &'a mut bool) -> Self {
+        Self { poisoned, armed: true }
+    }
+
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PoisonOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.poisoned = true;
+        }
+    }
 }
 
 impl ResultStream {
@@ -198,6 +245,15 @@ impl ResultStream {
     /// result with more than `MAX_CHUNKS_PER_FETCH_BATCH` chunks, so a
     /// single capped batch isn't enough).
     async fn fetch_at_least(&mut self, want_rows: usize) -> Result<(), ApiError> {
+        if self.poisoned {
+            return Err(ApiError {
+                message: "this result was left incomplete by a previous cancelled, timed-out, or failed fetch -- \
+                          re-run the query instead of continuing to use this cursor/result"
+                    .to_string(),
+                transient: false,
+            });
+        }
+        let mut guard = PoisonOnDrop::new(&mut self.poisoned);
         while self.pending_rows < want_rows && !self.exhausted {
             let mut decode_handles = Vec::new();
             let mut estimated_new_rows = 0usize;
@@ -223,6 +279,7 @@ impl ResultStream {
                 }
             }
         }
+        guard.defuse();
         Ok(())
     }
 
@@ -292,6 +349,7 @@ pub async fn execute_lazy(
         pending: VecDeque::new(),
         pending_rows: 0,
         exhausted: false,
+        poisoned: false,
     })
 }
 

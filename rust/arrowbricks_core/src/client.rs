@@ -230,8 +230,18 @@ impl ApiError {
         }
     }
 
-    fn from_status(status: StatusCode, body: &str) -> Self {
-        let transient = matches!(status.as_u16(), 401 | 403 | 408 | 429) || status.is_server_error();
+    /// `idempotent` only gates the 5xx case -- 401/403/408/429 mean the
+    /// request was rejected before any processing started (auth failure,
+    /// rate limit, client-side timeout), safe to retry regardless of method.
+    /// A 5xx is murkier: it usually means the same, but it can also mean the
+    /// backend already accepted and started the statement before some later
+    /// failure (e.g. a gateway timeout) produced the 5xx anyway -- found in
+    /// code review that this call was unconditionally transient even for the
+    /// statement-submit POST, bypassing the exact idempotency reasoning
+    /// `from_reqwest`'s `idempotent` param exists for (retrying that POST
+    /// risks a second, duplicate execution of arbitrary caller SQL).
+    fn from_status(status: StatusCode, body: &str, idempotent: bool) -> Self {
+        let transient = matches!(status.as_u16(), 401 | 403 | 408 | 429) || (idempotent && status.is_server_error());
         Self {
             message: format!("HTTP {status}: {body}"),
             transient,
@@ -327,14 +337,22 @@ fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
     // small lower bound.
     let mut out = Vec::with_capacity(compressed.len() * 4);
     let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
-    loop {
-        let before = out.len();
+    // Terminate on the *reader* being exhausted, not on "output stopped
+    // growing" -- found in code review that a frame which happens to decode
+    // to zero bytes (a real, valid LZ4 Frame shape: header + immediate
+    // EndMark) makes one `read_to_end` call return `Ok(0)` for that frame
+    // without erroring and without necessarily advancing into the next
+    // frame yet, which the old `out.len() == before` check read as "no more
+    // frames" -- silently dropping every subsequent concatenated frame with
+    // no error at all. Same silent-truncation shape as the original
+    // multi-frame bug this loop exists to fix. Looping while the reader
+    // still has bytes left (regardless of whether the last call grew `out`)
+    // is the correct fix -- verified against a zero-content frame sandwiched
+    // between two real ones, see `decompress_lz4_frame_survives_a_zero_content_frame_in_the_middle`.
+    while !decoder.get_ref().is_empty() {
         decoder
             .read_to_end(&mut out)
             .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
-        if out.len() == before {
-            break;
-        }
     }
     Ok(Bytes::from(out))
 }
@@ -510,7 +528,7 @@ impl DbClient {
             let status = resp.status();
             let text = resp.text().await.map_err(|e| ApiError::from_reqwest(e, idempotent))?;
             if !status.is_success() {
-                return Err(ApiError::from_status(status, &text));
+                return Err(ApiError::from_status(status, &text, idempotent));
             }
             serde_json::from_str::<T>(&text).map_err(|e| ApiError::permanent(format!("bad JSON body: {e}")))
         })
@@ -541,7 +559,7 @@ impl DbClient {
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
-                return Err(ApiError::from_status(status, &text));
+                return Err(ApiError::from_status(status, &text, true));
             }
             let bytes = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
             if !compressed {
@@ -848,7 +866,7 @@ impl DbClient {
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
-                return Err(ApiError::from_status(status, &text));
+                return Err(ApiError::from_status(status, &text, true));
             }
             Ok(())
         })
@@ -877,7 +895,7 @@ impl DbClient {
                 return Ok(());
             }
             let text = resp.text().await.unwrap_or_default();
-            Err(ApiError::from_status(status, &text))
+            Err(ApiError::from_status(status, &text, true))
         })
         .await
     }
@@ -941,6 +959,44 @@ mod tests {
         expected.extend_from_slice(&part_b);
         expected.extend_from_slice(&part_c);
         assert_eq!(decompressed, Bytes::from(expected));
+    }
+
+    /// Regression test for a bug found in code review: a real, valid LZ4
+    /// Frame that happens to decode to zero bytes (a header immediately
+    /// followed by an EndMark -- a legal frame shape, not malformed input)
+    /// makes `read_to_end` return `Ok(0)` for that frame without erroring.
+    /// The old loop read "output didn't grow" as "no more frames" and
+    /// stopped there, silently dropping every frame concatenated after the
+    /// empty one. `decompress_lz4_frame` must keep going as long as the
+    /// underlying reader still has bytes left, not just as long as output
+    /// keeps growing.
+    #[test]
+    fn decompress_lz4_frame_survives_a_zero_content_frame_in_the_middle() {
+        use std::io::Write;
+
+        fn compress_one_frame(data: &[u8]) -> Vec<u8> {
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        let part_a = b"the quick brown fox jumps over the lazy dog ".repeat(50);
+        let part_b = b"pack my box with five dozen liquor jugs ".repeat(50);
+        let mut concatenated_frames = Vec::new();
+        concatenated_frames.extend(compress_one_frame(&part_a));
+        concatenated_frames.extend(compress_one_frame(b"")); // real frame, zero content
+        concatenated_frames.extend(compress_one_frame(&part_b));
+
+        let decompressed = decompress_lz4_frame(&Bytes::from(concatenated_frames)).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&part_a);
+        expected.extend_from_slice(&part_b);
+        assert_eq!(
+            decompressed,
+            Bytes::from(expected),
+            "the frame after the zero-content one must not be silently dropped"
+        );
     }
 
     fn ok_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {

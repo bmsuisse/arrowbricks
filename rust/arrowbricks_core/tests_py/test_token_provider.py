@@ -176,6 +176,54 @@ async def test_async_token_provider_works_from_nested_worker_tasks():
         server.shutdown()
 
 
+def test_async_token_provider_survives_a_new_event_loop_across_separate_asyncio_runs():
+    """Regression test for a bug found in code review: `PyTokenProvider`
+    cached the *first-ever* captured `TaskLocals` forever, pinning the whole
+    `DbClient` -- which persists across many separate `execute()` calls, by
+    design -- to whichever event loop happened to be running the first time
+    a token was ever requested. A second, later `asyncio.run()` (a fresh
+    loop -- the same shape as a restarted worker, or pytest-asyncio's own
+    per-test loop) then scoped the awaited provider onto a loop that was
+    already closed, failing with "Event loop is closed" instead of just
+    using the current one. Not `@pytest.mark.asyncio` deliberately -- needs
+    two genuinely separate `asyncio.run()` calls (two different loops), not
+    one test-managed loop for the whole test."""
+    seen: list = []
+    calls = {"n": 0}
+
+    async def provider() -> str:
+        calls["n"] += 1
+        await asyncio.sleep(0)  # actually suspend, not just call-and-return
+        return f"async-{calls['n']}"
+
+    server, port = _start_server(n_chunks=3, rows_per_chunk=5, seen_tokens=seen)
+    try:
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}", warehouse_id=WAREHOUSE_ID, token_provider=provider
+        )
+
+        async def run_once() -> int:
+            result_set = await client.execute("SELECT * FROM t")
+            table = await result_set.fetchall_arrow()
+            return table.num_rows
+
+        assert asyncio.run(run_once()) == 15
+        # A brand new event loop, same client/token_provider -- the bug:
+        # locals captured during the first asyncio.run() were cached
+        # forever, so this second run tried to scope the awaited provider
+        # onto the now-closed first loop.
+        assert asyncio.run(run_once()) == 15
+    finally:
+        server.shutdown()
+
+
 def test_client_requires_token_or_token_provider():
     with pytest.raises(ValueError, match="token"):
         arrowbricks_core.Client(host="https://example.com", warehouse_id=WAREHOUSE_ID)
+
+
+def test_client_rejects_both_token_and_token_provider():
+    with pytest.raises(ValueError, match="not both"):
+        arrowbricks_core.Client(
+            host="https://example.com", warehouse_id=WAREHOUSE_ID, token="fake", token_provider=lambda: "fake"
+        )

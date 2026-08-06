@@ -89,6 +89,19 @@ class Cursor:
         sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
 
         async def _gen() -> AsyncIterator[Any]:
+            # Cleared up front, not just on success -- found in code review
+            # that a failed submit (statement FAILED/CANCELED, or
+            # QueryTimeout) left these pointing at the *previous* statement's
+            # result set with no error of its own, so a caller doing
+            # `try: await cur.execute(sql) / except: ...` and later reading
+            # the cursor anyway would silently get a different query's rows
+            # and description. Clearing here means a failed execute() leaves
+            # the cursor in the same "no active result set" state execute()
+            # was never called at all -- fetchone/fetchmany/fetchall/
+            # description below already raise/return None for that.
+            self._result = None
+            self._schema = None
+            self._manifest_description = None
             core_client = self._client._core_client  # noqa: SLF001 -- same package, see client.py
             submit = core_client.execute(sql, catalog=catalog, schema=schema, parameters=parameters)
             async for item in await_with_heartbeat(submit, total_timeout_s=total_timeout_s):

@@ -27,7 +27,8 @@ async def main() -> None:
         warehouse_id=os.environ["DATABRICKS_WAREHOUSE_ID"],
         token=os.environ["DATABRICKS_TOKEN"],
     )
-    result = await client.execute_arrow("SELECT * FROM my_catalog.my_schema.my_table LIMIT 1000000")  # noqa: F841 -- read by DuckDB's replacement scan via local variable name, not a literal Python reference
+    result_set = await client.execute("SELECT * FROM my_catalog.my_schema.my_table LIMIT 1000000")
+    result = await result_set.fetchall_arrow()  # noqa: F841 -- read by DuckDB's replacement scan via local variable name, not a literal Python reference
 
     # `result` is queryable by variable name -- DuckDB imports it zero-copy,
     # no pandas/pyarrow conversion step in between.

@@ -43,6 +43,53 @@ async def test_canceled_statement_raises(mock_server):
 
 
 @pytest.mark.asyncio
+async def test_failed_second_execute_clears_the_previous_result_set(mock_server):
+    """Regression test for a bug found in code review: `_gen()` only
+    assigned `self._result`/`self._schema`/`self._manifest_description` on
+    the success path -- a second `execute()` call that fails (statement
+    FAILED, here) left all three pointing at the *first* statement's result
+    set, with no error of its own. A caller doing
+    `try: await cur.execute(sql) / except: ...` and then reading the cursor
+    anyway would silently get the previous query's rows and description
+    instead of an error."""
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        side_effect=[
+            Response(
+                json_body={
+                    "statement_id": "stmt-ok",
+                    "status": {"state": "SUCCEEDED"},
+                    "manifest": {
+                        "chunks": [],
+                        "schema": {"columns": [{"name": "id", "type_name": "LONG"}]},
+                    },
+                }
+            ),
+            Response(
+                json_body={
+                    "statement_id": "stmt-failed",
+                    "status": {"state": "FAILED", "error": {"error_code": "SYNTAX_ERROR", "message": "bad sql"}},
+                }
+            ),
+        ]
+    )
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
+    cursor = Cursor(client)
+
+    await cursor.execute("SELECT 1 AS id")
+    assert cursor.description == [("id", "LONG", None, None, None, None, None)]
+    assert await cursor.fetchall() == []
+
+    with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
+        await cursor.execute("not valid sql")
+
+    assert cursor.description is None, "description must not still show the previous statement's schema"
+    with pytest.raises(RuntimeError, match="no active result set"):
+        await cursor.fetchall()
+
+
+@pytest.mark.asyncio
 async def test_fetchall_returns_all_rows_in_order(mock_warehouse):
     server, _route = mock_warehouse(n_chunks=3, rows_per_chunk=10)
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token")
@@ -202,6 +249,59 @@ async def test_fetchall_streamed_times_out_on_a_slow_chunk_download(mock_server)
     with pytest.raises(QueryTimeout):
         async for _ in cursor.fetchall_streamed(total_timeout_s=0.05):
             pass
+
+
+@pytest.mark.asyncio
+async def test_retrying_fetchall_after_a_cancelled_fetch_errors_instead_of_silently_truncating(
+    mock_server, chunk_bytes_builder
+):
+    """Regression test for a bug found in code review: the Rust core's
+    `ResultStream::fetch_at_least` pulls chunks off its reorder buffer into a
+    *local* decode list before recording them -- if the whole fetch is
+    dropped mid-flight (exactly what `fetchall_streamed`'s `total_timeout_s`
+    does via `QueryTimeout`, and what `asyncio.wait_for`/`task.cancel()` do
+    to any coroutine), whatever chunk was already pulled for that call is
+    lost, but the buffer's own bookkeeping has already moved past it. Before
+    the fix, retrying `fetchall()` on the *same* cursor after a timeout
+    silently returned a real but truncated row count (missing the lost
+    chunk) with no error at all. Two chunks, sequential fetch
+    (chunk_fetch_concurrency=1) so chunk 0 finishes and is pulled into the
+    lost decode list before chunk 1's still-in-flight fetch is what the
+    timeout actually catches."""
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(
+            json_body={
+                "statement_id": "stmt-slow2",
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": [{"chunk_index": 0, "row_count": 3}, {"chunk_index": 1, "row_count": 3}]},
+            }
+        )
+    )
+    server.get("/api/2.0/sql/statements/stmt-slow2/result/chunks/0").mock(
+        Response(json_body={"external_links": [{"external_link": f"{server.host}/_data/fast-chunk"}]})
+    )
+    server.get("/api/2.0/sql/statements/stmt-slow2/result/chunks/1").mock(
+        Response(json_body={"external_links": [{"external_link": f"{server.host}/_data/slow-chunk"}]})
+    )
+    server.get("/_data/fast-chunk").mock(Response(content=chunk_bytes_builder(0, 3)))
+
+    def _slow_chunk(_request: object) -> Response:
+        time.sleep(10)
+        raise AssertionError("unreachable -- test should time out first")
+
+    server.get("/_data/slow-chunk").mock(side_effect=_slow_chunk)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", chunk_fetch_concurrency=1)
+    cursor = Cursor(client)
+    await cursor.execute("SELECT * FROM whatever")
+
+    with pytest.raises(QueryTimeout):
+        async for _ in cursor.fetchall_streamed(total_timeout_s=0.2):
+            pass
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        await cursor.fetchall()
 
 
 @pytest.mark.asyncio

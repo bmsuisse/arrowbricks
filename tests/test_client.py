@@ -61,3 +61,8 @@ async def test_token_provider_sync_and_async(mock_warehouse):
 def test_requires_token_or_provider():
     with pytest.raises(ValueError, match="token"):
         DatabricksClient("http://fake", WAREHOUSE_ID)
+
+
+def test_rejects_both_token_and_provider():
+    with pytest.raises(ValueError, match="not both"):
+        DatabricksClient("http://fake", WAREHOUSE_ID, token="fake", token_provider=lambda: "fake")

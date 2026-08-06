@@ -40,6 +40,8 @@ class DatabricksClient:
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
+        if token and token_provider:
+            raise ValueError("DatabricksClient needs exactly one of `token` or `token_provider`, not both")
         # All of these (and warehouse_id) are only ever needed by the Rust
         # core's own Client below, which holds the authoritative copies --
         # nothing here reads them back, so they aren't kept on self too.

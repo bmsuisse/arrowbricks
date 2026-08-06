@@ -179,7 +179,7 @@ con.register("my_table", table)
 con.sql("SELECT count(*) FROM my_table").show()
 ```
 
-`ReplayableArrowChunk` works the same way for Arrow-IPC bytes you fetched and stored earlier (e.g. `client.execute_arrow_statement(...)`'s raw chunk bytes, cached in Redis/a file/wherever) -- DuckDB's registration path calls `__arrow_c_stream__` twice (a schema peek, then the actual scan), which is exactly what `ReplayableArrowChunk` exists to support:
+`ReplayableArrowChunk` works the same way for Arrow-IPC bytes you fetched and stored earlier (e.g. a raw chunk's bytes, cached in Redis/a file/wherever) -- DuckDB's registration path calls `__arrow_c_stream__` twice (a schema peek, then the actual scan), which is exactly what `ReplayableArrowChunk` exists to support:
 
 ```python
 from arrowbricks import ReplayableArrowChunk

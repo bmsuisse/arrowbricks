@@ -120,19 +120,32 @@ fn heartbeat_singleton(py: Python<'_>) -> PyResult<Py<PyHeartbeat>> {
 /// whatever this future awaits.
 ///
 /// `get_token` isn't only ever called from the outermost task
-/// `future_into_py` wraps -- `execute()`/`execute_arrow()` spawn chunk-fetch
+/// `future_into_py` wraps -- `execute()`'s `ResultSet` spawns chunk-fetch
 /// worker tasks (`fetch_chunks_with_backpressure`) that each call an
 /// authenticated endpoint (chunk-index resolution) too, and those inner
 /// `tokio::spawn`ed tasks don't inherit the outer task's asyncio-event-loop
 /// context. Calling `pyo3_async_runtimes::tokio::into_future` from one of
 /// them fails with "no running event loop" -- caught by testing an async
 /// `token_provider` against a multi-chunk result, not by the eager/sync
-/// cases alone. Fix: capture the current task's `TaskLocals` on first use
-/// (guaranteed to be the outer context, since `execute_arrow_statement`
-/// always needs a token before any worker is spawned) and cache it, so
-/// later calls -- including from worker tasks -- run inside
-/// `pyo3_async_runtimes::tokio::scope` with that same captured context
-/// instead of trying to discover one from whatever task happens to call.
+/// cases alone. Fix: capture the current task's `TaskLocals` (guaranteed to
+/// be the outer context, since `execute_arrow_statement` always needs a
+/// token before any worker is spawned) and cache it, so later calls --
+/// including from worker tasks -- run inside `pyo3_async_runtimes::tokio::scope`
+/// with that same captured context instead of trying to discover one from
+/// whatever task happens to call.
+///
+/// The capture re-runs on **every** call from a context that has its own
+/// loop, not just the first ever -- found in code review that caching only
+/// once-if-`None` pins the `DbClient` (which persists across many separate
+/// `execute()` calls, by design -- see its own doc comment) to whichever
+/// event loop happened to be running the very first time a token was ever
+/// requested. A second, later `asyncio.run()` (or any fresh loop -- a
+/// restarted worker, a new pytest-asyncio test) then scopes the awaited
+/// provider onto a loop that's already closed, failing with "Event loop is
+/// closed" instead of just using the current one. Re-capturing costs
+/// nothing extra from a worker task (its own attempt fails, same as before,
+/// falling through to whatever's cached) since the outer call for *this*
+/// statement already refreshed the cache before any worker was spawned.
 struct PyTokenProvider {
     callable: Py<PyAny>,
     locals: Mutex<Option<TaskLocals>>,
@@ -143,13 +156,15 @@ impl TokenProvider for PyTokenProvider {
         let callable = Python::attach(|py| self.callable.clone_ref(py));
         let locals = {
             let mut guard = self.locals.lock().unwrap();
-            if guard.is_none() {
-                // Best-effort: if this call isn't in a context with a
-                // running loop either, leave it None and fall through to
-                // the no-scope path below (matches today's behavior).
-                if let Ok(captured) = Python::attach(pyo3_async_runtimes::tokio::get_current_locals) {
-                    *guard = Some(captured);
-                }
+            // Unconditional, not `if guard.is_none()` -- see this struct's
+            // own doc comment for why caching only once pinned the client to
+            // its first-ever event loop. Best-effort: if this particular
+            // call isn't in a context with a running loop either (a worker
+            // task), leave whatever's already cached alone and fall through
+            // to using that (or the no-scope path below, if nothing has ever
+            // been captured at all).
+            if let Ok(captured) = Python::attach(pyo3_async_runtimes::tokio::get_current_locals) {
+                *guard = Some(captured);
             }
             guard.clone()
         };
@@ -187,8 +202,8 @@ impl TokenProvider for PyTokenProvider {
 }
 
 /// One Databricks SQL warehouse endpoint -- a persistent `reqwest::Client`
-/// (connection pool) reused across every `execute`/`execute_arrow` call,
-/// same reason Python's own `DatabricksClient` reuses one `httpx.AsyncClient`
+/// (connection pool) reused across every `execute` call, same reason
+/// Python's own `DatabricksClient` reuses one `httpx.AsyncClient`
 /// rather than building a fresh one per statement: repeated TCP+TLS
 /// handshakes are pure waste against the same host.
 #[pyclass(name = "Client")]
@@ -229,7 +244,12 @@ impl PyDbClient {
         compress_results: bool,
     ) -> PyResult<Self> {
         let db_client = match (token, token_provider) {
-            (Some(t), _) => DbClient::new(&host, &warehouse_id, &t),
+            (Some(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "Client needs exactly one of `token` or `token_provider`, not both",
+                ));
+            }
+            (Some(t), None) => DbClient::new(&host, &warehouse_id, &t),
             (None, Some(callable)) => {
                 let provider: Arc<dyn TokenProvider> = Arc::new(PyTokenProvider {
                     callable,
@@ -313,15 +333,16 @@ impl PyDbClient {
         })
     }
 
-    /// Chunk-at-a-time counterpart to `execute_arrow`, entirely backing
-    /// `stream_query_json`: yields `HEARTBEAT` while waiting on each
+    /// Chunk-at-a-time counterpart to `execute`+`fetchall_arrow`, entirely
+    /// backing `stream_query_json`: yields `HEARTBEAT` while waiting on each
     /// still-in-flight chunk (not just the initial statement wait), then a
     /// `list[str]` of NDJSON lines (one per row, arro3-`write_ndjson(
     /// explicit_nulls=True)`-compatible) per chunk as it arrives in logical
     /// order -- decode and JSON-encoding both happen here, so there's no
     /// further Python-side conversion step. Not async itself, same as
-    /// `execute_streamed` -- the returned iterator's `__anext__` does the
-    /// real work, including the initial submit/poll on its very first call.
+    /// `ResultSet.fetchall_arrow_streamed` -- the returned iterator's
+    /// `__anext__` does the real work, including the initial submit/poll on
+    /// its very first call.
     #[pyo3(signature = (statement, catalog=None, schema=None, parameters=None, total_timeout_s=None, non_finite_as_string=false))]
     #[allow(clippy::too_many_arguments)]
     fn stream_ndjson_lines(
