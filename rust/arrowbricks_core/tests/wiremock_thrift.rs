@@ -916,6 +916,19 @@ async fn thrift_pool_exhaustion_falls_back_to_a_throwaway_session_that_still_suc
         "every pooled session (up to MAX_SESSIONS_PER_KEY) plus the one throwaway session for the caller that \
          couldn't get a pooled slot must each open exactly one Thrift session"
     );
+    // `drive_thrift_fetch_loop`'s cleanup RPCs (CloseOperation, then a
+    // throwaway session's CloseSession) run on a detached `tokio::spawn`
+    // task that outlives `fetchall_arrow()` returning to the caller --
+    // that's the fix for the channel-close-blocks-on-cleanup bug (see
+    // `drive_thrift_fetch_loop`'s own doc comment). So the close call isn't
+    // guaranteed to have landed the instant every `h.await` above returns;
+    // poll briefly instead of asserting immediately.
+    for _ in 0..100 {
+        if close_session_calls.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert_eq!(
         close_session_calls.load(Ordering::SeqCst),
         1,
