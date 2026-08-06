@@ -1,0 +1,67 @@
+# Changelog
+
+## 3.0.0
+
+`protocol="thrift"` is now the default on `Client`/`DatabricksClient`/`connect()` --
+`protocol="sea"` remains fully supported as an explicit opt-in. Thrift was
+benchmarked directly against SEA on a real production warehouse and found
+never slower on any query shape tested, and roughly 2x faster for small
+queries (`TExecuteStatementReq`'s `getDirectResults` returns a small result
+inline in the same RPC that submits the statement, where SEA always needs a
+separate poll/fetch round trip).
+
+Flipping the default was blocked on test coverage, not the backend itself:
+virtually every existing test constructed a client without `protocol=` at all
+(SEA was always the implicit default), against mocks that only understood
+SEA's REST/JSON shape. Built real Thrift-speaking mock infrastructure in both
+languages first -- a custom `wiremock::Match` routing on the Thrift RPC name
+for Rust (every RPC hits one shared HTTP path), and Python mocks built on
+`databricks-sql-connector`'s own real, Thrift-compiler-generated
+`TCLIService` module (literal ground truth for this crate's own field IDs,
+not a second hand-rolled codec) -- then migrated every existing
+SEA-testing call site to explicit `protocol="sea"` before flipping the
+default. Verified against the real warehouse that `connect()` with no
+`protocol` argument at all genuinely resolves to Thrift (confirmed via the
+resulting `statement_id`'s format, hex with no dashes, distinct from SEA's
+UUID shape).
+
+Cross-checking against `databricks-sql-connector`'s real `ttypes.py` caught a
+genuine latent bug for free: `OperationStatusResp::read` mapped
+`displayMessage` to field 12, but the real field is 1281 -- fixed, with a
+regression test.
+
+A follow-up review pass found and fixed one more real gap: a link discovered
+before compression was authoritatively confirmed could still be queued for
+download against a stale guess (`resultSetMetadata` and `resultLinks` are
+independent optional fields on `TFetchResultsResp`, so nothing guaranteed a
+response carrying links also carried the metadata confirming their real
+compression). `run_thrift_fetch_loop` now buffers a batch's links locally
+until compression is confirmed at least once, instead of queueing
+immediately. Also consolidated `DbClient::new`'s internal protocol default to
+match the public-facing one, restored value-level assertions two truncation
+tests lost when `decode_chunk_item` stopped returning re-encoded bytes, and
+pinned `THRIFT_DIRECT_RESULTS_MAX_BYTES`'s exact value so an accidental
+revert can't silently reintroduce the round-trip regression it fixes.
+
+## 2.0.1
+
+`v2.0.0`'s Thrift backend was measurably slower than SEA for a large,
+multi-chunk result (~1.7x on a 500k-row real table) -- its `FetchResults`
+loop fully awaited one batch's downloads before ever asking for the next
+batch's links, capping effective download concurrency at whatever one
+`FetchResults` response happened to contain. Fixed by splitting
+`run_thrift_fetch_loop` into a sequential producer and a fixed pool of
+`chunk_fetch_concurrency` workers downloading concurrently across every
+batch discovered so far. Re-verified against the real warehouse: 500k rows,
+Thrift now 11.6s mean vs SEA's 11.9s (was 20.5s); 2M rows, 33.3s vs SEA's
+34.6s.
+
+## 2.0.0
+
+Opt-in Thrift/HiveServer2 backend (`protocol="thrift"`), closing the last
+speed gap against the official connector for small queries. SEA
+(`protocol="sea"`) remains the default in this release.
+
+## 1.5.0
+
+SEA session pooling closes the small-query latency gap.
