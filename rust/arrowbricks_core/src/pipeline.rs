@@ -377,32 +377,6 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// Submit -> (maybe poll) -> start background chunk fetching for the
-/// `protocol="thrift"` backend -- see `client::Protocol::Thrift`'s own doc
-/// comment for the wire-format background and why this is faster than SEA
-/// for small queries. Produces the exact same `ResultStream` shape as
-/// `execute_lazy`/`execute_lazy_prefer_inline` (same `fetchmany_arrow`/
-/// `fetchall_arrow`/`schema` contract, same `ReorderBuffer`/`decode_chunk`
-/// underneath), so `PyResultSet` and everything above it needs zero
-/// Thrift-specific handling.
-///
-/// Session handling mirrors the SEA session pool (`client::SessionPool`)
-/// exactly, with one necessary difference: Thrift's `TExecuteStatementReq`
-/// *requires* a `sessionHandle` (unlike SEA's optional `session_id`), so
-/// pool exhaustion/creation failure can't fall back to a session-less
-/// submission the way SEA does -- instead, a fresh, unpooled session is
-/// opened just for this one call and closed again immediately afterward.
-/// This is a genuinely necessary fallback, not a shortcut: without it, a
-/// caller who exhausts `MAX_SESSIONS_PER_KEY` concurrent statements would
-/// get a hard failure instead of the same "a bit more session-creation
-/// overhead, but still works" degradation SEA gets.
-///
-/// A session is only needed for the initial `ExecuteStatement` call --
-/// every subsequent RPC (`GetOperationStatus`/`FetchResults`/
-/// `CloseOperation`) addresses the operation directly by its own handle, so
-/// the session is checked back in (or closed, if it was a throwaway) right
-/// after `ExecuteStatement` returns, not held for the statement's whole
-/// lifetime the way one might expect from a "session" name.
 /// What's known once a Thrift statement has reached a terminal state and is
 /// ready to hand off to `drive_thrift_fetch_loop` -- a small bundle so
 /// `execute_lazy_thrift`'s own error paths (see its doc comment) have one
@@ -492,8 +466,31 @@ async fn submit_and_await_thrift_statement(
 }
 
 /// Submit -> (maybe poll) -> start background chunk fetching for the
-/// `protocol="thrift"` backend. See `client::Protocol::Thrift`'s own doc
-/// comment for the wire-format background.
+/// `protocol="thrift"` backend -- see `client::Protocol::Thrift`'s own doc
+/// comment for the wire-format background and why this is faster than SEA
+/// for small queries. Produces the exact same `ResultStream` shape as
+/// `execute_lazy`/`execute_lazy_prefer_inline` (same `fetchmany_arrow`/
+/// `fetchall_arrow`/`schema` contract, same `ReorderBuffer`/`decode_chunk`
+/// underneath), so `PyResultSet` and everything above it needs zero
+/// Thrift-specific handling.
+///
+/// Session handling mirrors the SEA session pool (`client::SessionPool`)
+/// exactly, with one necessary difference: Thrift's `TExecuteStatementReq`
+/// *requires* a `sessionHandle` (unlike SEA's optional `session_id`), so
+/// pool exhaustion/creation failure can't fall back to a session-less
+/// submission the way SEA does -- instead, a fresh, unpooled session is
+/// opened just for this one call and closed again immediately afterward.
+/// This is a genuinely necessary fallback, not a shortcut: without it, a
+/// caller who exhausts `MAX_SESSIONS_PER_KEY` concurrent statements would
+/// get a hard failure instead of the same "a bit more session-creation
+/// overhead, but still works" degradation SEA gets.
+///
+/// A session is only needed for the initial `ExecuteStatement` call --
+/// every subsequent RPC (`GetOperationStatus`/`FetchResults`/
+/// `CloseOperation`) addresses the operation directly by its own handle, so
+/// the session is checked back in (or closed, if it was a throwaway) right
+/// after `ExecuteStatement` returns, not held for the statement's whole
+/// lifetime the way one might expect from a "session" name.
 ///
 /// **A session checked out for this call (whether pooled or a throwaway,
 /// see `client::ThriftSessionPool`'s doc comment) must stay open until the
