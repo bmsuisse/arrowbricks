@@ -336,6 +336,67 @@ async fn lazy_pipeline_skips_the_extra_resolution_get_for_a_pre_resolved_chunk()
     assert_ids_in_order(&batches, 10);
 }
 
+/// Regression test for the same "server can over-deliver past its declared
+/// row count" behavior Thrift's resultLinks/arrowBatches paths already
+/// guard against (see AGENTS.md) -- found missing on this SEA path during a
+/// later review pass, not yet observed to actually trigger against a real
+/// warehouse (unlike the Thrift case, which was), but structurally
+/// identical and cheap to close defensively: the manifest declares 3 rows
+/// for chunk_index 0, the actual file backing it encodes 5. A single link
+/// per chunk_index is the common case where `fetch_chunks_with_backpressure`
+/// now passes the declared count through as `ChunkItem::truncate_to`.
+#[tokio::test]
+async fn lazy_pipeline_truncates_a_sea_chunk_that_overshoots_its_declared_row_count() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [{"chunk_index": 0, "row_count": 3}],
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+            "result": {
+                "external_links": [{"chunk_index": 0, "external_link": format!("{uri}/_data/chunk-0")}]
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0$"))
+        .respond_with(
+            // Declares 3 rows above, but the file itself has 5 -- must be
+            // sliced down to 3, not returned in full.
+            ResponseTemplate::new(200).set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 3,
+        "must keep exactly the manifest's declared row count, not however many rows the file actually encoded"
+    );
+    assert_ids_in_order(&batches, 3);
+}
+
 /// Regression test for a bug caught in code review before it shipped:
 /// `pre_resolved` was originally a plain `HashMap<i64, String>`, which keeps
 /// only the *last* entry when `result.external_links` has more than one for

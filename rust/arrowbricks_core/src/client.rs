@@ -1668,12 +1668,26 @@ impl DbClient {
                         };
                         match fetched {
                             Ok(blobs) => {
+                                // `meta.row_count` is the manifest's declared count for
+                                // the whole `chunk_index`, not per-blob -- safe to use as
+                                // `decode_chunk_item`'s truncation bound (same "server can
+                                // over-deliver past its declared count" protection Thrift's
+                                // resultLinks and arrowBatches paths both already have, see
+                                // AGENTS.md) only when there's exactly one blob, where
+                                // "the whole chunk's count" and "this blob's count" are the
+                                // same number. A chunk_index resolving to more than one
+                                // blob is a real but rare/defensive-coding case (see
+                                // `ChunkMeta::pre_resolved_links`'s own doc comment) whose
+                                // true per-blob row split isn't known here -- truncating
+                                // the first blob to the *whole* chunk's count would be
+                                // wrong, so those are left untruncated rather than guessed.
+                                let truncate_to = if blobs.len() == 1 { meta.row_count } else { None };
                                 for blob in blobs {
                                     let item = ChunkItem {
                                         blob,
                                         row_count: meta.row_count,
                                         chunk_index: meta.chunk_index,
-                                        truncate_to: None,
+                                        truncate_to,
                                     };
                                     if worker_tx.send(Ok(item)).await.is_err() {
                                         return Ok(());
