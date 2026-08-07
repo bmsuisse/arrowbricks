@@ -361,7 +361,22 @@ fn thrift_client(server: &MockServer) -> Arc<DbClient> {
     Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Thrift))
 }
 
+/// Every `execute_lazy_thrift` call opens with `ensure_warehouse_running`
+/// (a plain REST GET, shared with SEA -- see `DbClient::ensure_warehouse_running`'s
+/// own doc comment for why the Thrift path didn't have this until now)
+/// before it ever touches a session, so every test that submits a Thrift
+/// statement needs this mocked -- bundled into the near-universal
+/// "set up a session" helper below rather than repeated at every call site.
+async fn mount_warehouse_running(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"state": "RUNNING"})))
+        .mount(server)
+        .await;
+}
+
 async fn mount_open_session_always(server: &MockServer, guid: &'static [u8]) -> Arc<AtomicUsize> {
+    mount_warehouse_running(server).await;
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_mock = calls.clone();
     Mock::given(method("POST"))

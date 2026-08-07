@@ -523,6 +523,7 @@ pub async fn execute_lazy_thrift(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
+    client.ensure_warehouse_running().await?;
     let pooled = client.thrift_checkout_session(catalog, schema).await;
     let (session, from_pool) = match pooled {
         Some(s) => (s, true),

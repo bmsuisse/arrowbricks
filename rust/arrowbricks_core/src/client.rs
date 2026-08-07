@@ -980,7 +980,14 @@ impl DbClient {
             .map_err(join_error)?
     }
 
-    async fn ensure_warehouse_running(&self) -> Result<(), ApiError> {
+    /// Shared by both protocols -- plain REST against `/api/2.0/sql/warehouses/{id}`,
+    /// nothing SEA- or Thrift-specific about it. SEA's own `submit_and_poll`
+    /// has always called this; the Thrift path (`pipeline::execute_lazy_thrift`)
+    /// didn't, which meant a stopped warehouse got no proactive wake on
+    /// `protocol="thrift"` (now the default) -- statement submission would
+    /// eventually surface an error instead, with no `warehouse_start_timeout`
+    /// wait for it to come up first. Fixed by calling this from both.
+    pub(crate) async fn ensure_warehouse_running(&self) -> Result<(), ApiError> {
         {
             let confirmed = *self.warehouse_confirmed_running_at.lock().unwrap();
             if let Some(at) = confirmed {

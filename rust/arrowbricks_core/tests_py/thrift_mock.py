@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import http.server
 import io
+import json
 import re
 import threading
 from collections.abc import Callable
@@ -355,6 +356,19 @@ class ThriftMockServer:
                 self.wfile.write(resp_bytes)
 
             def do_GET(self) -> None:  # noqa: N802
+                # Every execute_lazy_thrift call opens with ensure_warehouse_running
+                # (a plain REST GET, shared with SEA -- see DbClient::ensure_warehouse_running's
+                # own doc comment) before it ever touches a session -- built in here,
+                # not test-registered, since every test that submits a Thrift
+                # statement needs it, same as tests/conftest.py's SEA mock_warehouse.
+                if self.path == f"/api/2.0/sql/warehouses/{outer.warehouse_id}":
+                    body = json.dumps({"state": "RUNNING"}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 for pattern, responder in outer._get_routes:
                     m = pattern.match(self.path)
                     if m:
