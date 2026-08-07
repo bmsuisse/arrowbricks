@@ -1,3 +1,9 @@
 <svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="arrowbricks logo">
-  <path fill="#9184d9" fill-rule="evenodd" d="M6 12 A6 6 0 0 1 12 6 H52 A6 6 0 0 1 58 12 V52 A6 6 0 0 1 52 58 H12 A6 6 0 0 1 6 52 Z M20 18 L34 32 L20 46 H30 L44 32 L30 18 Z"/>
+  <defs>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22D3EE"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#mark)" fill-rule="evenodd" d="M6 12 A6 6 0 0 1 12 6 H52 A6 6 0 0 1 58 12 V52 A6 6 0 0 1 52 58 H12 A6 6 0 0 1 6 52 Z M20 18 L34 32 L20 46 H30 L44 32 L30 18 Z"/>
 </svg>
