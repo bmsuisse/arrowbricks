@@ -821,7 +821,20 @@ async fn run_thrift_fetch_loop(
                         blob,
                         row_count: Some(row_count),
                         chunk_index,
-                        truncate_to: None,
+                        // Same "server rarely prepares the exact number of
+                        // rows requested" truncation `decode_chunk_item`
+                        // already does for `resultLinks` chunks (see its
+                        // own doc comment) -- inline `arrowBatches` are
+                        // subject to the identical server-side row
+                        // generation and can just as easily overshoot their
+                        // own declared `rowCount`. Confirmed missing, not
+                        // hypothetical: `SELECT id, name FROM dim_article
+                        // WHERE is_one_off = true LIMIT 5000` came back
+                        // with 5037 rows end to end via this inline path
+                        // before this fix, while the identical query via
+                        // SEA -- and via databricks-sql-connector on either
+                        // protocol -- came back with exactly 5000.
+                        truncate_to: Some(row_count),
                     };
                     chunk_index += 1;
                     if tx.send(Ok(item)).await.is_err() {

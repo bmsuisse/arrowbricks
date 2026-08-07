@@ -452,6 +452,65 @@ async fn thrift_small_query_returns_data_inline_with_zero_fetch_results_calls() 
     assert_ids_in_order(&batches, 3);
 }
 
+/// Regression test for a real bug found via a real-warehouse variety pass:
+/// `SELECT id, name FROM dim_article WHERE is_one_off = true LIMIT 5000`
+/// came back with 5037 rows end to end (databricks-sql-connector, on
+/// either protocol, correctly returned exactly 5000 for the identical
+/// SQL) -- the server encoded more rows into the inline arrow batch than
+/// its own declared `rowCount` said, and `run_thrift_fetch_loop` passed
+/// `truncate_to: None` for the inline `arrowBatches` path, only ever
+/// truncating `resultLinks` chunks to their declared count. Same server
+/// behavior, same fix, just missing on this second path.
+#[tokio::test]
+async fn thrift_inline_arrow_batch_is_truncated_to_its_declared_row_count() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+
+    let schema = test_schema();
+    let (schema_bytes, batch_bytes) = build_schema_and_batch_messages(&schema, &[(0, 5)]);
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(
+                b"op-truncate",
+                b"opsecret-truncate",
+                Some(DirectResultsSpec {
+                    operation_state: Some(operation_state::FINISHED),
+                    operation_error: None,
+                    metadata: Some((false, Some(schema_bytes))),
+                    fetch: Some(FetchSpec {
+                        has_more_rows: false,
+                        // The wire batch actually encodes 5 rows (ids
+                        // 0..5), but its own declared `rowCount` says 3 --
+                        // exactly the "server over-delivers" shape found
+                        // against the real warehouse.
+                        arrow_batches: vec![(batch_bytes[0].clone(), 3)],
+                        ..Default::default()
+                    }),
+                }),
+            ),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 3,
+        "must keep exactly the declared row count, not however many rows the wire batch actually encoded"
+    );
+    assert_ids_in_order(&batches, 3);
+}
+
 // ============================================================================
 // Happy path: multi-batch query, several sequential `FetchResults` calls,
 // `resultLinks` in each, downloaded concurrently (out-of-order completion),
@@ -1035,4 +1094,223 @@ async fn thrift_close_all_sessions_closes_every_idle_pooled_session() {
         1,
         "the idle pooled session must be closed exactly once"
     );
+}
+
+// ============================================================================
+// `DbClient::fetch_link_bytes_split`/`download_slots` -- the parallel-Range
+// cloud-fetch download. Only reachable end-to-end (both are `pub(crate)`),
+// so these mock a blob-storage GET that actually honors `Range` instead of
+// the existing tests' plain 200-ignoring-Range stand-in.
+// ============================================================================
+
+/// Parses a `Range: bytes=start-end` request header, same syntax
+/// `fetch_link_bytes_split` itself only ever sends.
+fn parse_range(req: &Request) -> Option<(u64, u64)> {
+    let raw = req.headers.get("range")?.to_str().ok()?;
+    let (start, end) = raw.strip_prefix("bytes=")?.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
+}
+
+/// Mounts a blob-storage GET that genuinely honors `Range`: a request
+/// carrying one gets a `206 Partial Content` with a real `Content-Range`
+/// header and just that byte slice; a request with none (nothing exercises
+/// this today, but it's the documented fallback) gets the whole body as a
+/// plain `200`. Returns the number of GET requests actually received, so a
+/// test can prove the download really did split into more than one.
+async fn mount_ranged_blob(server: &MockServer, path_str: &'static str, body: Vec<u8>) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_mock = calls.clone();
+    let total = body.len() as u64;
+    Mock::given(method("GET"))
+        .and(path(path_str))
+        .respond_with(move |req: &Request| {
+            calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            match parse_range(req) {
+                Some((start, end)) => {
+                    let end = end.min(total - 1);
+                    let slice = body[start as usize..=end as usize].to_vec();
+                    ResponseTemplate::new(206)
+                        .insert_header("Content-Range", format!("bytes {start}-{end}/{total}"))
+                        .set_body_raw(slice, "application/octet-stream")
+                }
+                None => ResponseTemplate::new(200).set_body_raw(body.clone(), "application/octet-stream"),
+            }
+        })
+        .mount(server)
+        .await;
+    calls
+}
+
+/// Mounts the fixed Thrift-side scaffolding a single-resultLink query
+/// needs (`ExecuteStatement` returning direct results with one link,
+/// `GetOperationStatus` reporting `FINISHED`, `CloseOperation` ok) so each
+/// test below only has to mount its own blob-storage GET.
+async fn mount_single_link_statement(server: &MockServer, link_path: &'static str, row_count: i64) {
+    mount_open_session_always(server, b"sess").await;
+    mount_close_operation_ok(server).await;
+    let link_url = format!("{}{link_path}", server.uri());
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(move |_req: &Request| {
+            ResponseTemplate::new(200).set_body_raw(
+                build_execute_statement_resp(
+                    b"op-split",
+                    b"opsecret-split",
+                    Some(DirectResultsSpec {
+                        operation_state: Some(operation_state::FINISHED),
+                        operation_error: None,
+                        metadata: Some((false, None)),
+                        fetch: Some(FetchSpec {
+                            has_more_rows: false,
+                            arrow_batches: vec![],
+                            result_links: vec![(link_url.clone(), row_count)],
+                            metadata: Some((false, None)),
+                            status_error: None,
+                        }),
+                    }),
+                ),
+                "application/x-thrift",
+            )
+        })
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn thrift_single_link_downloads_via_parallel_range_requests() {
+    let server = MockServer::start().await;
+    // 60,000 rows of `id: i64, label: "row_{i}"` comfortably clears the
+    // 1MiB part size `fetch_link_bytes_budgeted` uses, so a lone in-flight
+    // link (the only query in flight -- the full `download_slots` budget
+    // is free) must split into more than one request to cover it.
+    let schema = test_schema();
+    let body = build_full_stream_bytes(&schema, 0, 60_000);
+    assert!(body.len() > 1 << 20, "test body must exceed the 1MiB part size to prove splitting");
+
+    mount_single_link_statement(&server, "/_data/big-link", 60_000).await;
+    let get_calls = mount_ranged_blob(&server, "/_data/big-link", body).await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 60_000, "every row must survive a split-and-reassembled download");
+    assert_ids_in_order(&batches, 60_000);
+    assert!(
+        get_calls.load(Ordering::SeqCst) > 1,
+        "a lone in-flight link with the full download_slots budget available must actually split \
+         into more than one Range request, not silently fall back to one"
+    );
+}
+
+#[tokio::test]
+async fn thrift_split_download_fails_loud_on_unparseable_content_range() {
+    let server = MockServer::start().await;
+    mount_single_link_statement(&server, "/_data/bad-range", 60_000).await;
+
+    // Answers 206 (Range honored) but with a Content-Range header this
+    // crate can't parse -- must be a hard failure, not a silent return of
+    // just the first probed part.
+    Mock::given(method("GET"))
+        .and(path("/_data/bad-range"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("Content-Range", "not-a-real-content-range-header")
+                .set_body_raw(vec![0u8; 1 << 20], "application/octet-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let err = stream.fetchall_arrow().await.expect_err(
+        "a 206 with an unparseable Content-Range must fail loudly, not silently truncate the result",
+    );
+    assert!(
+        err.message.contains("refusing to silently return a truncated file"),
+        "got a different error than expected: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn thrift_split_download_fails_on_assembled_length_mismatch() {
+    let server = MockServer::start().await;
+    mount_single_link_statement(&server, "/_data/short-parts", 60_000).await;
+
+    // Every part -- including the probe -- honestly declares a 5MiB total
+    // via Content-Range, but actually returns far fewer bytes than its own
+    // declared range covers (a misbehaving server). The declared total
+    // guarantees more than one part gets requested; every part coming up
+    // short must be caught by the final length check, not silently
+    // accepted as a truncated-but-otherwise-fine result.
+    const DECLARED_TOTAL: u64 = 5 * (1 << 20);
+    Mock::given(method("GET"))
+        .and(path("/_data/short-parts"))
+        .respond_with(move |req: &Request| {
+            let (start, _end) = parse_range(req).expect("client always sends Range on this path");
+            let end = (start + 9).min(DECLARED_TOTAL - 1);
+            ResponseTemplate::new(206)
+                .insert_header("Content-Range", format!("bytes {start}-{end}/{DECLARED_TOTAL}"))
+                .set_body_raw(vec![0u8; 10], "application/octet-stream")
+        })
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let err = stream
+        .fetchall_arrow()
+        .await
+        .expect_err("a server that under-delivers every part must fail loudly, not return a truncated blob");
+    assert!(
+        err.message.contains("expected"),
+        "got a different error than expected: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn thrift_concurrent_single_link_queries_stay_correct_under_split_contention() {
+    let server = MockServer::start().await;
+    let schema = test_schema();
+    let body = build_full_stream_bytes(&schema, 0, 60_000);
+    mount_single_link_statement(&server, "/_data/concurrent-link", 60_000).await;
+    mount_ranged_blob(&server, "/_data/concurrent-link", body).await;
+
+    let client = thrift_client(&server);
+    // 20 single-link queries fired at once all compete for the same
+    // `download_slots` budget (sized to `chunk_fetch_concurrency`, default
+    // 64) -- proves the budget accounting degrades to "some queries get a
+    // smaller split, none deadlock or corrupt data" under real contention,
+    // not just in the uncontended single-query case above.
+    let handles: Vec<_> = (0..20)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+                    .await
+                    .unwrap();
+                stream.fetchall_arrow().await.unwrap()
+            })
+        })
+        .collect();
+
+    for h in handles {
+        let (batches, _schema) = tokio::time::timeout(std::time::Duration::from_secs(30), h)
+            .await
+            .expect("must not deadlock or hang under concurrent split-download contention")
+            .unwrap();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 60_000);
+        assert_ids_in_order(&batches, 60_000);
+    }
 }
