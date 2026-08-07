@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.0.1
+
+Three follow-up fixes found via a deliberate real-warehouse audit pass and
+a variety battery covering arrays, structs, maps, VARIANT, decimals,
+timestamps, GROUP BY, and DISTINCT across both protocols:
+
+- **Fix**: `protocol="thrift"` (the default) now calls `ensure_warehouse_running`
+  before submitting a statement, same as `protocol="sea"` has always done --
+  a stopped warehouse previously got no proactive wake-up on the Thrift path.
+- **Fix**: SEA's own chunk fetch (`fetch_chunks_with_backpressure`) and the
+  JSON_ARRAY path (`stream_query_json`, `decode_json_chunk`) now truncate a
+  chunk to its manifest-declared row count, closing the same
+  "server can over-deliver past its declared count" gap already fixed for
+  Thrift in 3.0.0 (`SELECT ... LIMIT n` returning slightly more than `n`
+  rows). Not observed to actually trigger on SEA/JSON in this session's
+  testing, unlike the Thrift case -- fixed defensively since the gap was
+  real and the fix costs nothing when it doesn't apply.
+
+See AGENTS.md's design-invariant entries for the full detail, including a
+real A/B that briefly looked like a performance regression from these
+fixes and turned out to be network noise (documented so it isn't mistaken
+for signal again).
+
 ## 3.0.0
 
 `protocol="thrift"` is now the default on `Client`/`DatabricksClient`/`connect()` --
