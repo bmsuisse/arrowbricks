@@ -1186,7 +1186,10 @@ async fn thrift_single_link_downloads_via_parallel_range_requests() {
     // is free) must split into more than one request to cover it.
     let schema = test_schema();
     let body = build_full_stream_bytes(&schema, 0, 60_000);
-    assert!(body.len() > 1 << 20, "test body must exceed the 1MiB part size to prove splitting");
+    assert!(
+        body.len() > 1 << 20,
+        "test body must exceed the 1MiB part size to prove splitting"
+    );
 
     mount_single_link_statement(&server, "/_data/big-link", 60_000).await;
     let get_calls = mount_ranged_blob(&server, "/_data/big-link", body).await;
@@ -1229,9 +1232,10 @@ async fn thrift_split_download_fails_loud_on_unparseable_content_range() {
     let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
         .await
         .unwrap();
-    let err = stream.fetchall_arrow().await.expect_err(
-        "a 206 with an unparseable Content-Range must fail loudly, not silently truncate the result",
-    );
+    let err = stream
+        .fetchall_arrow()
+        .await
+        .expect_err("a 206 with an unparseable Content-Range must fail loudly, not silently truncate the result");
     assert!(
         err.message.contains("refusing to silently return a truncated file"),
         "got a different error than expected: {}",

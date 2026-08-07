@@ -835,7 +835,11 @@ impl DbClient {
     /// is exactly the case a single-chunk result hits and where a lone TCP
     /// stream leaves most of the link idle. See `download_slots`' own doc
     /// comment for the measured win and why the large-result case is safe.
-    pub(crate) async fn fetch_link_bytes_budgeted(self: &Arc<Self>, url: &str, compressed: bool) -> Result<Bytes, ApiError> {
+    pub(crate) async fn fetch_link_bytes_budgeted(
+        self: &Arc<Self>,
+        url: &str,
+        compressed: bool,
+    ) -> Result<Bytes, ApiError> {
         // One permit per download is mandatory; the worker pool already
         // bounds concurrent links to `chunk_fetch_concurrency`, so this
         // never blocks in practice -- it just makes the budget accounting
@@ -851,7 +855,8 @@ impl DbClient {
         if parts <= 1 {
             return self.fetch_link_bytes(url, compressed).await;
         }
-        self.fetch_link_bytes_split(url, compressed, 1 << 20, parts as u64).await
+        self.fetch_link_bytes_split(url, compressed, 1 << 20, parts as u64)
+            .await
     }
 
     /// Downloads one cloud-fetch link as concurrent HTTP Range requests of
