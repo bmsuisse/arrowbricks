@@ -1388,11 +1388,25 @@ pub struct JsonResult {
 /// Casting by the manifest's column type_name, if wanted, is left to the
 /// caller -- same pass-through the Python original leaves to its own
 /// caller.
-fn decode_json_chunk(blob: &Bytes) -> Result<Vec<Vec<Option<String>>>, ApiError> {
-    serde_json::from_slice(&blob[..]).map_err(|e| ApiError {
+///
+/// `truncate_to`, if `Some(n)` and the chunk decodes to more than `n` rows,
+/// slices to exactly the first `n` -- the JSON_ARRAY counterpart to
+/// `decode_chunk_item`'s Arrow-IPC truncation (see its own doc comment and
+/// `fetch_chunks_with_backpressure`'s `truncate_to` wiring): a JSON_ARRAY
+/// chunk is delivered through the exact same cloud-fetch blob-storage
+/// mechanism as an Arrow one, just decoded differently, so the same
+/// "server can over-deliver past its declared row count" risk applies here
+/// too. No batch-boundary complexity to worry about here (unlike the Arrow
+/// case) -- rows are already a flat `Vec`, so this is a plain `truncate`.
+fn decode_json_chunk(blob: &Bytes, truncate_to: Option<i64>) -> Result<Vec<Vec<Option<String>>>, ApiError> {
+    let mut rows: Vec<Vec<Option<String>>> = serde_json::from_slice(&blob[..]).map_err(|e| ApiError {
         message: format!("bad JSON_ARRAY chunk: {e}"),
         transient: false,
-    })
+    })?;
+    if let Some(n) = truncate_to.filter(|n| *n > 0) {
+        rows.truncate(n as usize);
+    }
+    Ok(rows)
 }
 
 /// JSON_ARRAY counterpart to `run_pipeline` -- same submit/poll/fetch/
@@ -1419,7 +1433,8 @@ pub async fn run_json_pipeline(
 
     let mut decode_handles = Vec::with_capacity(num_chunks);
     while let Some(item) = reorder.next().await? {
-        decode_handles.push(tokio::task::spawn_blocking(move || decode_json_chunk(&item.blob)));
+        let truncate_to = item.truncate_to;
+        decode_handles.push(tokio::task::spawn_blocking(move || decode_json_chunk(&item.blob, truncate_to)));
     }
 
     let mut rows = Vec::new();

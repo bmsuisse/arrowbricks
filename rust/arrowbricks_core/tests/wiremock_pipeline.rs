@@ -800,6 +800,68 @@ async fn json_pipeline_happy_path() {
     assert_eq!(ids, (0..15).collect::<Vec<_>>());
 }
 
+/// Regression test for the same "server can over-deliver past its declared
+/// row count" behavior as the Arrow-format entries in this file and in
+/// AGENTS.md -- a JSON_ARRAY chunk is delivered through the exact same
+/// cloud-fetch blob-storage mechanism as an Arrow one, just decoded
+/// differently, so the same risk applies here. The manifest declares 3 rows
+/// for chunk_index 0, the actual file backing it has 5.
+#[tokio::test]
+async fn json_pipeline_truncates_a_chunk_that_overshoots_its_declared_row_count() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": [{"chunk_index": 0, "row_count": 3}],
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+            "result": {
+                "external_links": [{"chunk_index": 0, "external_link": format!("{uri}/_data/chunk-0")}]
+            },
+        })))
+        .mount(&server)
+        .await;
+
+    // Declares 3 rows above, but the file itself has 5.
+    let rows: Vec<_> = (0..5).map(|id: i64| json!([id.to_string(), format!("row_{id}")])).collect();
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/chunk-0$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rows))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    let result = run_json_pipeline(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.rows.len(),
+        3,
+        "must keep exactly the manifest's declared row count, not however many rows the file actually encoded"
+    );
+    let ids: Vec<i64> = result
+        .rows
+        .iter()
+        .map(|r| r[0].as_ref().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(ids, vec![0, 1, 2]);
+}
+
 #[tokio::test]
 async fn json_pipeline_survives_reverse_arrival() {
     let server = MockServer::start().await;
