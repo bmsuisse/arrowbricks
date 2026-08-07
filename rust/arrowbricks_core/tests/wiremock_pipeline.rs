@@ -837,7 +837,9 @@ async fn json_pipeline_truncates_a_chunk_that_overshoots_its_declared_row_count(
         .await;
 
     // Declares 3 rows above, but the file itself has 5.
-    let rows: Vec<_> = (0..5).map(|id: i64| json!([id.to_string(), format!("row_{id}")])).collect();
+    let rows: Vec<_> = (0..5)
+        .map(|id: i64| json!([id.to_string(), format!("row_{id}")]))
+        .collect();
     Mock::given(method("GET"))
         .and(path_regex(r"^/_data/chunk-0$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(rows))

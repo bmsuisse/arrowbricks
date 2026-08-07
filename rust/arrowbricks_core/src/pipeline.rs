@@ -1434,7 +1434,9 @@ pub async fn run_json_pipeline(
     let mut decode_handles = Vec::with_capacity(num_chunks);
     while let Some(item) = reorder.next().await? {
         let truncate_to = item.truncate_to;
-        decode_handles.push(tokio::task::spawn_blocking(move || decode_json_chunk(&item.blob, truncate_to)));
+        decode_handles.push(tokio::task::spawn_blocking(move || {
+            decode_json_chunk(&item.blob, truncate_to)
+        }));
     }
 
     let mut rows = Vec::new();
