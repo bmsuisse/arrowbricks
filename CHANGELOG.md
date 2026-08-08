@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.0.3
+
+Shipped `.so` shrunk from 13.1 MiB to 9.1 MiB (~31%), no measured speed cost -- each step re-measured before/after against a real workspace and/or a local CPU-bound decode benchmark (isolates decode cost from network noise):
+
+- Dropped reqwest's `http2` feature -- every request this crate makes is an independent HTTPS call from its own connection pool, nothing gains from HTTP/2 multiplexing, and reqwest/hyper transparently fall back to HTTP/1.1. Confirmed both Thrift and SEA protocols still work end to end.
+- `opt-level="s"` instead of the implicit default (`3`) -- a 400k-row/41-column local decode averaged 35.4ms at `3` vs 34.3ms at `"s"` (noise-level, not a real cost) vs 70.7ms at `"z"` (a real ~2x regression, rejected). This reverses a documented earlier decision that had never actually been measured against `"s"`/`"z"`.
+- Switched the TLS crypto backend from `aws-lc-rs` to `ring` (reqwest's `rustls` feature is hardcoded to `aws-lc-rs`, so this needed `rustls-no-provider` plus two direct `rustls`/`hyper-rustls` deps with their own `ring` feature, and installing it as the default provider from `DbClient`'s own constructor). Verified real TLS handshakes and data transfer against a real workspace on both protocols; confirmed via `cargo tree -i aws-lc-sys` that it's fully gone from the dependency graph.
+- Considered and rejected switching HTTP client libraries entirely (raw `hyper`, `ureq`): measured reqwest's own per-request overhead at ~54us (release build, local loopback) -- 1000x+ smaller than typical real-warehouse request latency, so there was no meaningful upside to chase, only risk to `client.rs`.
+
+Also: dependencies bumped to latest within existing semver ranges (`arrow`/`arrow-json` 59.1.0->59.2.0, `pyo3` 0.29.1->0.29.2, several transitive patch bumps), and `lz4_flex` bumped 0.11->0.14 explicitly -- that range includes real security fixes for invalid-memory-reads decompressing untrusted input (0.12.0/0.12.1/0.13.0), directly relevant since this crate decompresses cloud-fetch data received over the network.
+
+README now has a `Benchmarks` section with real, reproducible numbers (speed, memory, package size, the exact warehouse tier tested against) and a script (`examples/benchmark_vs_connector.py`) anyone can rerun against their own workspace.
+
+No behavior change -- all 96 Rust tests and 81 Python tests pass; real-warehouse benchmark still shows arrowbricks ~1.8-2.3x faster than `databricks-sql-connector` across repeated runs.
+
 ## 3.0.2
 
 - **Fix**: a Thrift-protocol query returning zero rows (e.g. a `WHERE 1=0`
