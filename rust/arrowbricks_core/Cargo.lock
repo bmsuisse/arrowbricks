@@ -1595,7 +1595,6 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "http-body-util",

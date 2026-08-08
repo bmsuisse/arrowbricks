@@ -204,15 +204,15 @@ Measured against a real Databricks SQL warehouse (Azure Databricks, `2X-Small` *
 
 | | avg | stdev | range | peak RSS during the query |
 |---|---|---|---|---|
-| `databricks-sql-connector` | 0.98s | 0.12s | 0.84s - 1.07s | 16 MB |
-| arrowbricks | 0.52s | 0.07s | 0.44s - 0.57s | 16 MB |
+| `databricks-sql-connector` | 1.05s | 0.17s | 0.92s - 1.24s | 16 MB |
+| arrowbricks | 0.53s | 0.05s | 0.49s - 0.58s | 16 MB |
 
-**arrowbricks: ~1.9x faster**, same order-of-magnitude peak memory *for this query size* -- at 200k rows the Python interpreter's own baseline footprint dominates over the actual result data for both libraries, so this particular number doesn't show a difference. The real memory/footprint difference is in what gets installed, not what a single small query allocates:
+**arrowbricks: ~2x faster**, same order-of-magnitude peak memory *for this query size* -- at 200k rows the Python interpreter's own baseline footprint dominates over the actual result data for both libraries, so this particular number doesn't show a difference. The real memory/footprint difference is in what gets installed, not what a single small query allocates:
 
 | | installed size (package + all required deps) |
 |---|---|
 | `databricks-sql-connector` | 71 MB (pulls in `pandas`, `numpy`, `thrift`, `oauthlib`, `lz4`, `requests`, `urllib3`, `openpyxl`, ... as hard dependencies -- `pandas`+`numpy` alone are 61 MB of that) |
-| arrowbricks | 13 MB (zero required runtime dependencies -- the whole thing is one compiled Rust extension) |
+| arrowbricks | 10 MB (zero required runtime dependencies -- the whole thing is one compiled Rust extension, built with `opt-level="s"` and no unused HTTP/2 support -- see `rust/arrowbricks_core/Cargo.toml`'s own `[profile.release]` comment for the measurements behind that choice) |
 
 Run it yourself: [`examples/benchmark_vs_connector.py`](examples/benchmark_vs_connector.py) (needs both packages installed: `pip install arrowbricks databricks-sql-connector`). Reads `DATABRICKS_HOST`/`DATABRICKS_WAREHOUSE_ID`/`DATABRICKS_TOKEN` from the environment or a `.env` file (never commit one with a real token in it) and runs each library in its own subprocess so peak memory reflects that library alone:
 

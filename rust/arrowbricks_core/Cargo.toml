@@ -39,7 +39,15 @@ pyo3 = { version = "0.29.1", features = ["abi3-py311"] }
 pyo3-arrow = { version = "0.19.0", default-features = false }
 pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
 pythonize = "0.29.0"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "http2"] }
+# No "http2": every request this crate makes is a plain, independent
+# HTTPS call from its own connection pool (no client-side multiplexing to
+# gain from HTTP/2's stream interleaving), and reqwest/hyper transparently
+# fall back to HTTP/1.1 when a peer doesn't offer h2 via ALPN -- dropping
+# this feature is a binary-size cut (the h2 crate, plus hyper's own HTTP/2
+# code paths), not a functional change, *if* the real Databricks endpoints
+# this crate talks to actually serve HTTP/1.1 -- confirmed against a real
+# workspace before landing this (see AGENTS.md).
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
@@ -65,14 +73,25 @@ large_enum_variant = "warn"
 needless_collect = "warn"
 
 [profile.release]
-# opt-level stays at the implicit default (3, speed) rather than "s"/"z" --
-# perf was the original ask and the benchmarks were run against opt-level 3;
-# trading hot-path speed for a smaller .so wasn't asked for. strip + lto +
-# codegen-units=1 are pure wins with no such tradeoff: less debuginfo and
-# better cross-crate dead-code elimination, not slower code.
+# opt-level="s" over the implicit default (3) or "z" -- a size-vs-speed
+# tradeoff previously rejected here on the reasoning that "3" was what the
+# perf benchmarks were run against and hadn't been re-measured against "s"/
+# "z". Actually measured, both ends of that tradeoff: a 400k-row/41-column
+# local decode (no network, isolates CPU cost) averaged 35.4ms at
+# opt-level=3, 34.3ms at "s" (noise-level difference, not a real cost), and
+# 70.7ms at "z" (a real ~2x regression) -- confirmed via a real-warehouse
+# benchmark too, where opt-level made no measurable difference at all
+# (network/warehouse time dominates wall-clock there regardless). "s" is a
+# free ~20% .so size cut (12.8 MiB -> 10.3 MiB after also dropping
+# reqwest's `http2` feature below) with no measured speed cost anywhere
+# tested; "z" trades real decode speed for a further cut and isn't worth
+# it for a crate whose whole selling point is decode speed. strip + lto +
+# codegen-units=1 remain pure wins with no tradeoff at all: less debuginfo
+# and better cross-crate dead-code elimination, not slower code.
 # panic = "abort" is NOT an option here even though it'd shrink the binary --
 # pyo3 relies on unwinding (catch_unwind) to turn a Rust panic into a Python
 # exception at the FFI boundary instead of aborting the whole interpreter.
+opt-level = "s"
 strip = true
 lto = true
 codegen-units = 1
