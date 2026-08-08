@@ -198,6 +198,33 @@ con.sql("SELECT * FROM my_table WHERE id = 42").show()
 
 The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility. If you just want a query result as Arrow/JSON in your own async app, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies. arrowbricks speaks the same wire protocols (Thrift by default, or the REST Statement Execution API via `protocol="sea"`) with a hand-rolled Rust implementation instead, and zero required dependencies of its own. The `Cursor` API is deliberately shaped like the official driver's so switching between them is mostly a constructor change, but arrowbricks is async throughout (`execute`, `fetchone`, etc. are all coroutines) -- there's no sync escape hatch.
 
+## Benchmarks
+
+Measured against a real Databricks SQL warehouse (Azure Databricks, `2X-Small` **Pro** serverless warehouse, Photon on, 1-4 auto-scaling clusters -- the smallest/cheapest warehouse tier, deliberately: a bigger warehouse would narrow the gap by making the query itself slower and the client-side overhead this compares proportionally smaller). Query: `SELECT id, id * 2 AS doubled, CAST(id AS STRING) AS label FROM range(200000)` (200k rows, 3 columns), 3 timed runs after 1 discarded warm-up run, one connection reused per library:
+
+| | avg | stdev | range | peak RSS during the query |
+|---|---|---|---|---|
+| `databricks-sql-connector` | 0.98s | 0.12s | 0.84s - 1.07s | 16 MB |
+| arrowbricks | 0.52s | 0.07s | 0.44s - 0.57s | 16 MB |
+
+**arrowbricks: ~1.9x faster**, same order-of-magnitude peak memory *for this query size* -- at 200k rows the Python interpreter's own baseline footprint dominates over the actual result data for both libraries, so this particular number doesn't show a difference. The real memory/footprint difference is in what gets installed, not what a single small query allocates:
+
+| | installed size (package + all required deps) |
+|---|---|
+| `databricks-sql-connector` | 71 MB (pulls in `pandas`, `numpy`, `thrift`, `oauthlib`, `lz4`, `requests`, `urllib3`, `openpyxl`, ... as hard dependencies -- `pandas`+`numpy` alone are 61 MB of that) |
+| arrowbricks | 13 MB (zero required runtime dependencies -- the whole thing is one compiled Rust extension) |
+
+Run it yourself: [`examples/benchmark_vs_connector.py`](examples/benchmark_vs_connector.py) (needs both packages installed: `pip install arrowbricks databricks-sql-connector`). Reads `DATABRICKS_HOST`/`DATABRICKS_WAREHOUSE_ID`/`DATABRICKS_TOKEN` from the environment or a `.env` file (never commit one with a real token in it) and runs each library in its own subprocess so peak memory reflects that library alone:
+
+```bash
+DATABRICKS_HOST=adb-1234567890.1.azuredatabricks.net \
+DATABRICKS_WAREHOUSE_ID=abcd1234efgh5678 \
+DATABRICKS_TOKEN=dapiXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+python examples/benchmark_vs_connector.py
+```
+
+`BENCHMARK_SQL` overrides the query, `BENCHMARK_RUNS` (default 3) controls how many timed runs to average.
+
 ## A note on Arrow IPC compression
 
 `write_ipc_stream` (and everything in this package that serializes Arrow-IPC bytes) always writes **uncompressed** bodies. A compressed body (arro3's own default is `compression="LZ4"`) is transparently decompressed by some Arrow readers (e.g. DuckDB's) but not necessarily by every other Arrow IPC reader -- notably, `duckdb-wasm`'s browser-side decoder silently fails to parse LZ4-compressed bodies. Since arrowbricks' bytes might end up read by anything, plain uncompressed is the safe default.
