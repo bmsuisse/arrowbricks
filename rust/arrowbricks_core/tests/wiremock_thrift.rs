@@ -978,7 +978,7 @@ async fn thrift_lz4_compressed_inline_direct_results_batch_is_decompressed() {
 }
 
 // ============================================================================
-// Thrift session pool (`client::ThriftSessionPool`/`thrift_checkout_session`/
+// Thrift session pool (`client::Pool<thrift::SessionHandle>`/`thrift_checkout_session`/
 // `thrift_checkin_session`) -- mirrors the SEA session pool tests in
 // `wiremock_pipeline.rs` (`session_is_created_once_and_reused_across_
 // sequential_statements`, `concurrent_statements_on_the_same_key_each_get_

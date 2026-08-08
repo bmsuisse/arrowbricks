@@ -511,15 +511,13 @@ pub struct DbClient {
     compress_results: bool,
     session_pool: Pool<String>,
     pub protocol: Protocol,
-    /// Same checkout/checkin shape and the exact same two hard constraints
-    /// as `session_pool` above (a session is created *for* one (catalog,
-    /// schema) pair and can't be redirected; Thrift's session model is
-    /// *mandatory* per statement, unlike SEA's optional `session_id`, and
-    /// this crate has not independently confirmed whether concurrent
-    /// statements on one Thrift session are safe against a real workspace
-    /// the way the SEA crash was -- so this pool exists defensively,
-    /// following the same proven-safe pattern regardless of whether the
-    /// analogous crash reproduces here). Unlike SEA, there is no
+    /// Same checkout/checkin shape as `session_pool` above, plus: Thrift's
+    /// session model is *mandatory* per statement, unlike SEA's optional
+    /// `session_id`, and this crate has not independently confirmed whether
+    /// concurrent statements on one Thrift session are safe against a real
+    /// workspace the way the SEA crash was -- so this pool exists
+    /// defensively, following the same proven-safe pattern regardless of
+    /// whether the analogous crash reproduces here. Unlike SEA, there is no
     /// "sessionless" fallback available at all -- `TExecuteStatementReq.
     /// sessionHandle` is required by the protocol -- so a pool-exhaustion/
     /// creation-failure `None` from `thrift_checkout_session` means the
@@ -625,9 +623,6 @@ const THRIFT_DIRECT_RESULTS_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 /// still throws away a perfectly good session), but guarantees a session
 /// that might be in the same bad state behind the SparkSession-null crash
 /// above is never handed to a second caller.
-/// A session pool key -- `(catalog, schema)`, named since a session is
-/// created *for* one such pair and can't be redirected to another (see
-/// `SessionPool`/`ThriftSessionPool`'s own doc comments).
 type SessionKey = (Option<String>, Option<String>);
 
 /// Generic checkout/checkin pool keyed by (catalog, schema) -- shared by
@@ -684,6 +679,16 @@ impl<T> Pool<T> {
 
     fn put(&self, key: SessionKey, item: T) {
         self.idle.lock().unwrap().entry(key).or_default().push(item);
+    }
+
+    /// Returns `item` to the pool for reuse (`keep = true`) or discards it,
+    /// releasing its reservation instead (`keep = false`).
+    fn checkin(&self, key: SessionKey, item: T, keep: bool) {
+        if keep {
+            self.put(key, item);
+        } else {
+            self.release(&key);
+        }
     }
 
     fn drain_idle(&self) -> Vec<T> {
@@ -751,11 +756,7 @@ impl DbClient {
         self
     }
 
-    /// Selects the wire protocol/backend -- `Protocol::Sea` (this bare
-    /// `DbClient` constructor's own internal starting value, see
-    /// `Protocol`'s own doc comment for why that's not the same thing as
-    /// "the user-facing default") or `Protocol::Thrift` (the actual
-    /// user-facing default as of this session's benchmarking work).
+    /// Selects the wire protocol/backend -- see `Protocol`'s own doc comment.
     pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = protocol;
         self
@@ -891,11 +892,9 @@ impl DbClient {
     }
 
     /// Downloads one cloud-fetch link, splitting it across parallel HTTP
-    /// Range requests when (and only when) the shared `download_slots`
-    /// budget has room to spare -- i.e. when few links are in flight, which
-    /// is exactly the case a single-chunk result hits and where a lone TCP
-    /// stream leaves most of the link idle. See `download_slots`' own doc
-    /// comment for the measured win and why the large-result case is safe.
+    /// Range requests when the shared `download_slots` budget has room to
+    /// spare -- see that field's own doc comment for the measured win and
+    /// why the large-result case is safe.
     pub(crate) async fn fetch_link_bytes_budgeted(
         self: &Arc<Self>,
         url: &str,
@@ -1075,19 +1074,15 @@ impl DbClient {
     }
 
     /// Shared by both protocols -- plain REST against `/api/2.0/sql/warehouses/{id}`,
-    /// nothing SEA- or Thrift-specific about it. SEA's own `submit_and_poll`
-    /// has always called this; the Thrift path (`pipeline::execute_lazy_thrift`)
-    /// didn't, which meant a stopped warehouse got no proactive wake on
-    /// `protocol="thrift"` (now the default) -- statement submission would
-    /// eventually surface an error instead, with no `warehouse_start_timeout`
-    /// wait for it to come up first. Fixed by calling this from both.
+    /// nothing SEA- or Thrift-specific about it (see AGENTS.md for why the
+    /// Thrift path didn't always call this).
     pub(crate) async fn ensure_warehouse_running(&self) -> Result<(), ApiError> {
         {
             let confirmed = *self.warehouse_confirmed_running_at.lock().unwrap();
-            if let Some(at) = confirmed {
-                if at.elapsed() < self.warehouse_confirmed_running_ttl {
-                    return Ok(());
-                }
+            if let Some(at) = confirmed
+                && at.elapsed() < self.warehouse_confirmed_running_ttl
+            {
+                return Ok(());
             }
         }
 
@@ -1142,11 +1137,8 @@ impl DbClient {
     /// Hands back a pooled session for (`catalog`, `schema`) if one's idle,
     /// creates one if the pool for that key isn't at `MAX_SESSIONS_PER_KEY`
     /// yet, or `None` if neither -- the caller falls back to a plain
-    /// session-less submission in that case, see `SessionPool`'s own doc
-    /// comment for why this never blocks instead. The slot-reservation
-    /// increment happens *before* the `create_session` await so two
-    /// concurrent callers can't both squeeze past the cap; a failed creation
-    /// releases the reservation again.
+    /// session-less submission in that case, see `session_pool`'s own doc
+    /// comment for why this never blocks instead.
     async fn checkout_session(&self, catalog: Option<&str>, schema: Option<&str>) -> Option<String> {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
         if let Some(id) = self.session_pool.take(&key) {
@@ -1166,15 +1158,11 @@ impl DbClient {
 
     /// Returns a session to the pool for reuse (`keep = true`, the statement
     /// it backed reached SUCCEEDED/FAILED/CANCELED cleanly) or discards it
-    /// (`keep = false`) -- see `SessionPool`'s doc comment for why any error
+    /// (`keep = false`) -- see `session_pool`'s doc comment for why any error
     /// discards rather than reuses.
     fn checkin_session(&self, catalog: Option<&str>, schema: Option<&str>, session_id: String, keep: bool) {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
-        if keep {
-            self.session_pool.put(key, session_id);
-        } else {
-            self.session_pool.release(&key);
-        }
+        self.session_pool.checkin(key, session_id, keep);
     }
 
     /// Best-effort cleanup of every currently-idle pooled session -- meant
@@ -1276,8 +1264,8 @@ impl DbClient {
     }
 
     /// Same checkout contract as SEA's `checkout_session` (see
-    /// `ThriftSessionPool`'s doc comment): `None` means the caller must open
-    /// its own throwaway session for this one call (Thrift has no
+    /// `thrift_session_pool`'s doc comment): `None` means the caller must
+    /// open its own throwaway session for this one call (Thrift has no
     /// session-less submission mode to fall back to).
     pub(crate) async fn thrift_checkout_session(
         &self,
@@ -1308,11 +1296,7 @@ impl DbClient {
         keep: bool,
     ) {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
-        if keep {
-            self.thrift_session_pool.put(key, session);
-        } else {
-            self.thrift_session_pool.release(&key);
-        }
+        self.thrift_session_pool.checkin(key, session, keep);
     }
 
     /// Best-effort close of every currently-idle pooled Thrift session --
@@ -1354,7 +1338,6 @@ impl DbClient {
         op: &thrift::OperationHandle,
     ) -> Result<thrift::OperationStatusResp, ApiError> {
         let body = Bytes::from(thrift::build_get_operation_status(op));
-        // Idempotent -- read-only.
         let resp_bytes = self.thrift_call(body, true).await?;
         thrift::parse_get_operation_status(&resp_bytes).map_err(Self::thrift_parse_error)
     }
@@ -1494,7 +1477,7 @@ impl DbClient {
     ///
     /// `body` must *not* already carry `catalog`/`schema`/`session_id` --
     /// this method owns that decision: a pooled session for (`catalog`,
-    /// `schema`) if one's available (see `checkout_session`/`SessionPool`),
+    /// `schema`) if one's available (see `checkout_session`),
     /// falling back to setting `catalog`/`schema` directly on the body
     /// otherwise (Databricks rejects `session_id` combined with either
     /// field). The session, if any, is returned to the pool on a clean
@@ -1632,12 +1615,8 @@ impl DbClient {
             self.host, statement_id, chunk_index
         );
         let data: ChunkLinksBody = self.authed_json(reqwest::Method::GET, &url, None).await?;
-
-        let mut blobs = Vec::with_capacity(data.external_links.len());
-        for link in data.external_links {
-            blobs.push(self.fetch_link_bytes(&link.external_link, compressed).await?);
-        }
-        Ok(blobs)
+        let links: Vec<String> = data.external_links.into_iter().map(|l| l.external_link).collect();
+        self.fetch_pre_resolved_links(&links, compressed).await
     }
 
     /// Same shape as `fetch_chunk_index`, but for links the statement submit/
@@ -1692,19 +1671,9 @@ impl DbClient {
                         };
                         match fetched {
                             Ok(blobs) => {
-                                // `meta.row_count` is the manifest's declared count for
-                                // the whole `chunk_index`, not per-blob -- safe to use as
-                                // `decode_chunk_item`'s truncation bound (same "server can
-                                // over-deliver past its declared count" protection Thrift's
-                                // resultLinks and arrowBatches paths both already have, see
-                                // AGENTS.md) only when there's exactly one blob, where
-                                // "the whole chunk's count" and "this blob's count" are the
-                                // same number. A chunk_index resolving to more than one
-                                // blob is a real but rare/defensive-coding case (see
-                                // `ChunkMeta::pre_resolved_links`'s own doc comment) whose
-                                // true per-blob row split isn't known here -- truncating
-                                // the first blob to the *whole* chunk's count would be
-                                // wrong, so those are left untruncated rather than guessed.
+                                // One blob ⇒ `meta.row_count` (the whole chunk_index's
+                                // declared count) and "this blob's count" are the same
+                                // number -- see `ChunkItem::truncate_to`'s own doc comment.
                                 let truncate_to = if blobs.len() == 1 { meta.row_count } else { None };
                                 for blob in blobs {
                                     let item = ChunkItem {
@@ -1782,8 +1751,6 @@ impl DbClient {
                 .timeout(self.http_timeout)
                 .send()
                 .await
-                // DELETE is naturally idempotent here too (404 is already
-                // treated as success below).
                 .map_err(|e| ApiError::from_reqwest(e, true))?;
             let status = resp.status();
             if status == StatusCode::NOT_FOUND || status.is_success() {

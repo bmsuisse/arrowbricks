@@ -560,12 +560,9 @@ pub async fn execute_lazy_thrift(
 
 /// The submit/session/poll/fetch-start tail of `execute_lazy_thrift`,
 /// factored out so `execute_ndjson_stream` can drive the exact same Thrift
-/// path instead of unconditionally submitting via SEA -- see that
-/// function's own doc comment for why this split exists. Everything about
-/// session handling and the cleanup-ordering invariant is `execute_lazy_thrift`'s
-/// own doc comment, unchanged by the split -- this is the same code, just
-/// stopping one step earlier (before wrapping the receiver in a
-/// `ResultStream`, so a different caller can wrap it in something else).
+/// path instead of unconditionally submitting via SEA. Session handling and
+/// the cleanup-ordering invariant are unchanged by the split -- see
+/// `execute_lazy_thrift`'s own doc comment for both.
 async fn submit_thrift_and_start_fetch(
     client: Arc<DbClient>,
     statement: &str,
@@ -612,11 +609,9 @@ async fn submit_thrift_and_start_fetch(
     let ready = ready?;
 
     let statement_id = hex_encode(&ready.operation.operation_id.guid);
-    // Cheap: `Bytes::clone()` is a refcount bump, not a copy. The loop below
-    // takes ownership of `ready` (and so of the original), but the caller
-    // needs this to populate `description`/`schema()` before any row is
-    // fetched -- see `execute_lazy_thrift`'s own doc comment on why SEA's
-    // manifest-derived fallback has no Thrift equivalent without this.
+    // Cheap: `Bytes::clone()` is a refcount bump, not a copy. `ready` itself
+    // is about to move into the loop below; `execute_lazy_thrift` needs this
+    // clone to populate `description`/`schema()` up front.
     let schema_bytes = ready.schema_bytes.clone();
 
     let concurrency = client.chunk_fetch_concurrency.max(1);
@@ -627,11 +622,8 @@ async fn submit_thrift_and_start_fetch(
 }
 
 /// Decodes just the Arrow-IPC *schema message* out of `blob` -- no batches
-/// required, unlike `decode_chunk`. Used to give Thrift a `description`/
-/// `schema()` before any row has been fetched (SEA gets this for free from
-/// the manifest; Thrift's equivalent, `TGetResultSetMetadataResp.arrowSchema`,
-/// otherwise sits unused until the first real batch is decoded -- which
-/// never happens for a zero-row result, see `execute_lazy_thrift`).
+/// required, unlike `decode_chunk`. Used by `execute_lazy_thrift` to give
+/// Thrift a `description`/`schema()` before any row has been fetched.
 ///
 /// `blob` here is *exactly* one bare schema message and nothing else --
 /// unlike every other caller of `StreamDecoder` in this file, which always
@@ -724,10 +716,8 @@ async fn drive_thrift_fetch_loop(
 }
 
 /// One `resultLinks` entry plus the `chunk_index` it was assigned at
-/// discovery time (in strict `FetchResults` order, which is also true row
-/// order -- see this module's own reasoning on `ReorderBuffer` not needing
-/// to reorder anything on the *discovery* side, only the download side now
-/// that downloads happen out of order across batches).
+/// discovery time -- see `run_thrift_fetch_loop`'s own doc comment for why
+/// that ordering matters.
 struct ThriftLinkWork {
     chunk_index: i64,
     row_count: i64,
@@ -950,10 +940,7 @@ async fn run_thrift_fetch_loop(
                     break;
                 }
             } else {
-                // See this function's own comment above `metadata_confirmed`
-                // -- held back until compression is authoritatively known at
-                // least once, rather than risking a download against a
-                // still-unconfirmed guess.
+                // See this function's own comment above `metadata_confirmed`.
                 pending_until_confirmed.push(work);
             }
         }
@@ -971,12 +958,8 @@ async fn run_thrift_fetch_loop(
         }
     }
 
-    // Metadata never arrived across the whole statement (legal, if
-    // unusual) -- flush whatever's left using `lz4_compressed`'s own
-    // fallback value (the request's own `canDecompressLZ4Result`), the same
-    // one `compressed_flag` was initialized from. Nothing more authoritative
-    // is ever coming once the loop above has already seen `has_more_rows ==
-    // false`.
+    // Final flush for the never-confirmed case -- see `metadata_confirmed`'s
+    // own comment above.
     for work in pending_until_confirmed.drain(..) {
         if link_tx.send(work).await.is_err() {
             break;
@@ -1045,12 +1028,9 @@ fn build_inline_blob(
 /// Decodes one chunk's blob and, only if `truncate_to` is `Some(n)` and the
 /// decode produced more than `n` rows, slices the batches down to exactly
 /// `n` (in order, no re-encode) -- the single decode every `ChunkItem`
-/// consumer needs, whether or not truncation actually applies. Replaces a
-/// previous design that decoded twice per Thrift cloud-fetch chunk (once
-/// just to *count* rows for truncation, immediately discarding the result
-/// and re-encoding back to bytes if untruncated; once again here, for
-/// real, downstream) -- found in review, a pure duplicate-work removal
-/// with no behavior change, see `fetch_thrift_link`'s own doc comment.
+/// consumer needs, whether or not truncation actually applies. See
+/// `fetch_thrift_link`'s own doc comment for why this replaced a
+/// double-decode design.
 ///
 /// The truncation itself is a real, confirmed-against-a-live-workspace
 /// requirement, not a hypothetical: `SELECT * FROM dim_article LIMIT
@@ -1095,17 +1075,13 @@ fn decode_chunk_item(blob: &Bytes, truncate_to: Option<i64>) -> Result<Vec<Recor
             remaining = 0;
         }
     }
-    // `declared_row_count > 0` (the early `filter` above) guarantees
-    // `remaining > 0` going into the loop's first iteration, so `kept`
-    // always gets at least one push there -- this can't be empty with the
-    // logic above, but found in review that the old version's explicit
-    // "no batches survived truncation" error (needed back when this
+    // `kept` can't be empty here, but found in review that the old version's
+    // explicit "no batches survived truncation" error (needed back when this
     // returned re-encoded bytes and had to get a schema from `kept.first()`)
     // quietly disappeared when this switched to returning batches directly.
     // A `debug_assert` costs nothing in release builds and still catches a
-    // future edit to the loop above (e.g. the `remaining <= 0` break
-    // condition) that breaks this invariant, during testing rather than
-    // silently in production.
+    // future edit to the loop above that breaks this invariant, during
+    // testing rather than silently in production.
     debug_assert!(
         !kept.is_empty(),
         "decode_chunk_item: truncation produced zero batches despite a positive declared_row_count -- \
@@ -1290,8 +1266,7 @@ fn non_finite_token(v: f64) -> Option<&'static str> {
     }
 }
 
-/// One top-level Float32/Float64 column, downcast once per batch rather than
-/// once per (row, field) -- see `patch_non_finite_floats`.
+/// One top-level Float32/Float64 column.
 enum FloatColumn<'a> {
     F64(usize, &'a arrow::array::Float64Array),
     F32(usize, &'a arrow::array::Float32Array),
@@ -1474,9 +1449,7 @@ pub async fn execute_ndjson_stream(
     non_finite_as_string: bool,
 ) -> Result<NdjsonStream, ApiError> {
     let (statement_id, num_chunks, rx) = if client.protocol == Protocol::Thrift {
-        // NDJSON output has no `description`/column-schema concept, so the
-        // schema bytes `submit_thrift_and_start_fetch` now also returns
-        // (see `execute_lazy_thrift`) aren't needed here.
+        // NDJSON output has no `description`/column-schema concept.
         let (statement_id, _schema_bytes, rx) =
             submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
         (statement_id, 0, rx)
@@ -1682,12 +1655,8 @@ mod tests {
         Bytes::from(buf)
     }
 
-    /// Regression test for a real behavior found by testing this crate's own
-    /// Thrift path against a real workspace: `SELECT * FROM dim_article
-    /// LIMIT 500000` came back with 502879 rows (2879 too many) via a
-    /// cloud-fetch `resultLink` whose own declared `rowCount` was 500000 --
-    /// `databricks-sql-connector` has an identical truncation step for the
-    /// identical documented reason (see this function's own doc comment).
+    /// Regression test for `decode_chunk_item`'s truncation -- see its own
+    /// doc comment for the real over-delivery incident this guards against.
     /// Straddles a batch boundary on purpose (declared count lands
     /// mid-batch) -- the simpler "drop whole extra batches only" bug would
     /// pass a test where the boundary landed exactly on a batch edge.
@@ -1839,20 +1808,11 @@ mod tests {
     /// since none of them writes more than one batch per chunk).
     #[test]
     fn decode_chunk_reads_every_record_batch_in_a_multi_batch_stream() {
-        use arrow::ipc::writer::StreamWriter;
-
         let batch_a = make_batch(vec![1, 2], vec![1.0, 2.0]);
         let batch_b = make_batch(vec![3, 4, 5], vec![3.0, 4.0, 5.0]);
+        let blob = write_stream(&[batch_a, batch_b]);
 
-        let mut buf = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, &batch_a.schema()).unwrap();
-            writer.write(&batch_a).unwrap();
-            writer.write(&batch_b).unwrap();
-            writer.finish().unwrap();
-        }
-
-        let batches = decode_chunk(&Bytes::from(buf)).unwrap();
+        let batches = decode_chunk(&blob).unwrap();
         assert_eq!(
             batches.len(),
             2,
@@ -1862,16 +1822,8 @@ mod tests {
         assert_eq!(total_rows, 5);
     }
 
-    /// Regression test for a bug caught in code review before it shipped: an
-    /// empty (zero-byte) blob made `StreamDecoder`'s decode loop a no-op and
-    /// `decoder.finish()` saw a still-pristine state, which it treats as a
-    /// clean empty stream -- silently returning zero batches with no error at
-    /// all, instead of the loud failure the old `StreamReader`-based version
-    /// gave on the same input ("Expected schema message, found empty
-    /// stream"). Same silent-truncation shape as the real multi-frame LZ4 bug
-    /// this crate already shipped once (see `client.rs`'s
-    /// `decompress_lz4_frame` doc comment) -- a genuinely empty chunk blob
-    /// must never be mistaken for "legitimately zero rows".
+    /// Regression test for `decode_chunk`'s empty-blob rejection -- see its
+    /// own doc comment for the failure mode this guards against.
     #[test]
     fn decode_chunk_rejects_an_empty_blob() {
         let err = decode_chunk(&Bytes::new()).expect_err("an empty blob must error, not silently decode to zero rows");
@@ -1916,15 +1868,8 @@ mod tests {
     /// chunks have not been observed to have trailing bytes.
     #[test]
     fn decode_chunk_errors_on_trailing_bytes_after_a_complete_stream() {
-        use arrow::ipc::writer::StreamWriter;
-
         let batch = make_batch(vec![1, 2], vec![1.0, 2.0]);
-        let mut buf = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
-            writer.write(&batch).unwrap();
-            writer.finish().unwrap();
-        }
+        let mut buf = write_stream(&[batch]).to_vec();
         buf.extend_from_slice(&[0xAA; 8]);
 
         decode_chunk(&Bytes::from(buf)).expect_err("trailing bytes after a complete stream's EOS marker must error");
@@ -1944,7 +1889,6 @@ mod tests {
     fn decode_chunk_round_trips_a_dictionary_encoded_column() {
         use arrow::array::{DictionaryArray, Int32Array, StringArray};
         use arrow::datatypes::{Field, Int32Type, Schema};
-        use arrow::ipc::writer::StreamWriter;
 
         let keys = Int32Array::from(vec![0, 1, 0, 2]);
         let values = StringArray::from(vec!["a", "b", "c"]);
@@ -1955,16 +1899,10 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
             false,
         )]));
-        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(dict)]).unwrap();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(dict)]).unwrap();
+        let blob = write_stream(&[batch]);
 
-        let mut buf = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
-            writer.write(&batch).unwrap();
-            writer.finish().unwrap();
-        }
-
-        let batches = decode_chunk(&Bytes::from(buf)).unwrap();
+        let batches = decode_chunk(&blob).unwrap();
         assert_eq!(
             batches.len(),
             1,
