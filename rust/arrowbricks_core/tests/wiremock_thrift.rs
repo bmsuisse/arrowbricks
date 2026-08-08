@@ -22,7 +22,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol};
-use arrowbricks_core::pipeline::execute_lazy_thrift;
+use arrowbricks_core::pipeline::{execute_lazy_thrift, execute_ndjson_stream};
 use arrowbricks_core::thrift::{Reader, Writer, operation_state, status_code, ttype};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -465,6 +465,65 @@ async fn thrift_small_query_returns_data_inline_with_zero_fetch_results_calls() 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 3);
     assert_ids_in_order(&batches, 3);
+}
+
+/// Regression test for a real gap found on review: `execute_ndjson_stream`
+/// (backing `stream_query_json`) unconditionally submitted via SEA
+/// regardless of `protocol=`, so every Thrift caller (the default) got
+/// NDJSON streaming over SEA anyway with zero test coverage either way.
+/// This mock server has no SEA REST routes mounted at all -- if the fix
+/// regressed back to always using SEA, this would fail with a connection
+/// error/404 against a route that was never mounted, not silently pass.
+#[tokio::test]
+async fn thrift_ndjson_stream_actually_uses_thrift_not_sea() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+
+    let schema = test_schema();
+    let (schema_bytes, batch_bytes) = build_schema_and_batch_messages(&schema, &[(0, 3)]);
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(
+                b"op-ndjson",
+                b"opsecret-ndjson",
+                Some(DirectResultsSpec {
+                    operation_state: Some(operation_state::FINISHED),
+                    operation_error: None,
+                    metadata: Some((false, Some(schema_bytes))),
+                    fetch: Some(FetchSpec {
+                        has_more_rows: false,
+                        arrow_batches: vec![(batch_bytes[0].clone(), 3)],
+                        ..Default::default()
+                    }),
+                }),
+            ),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_ndjson_stream(client, "SELECT * FROM t", None, None, None, false)
+        .await
+        .unwrap();
+
+    let mut lines = Vec::new();
+    while let Some(chunk_lines) = stream.next_chunk().await.unwrap() {
+        lines.extend(chunk_lines);
+    }
+    assert_eq!(
+        lines.len(),
+        3,
+        "must get all 3 rows via the Thrift path, not silently zero via a wrong protocol"
+    );
+    for (i, line) in lines.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["id"], i as i64);
+    }
 }
 
 /// Regression test for a real bug found via a real-warehouse variety pass:

@@ -14,7 +14,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::{
-    ApiError, ChunkItem, ColumnDescription, DbClient, InlineOrExternal, StatementSubmitResult, join_error,
+    ApiError, ChunkItem, ColumnDescription, DbClient, InlineOrExternal, Protocol, StatementSubmitResult, join_error,
 };
 use crate::thrift;
 
@@ -523,6 +523,35 @@ pub async fn execute_lazy_thrift(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
+    let (statement_id, rx) = submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
+    Ok(ResultStream {
+        statement_id,
+        num_chunks: 0,
+        schema: None,
+        columns: Vec::new(),
+        reorder: ReorderBuffer::new(rx),
+        pending: VecDeque::new(),
+        pending_rows: 0,
+        exhausted: false,
+        poisoned: false,
+    })
+}
+
+/// The submit/session/poll/fetch-start tail of `execute_lazy_thrift`,
+/// factored out so `execute_ndjson_stream` can drive the exact same Thrift
+/// path instead of unconditionally submitting via SEA -- see that
+/// function's own doc comment for why this split exists. Everything about
+/// session handling and the cleanup-ordering invariant is `execute_lazy_thrift`'s
+/// own doc comment, unchanged by the split -- this is the same code, just
+/// stopping one step earlier (before wrapping the receiver in a
+/// `ResultStream`, so a different caller can wrap it in something else).
+async fn submit_thrift_and_start_fetch(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+) -> Result<(String, mpsc::Receiver<Result<ChunkItem, ApiError>>), ApiError> {
     client.ensure_warehouse_running().await?;
     let pooled = client.thrift_checkout_session(catalog, schema).await;
     let (session, from_pool) = match pooled {
@@ -534,9 +563,9 @@ pub async fn execute_lazy_thrift(
 
     // Exactly one of these two arms ever touches `session` -- a pooled
     // session is checked in right away (safe: that only makes it available
-    // for a *different* operation, see this function's own doc comment);
-    // a throwaway session that failed to even reach a terminal state is
-    // closed right here, since it'll never be handed to
+    // for a *different* operation, see `execute_lazy_thrift`'s own doc
+    // comment); a throwaway session that failed to even reach a terminal
+    // state is closed right here, since it'll never be handed to
     // `drive_thrift_fetch_loop`; a throwaway session that succeeded is
     // carried forward for that function to close once the fetch loop is
     // actually done with it.
@@ -560,17 +589,7 @@ pub async fn execute_lazy_thrift(
     let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
     tokio::spawn(drive_thrift_fetch_loop(client, ready, throwaway_session, tx));
 
-    Ok(ResultStream {
-        statement_id,
-        num_chunks: 0,
-        schema: None,
-        columns: Vec::new(),
-        reorder: ReorderBuffer::new(rx),
-        pending: VecDeque::new(),
-        pending_rows: 0,
-        exhausted: false,
-        poisoned: false,
-    })
+    Ok((statement_id, rx))
 }
 
 /// Drives the sequential `FetchResults(orientation: FETCH_NEXT)` loop for
@@ -1365,6 +1384,19 @@ impl NdjsonStream {
 /// follow are) -- `stream_query_json` only wraps its chunk iterator, not
 /// this initial submit/poll wait, so this crate preserves that same gap
 /// rather than "fixing" it during the port.
+///
+/// **Branches on `client.protocol`, same as `PyDbClient::execute`'s own
+/// dispatch (`lib.rs`) -- found missing entirely during a later review
+/// pass, not caught by any test.** This function unconditionally submitted
+/// via SEA (`execute_arrow_statement`) regardless of `protocol=`, so every
+/// caller on `protocol="thrift"` (the default) got NDJSON streaming over
+/// SEA anyway -- silently forgoing the entire reason Thrift is the default
+/// (see AGENTS.md's "Thrift is now the default protocol" entry) for this
+/// one public API. `NdjsonStream` itself was always fully protocol-agnostic
+/// (just a `ReorderBuffer` over a `ChunkItem` receiver, same as
+/// `ResultStream`) -- the gap was purely in this function never routing to
+/// `submit_thrift_and_start_fetch`, Thrift's own equivalent of
+/// `execute_arrow_statement` + `fetch_chunks_with_backpressure`.
 pub async fn execute_ndjson_stream(
     client: Arc<DbClient>,
     statement: &str,
@@ -1373,17 +1405,23 @@ pub async fn execute_ndjson_stream(
     parameters: Option<Value>,
     non_finite_as_string: bool,
 ) -> Result<NdjsonStream, ApiError> {
-    let submitted = client
-        .execute_arrow_statement(statement, catalog, schema, parameters)
-        .await?;
-    let num_chunks = submitted.chunk_metas.len();
-    let rx = client.fetch_chunks_with_backpressure(
-        submitted.statement_id.clone(),
-        submitted.chunk_metas,
-        submitted.compressed,
-    );
+    let (statement_id, num_chunks, rx) = if client.protocol == Protocol::Thrift {
+        let (statement_id, rx) = submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
+        (statement_id, 0, rx)
+    } else {
+        let submitted = client
+            .execute_arrow_statement(statement, catalog, schema, parameters)
+            .await?;
+        let num_chunks = submitted.chunk_metas.len();
+        let rx = client.fetch_chunks_with_backpressure(
+            submitted.statement_id.clone(),
+            submitted.chunk_metas,
+            submitted.compressed,
+        );
+        (submitted.statement_id, num_chunks, rx)
+    };
     Ok(NdjsonStream {
-        statement_id: submitted.statement_id,
+        statement_id,
         num_chunks,
         reorder: ReorderBuffer::new(rx),
         non_finite_as_string,
