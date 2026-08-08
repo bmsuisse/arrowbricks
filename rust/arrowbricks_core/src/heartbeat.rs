@@ -14,9 +14,9 @@ use tokio::task::JoinHandle;
 
 use crate::client::{ApiError, join_error};
 
-/// Matches `_streaming.py`'s `_HEARTBEAT_INTERVAL_S` -- see its own comment
-/// for why 15s (well under typical PaaS idle-connection ceilings for a
-/// caller forwarding these as SSE keep-alives).
+/// Matches `_streaming.py`'s `_HEARTBEAT_INTERVAL_S` -- well under typical
+/// PaaS idle-connection ceilings for a caller forwarding these as SSE
+/// keep-alives.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
@@ -50,11 +50,10 @@ impl<T: Send + 'static> HeartbeatWait<T> {
     /// Same as `new`, but with an injectable heartbeat interval -- tests use
     /// a short real duration instead of the real 15s, since the wrapped
     /// future always runs on `pyo3_async_runtimes`'s own separate global
-    /// runtime (needed so this works from a synchronous PyO3 method with no
-    /// ambient tokio context), not whatever runtime is polling `tick()` --
-    /// `tokio::time::pause()` in a `#[tokio::test]` wouldn't affect that
-    /// other runtime's clock, so shortening the real interval is what
-    /// actually keeps tests fast, not virtual time.
+    /// runtime (see this struct's own doc comment), not whatever runtime is
+    /// polling `tick()` -- `tokio::time::pause()` in a `#[tokio::test]`
+    /// wouldn't affect that other runtime's clock, so shortening the real
+    /// interval is what actually keeps tests fast, not virtual time.
     pub fn with_interval<F>(fut: F, total_timeout_s: Option<f64>, heartbeat_interval: Duration) -> Self
     where
         F: std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
@@ -203,11 +202,8 @@ impl<T: Send + 'static> HeartbeatStream<T> {
                 let now = Instant::now();
                 if now >= deadline {
                     handle.abort();
-                    // See HeartbeatWait::tick's identical comment -- awaiting
-                    // the aborted handle blocks until the task has genuinely
-                    // been dropped, closing the race where a caller sees
-                    // QueryTimeout and exits while the orphaned task is
-                    // still mid-drop.
+                    // See HeartbeatWait::tick's identical comment on why this
+                    // await matters.
                     let _ = handle.await;
                     self.current = None;
                     let secs = self.total_timeout_s.unwrap_or(0.0);
@@ -235,10 +231,8 @@ impl<T: Send + 'static> HeartbeatStream<T> {
 }
 
 impl<T> Drop for HeartbeatStream<T> {
-    /// See `HeartbeatWait`'s identical `Drop` impl -- same reasoning, same
-    /// limitation (best-effort request, not a guaranteed-finished join),
-    /// same real motivating case (Python-side cancellation of the chunk
-    /// download phase, not just `tick()`'s own timeout path).
+    /// Same as `HeartbeatWait`'s `Drop`, for the chunk-download phase -- see
+    /// its own doc comment.
     fn drop(&mut self) {
         if let Some(handle) = self.current.take() {
             handle.abort();
@@ -276,7 +270,6 @@ mod tests {
             Some(Tick::Ready(v)) => assert_eq!(v, 42),
             _ => panic!("expected Ready(42) once the wrapped future completes"),
         }
-        // Exhausted -- must not tick again.
         assert!(wait.tick().await.unwrap().is_none());
     }
 
@@ -314,17 +307,10 @@ mod tests {
         );
     }
 
-    /// Regression test for a real panic found by testing a real timeout
-    /// against a live warehouse from a short-lived script: `handle.abort()`
-    /// alone only *requests* cancellation, so the aborted task could still
-    /// be mid-drop when `tick()` returns the timeout error -- if the caller
-    /// then exits (as a short script naturally does right after catching
-    /// the exception), the orphaned task can panic trying to touch Python
-    /// state after the interpreter has started finalizing. `tick()` must
-    /// not return the timeout error until the aborted task has genuinely
-    /// finished dropping -- proven here by a task that sets a shared flag in
-    /// its own `Drop` impl, asserted `true` immediately after `tick()`
-    /// returns, not merely "eventually".
+    /// Regression test for `tick()`'s abort-then-await -- see its own
+    /// comment for the real panic this guards against. Proven here by a task
+    /// that sets a shared flag in its own `Drop` impl, asserted `true`
+    /// immediately after `tick()` returns, not merely "eventually".
     #[tokio::test]
     async fn total_timeout_waits_for_the_aborted_task_to_actually_drop() {
         struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -365,20 +351,12 @@ mod tests {
     }
 
     /// Regression test for a *second*, more general real panic found the
-    /// same way: dropping a `HeartbeatWait` for a reason other than its own
-    /// `total_timeout_s` firing -- Python-side cancellation
-    /// (`asyncio.wait_for`, `task.cancel()`) being the real one -- never
-    /// went through `tick()`'s timeout branch at all, so nothing ever called
-    /// `.abort()`; `JoinHandle::drop` alone does not abort a task, so the
-    /// spawned task ran on fully detached, forever, with nothing left to
-    /// observe or join it. Reproduced against a live warehouse: intermittent
-    /// (1 run in 3), same "Python interpreter is not initialized" panic as
-    /// the `tick()` case, just on a longer, unbounded fuse instead of a
-    /// short one. `Drop for HeartbeatWait` fixes the "never even requested"
-    /// half of that (it can't fix "immediately joined", since `Drop::drop`
-    /// can't `.await`) -- this only proves cancellation is requested
+    /// same way: `Drop for HeartbeatWait` needs a real, reproduced bug (see
+    /// its own doc comment) -- reproduced against a live warehouse:
+    /// intermittent (1 run in 3). This only proves cancellation is requested
     /// (`JoinHandle::is_finished()` eventually becomes true), not that it
-    /// happens synchronously within `drop()` itself.
+    /// happens synchronously within `drop()` itself -- `Drop::drop` can't
+    /// `.await`, so it can't prove more than that.
     #[tokio::test]
     async fn dropping_heartbeat_wait_directly_requests_cancellation() {
         let mut wait: HeartbeatWait<()> = HeartbeatWait::with_interval(

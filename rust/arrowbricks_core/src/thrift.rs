@@ -1054,10 +1054,8 @@ fn parse_reply<T>(bytes: &[u8], read_success: impl FnOnce(&mut Reader) -> TResul
             break;
         }
         if id == 0 && ft == ttype::STRUCT {
-            // Every `<Method>_result` struct this crate reads has exactly
-            // one meaningful field (`success`, id 0) -- `take()` here is
-            // just satisfying the borrow checker for an `FnOnce` inside a
-            // loop that only ever calls it once in practice.
+            // `take()` is just satisfying the borrow checker for an `FnOnce`
+            // inside a loop that only ever calls it once in practice.
             let f = read_success
                 .take()
                 .ok_or_else(|| ThriftError("duplicate `success` field in thrift reply".to_string()))?;
@@ -1117,34 +1115,32 @@ pub fn parse_fetch_results(bytes: &[u8]) -> TResult<FetchResultsResp> {
     parse_reply(bytes, FetchResultsResp::read)
 }
 
-pub fn build_close_operation(op: &OperationHandle) -> Vec<u8> {
-    build_call("CloseOperation", |w| {
+/// Shared shape for the three RPCs below: a single field-1 STRUCT handle,
+/// nothing else in the request body.
+fn build_handle_call(method: &str, write_handle: impl FnOnce(&mut Writer)) -> Vec<u8> {
+    build_call(method, |w| {
         w.write_field_begin(ttype::STRUCT, 1);
-        op.write(w);
+        write_handle(w);
         w.write_field_stop();
     })
+}
+
+pub fn build_close_operation(op: &OperationHandle) -> Vec<u8> {
+    build_handle_call("CloseOperation", |w| op.write(w))
 }
 pub fn parse_close_operation(bytes: &[u8]) -> TResult<Status> {
     parse_reply(bytes, Status::read)
 }
 
 pub fn build_cancel_operation(op: &OperationHandle) -> Vec<u8> {
-    build_call("CancelOperation", |w| {
-        w.write_field_begin(ttype::STRUCT, 1);
-        op.write(w);
-        w.write_field_stop();
-    })
+    build_handle_call("CancelOperation", |w| op.write(w))
 }
 pub fn parse_cancel_operation(bytes: &[u8]) -> TResult<Status> {
     parse_reply(bytes, Status::read)
 }
 
 pub fn build_close_session(session: &SessionHandle) -> Vec<u8> {
-    build_call("CloseSession", |w| {
-        w.write_field_begin(ttype::STRUCT, 1);
-        session.write(w);
-        w.write_field_stop();
-    })
+    build_handle_call("CloseSession", |w| session.write(w))
 }
 pub fn parse_close_session(bytes: &[u8]) -> TResult<Status> {
     parse_reply(bytes, Status::read)
@@ -1202,9 +1198,10 @@ mod tests {
     /// propagates that as a normal `Err` instead of panicking.
     #[test]
     fn skip_on_truncated_input_errors_instead_of_panicking() {
-        let mut r = Reader::new(&[ttype::LIST as u8, 0, 0, 0, 100]); // claims 100 elements, no data
-        // list element type byte is missing entirely -- read_list_begin
-        // itself will hit end-of-buffer trying to read past what's given.
+        // Claims 100 elements but the element-type byte and all data are
+        // missing -- read_list_begin hits end-of-buffer trying to read past
+        // what's given.
+        let mut r = Reader::new(&[ttype::LIST as u8, 0, 0, 0, 100]);
         let err = r.skip(ttype::LIST);
         assert!(err.is_err(), "must error, not panic, on truncated/garbage input");
     }
@@ -1249,14 +1246,8 @@ mod tests {
         assert_eq!(params[1].value.as_deref(), Some("3.5"));
     }
 
-    /// Regression test for a real field-id bug found via cross-checking
-    /// `databricks-sql-connector`'s own real, installed `ttypes.py` while
-    /// building this session's Thrift mock test infra: `displayMessage` on
-    /// `TGetOperationStatusResp` is field **1281**, not 12 -- see the fix's
-    /// own comment on the `(1281, ttype::STRING)` arm above for the full
-    /// story (a real but narrow, never-observed-in-practice bug, since
-    /// `terminal_error()` falls back to the top-level `TStatus.display_message`,
-    /// correctly mapped at field 6, before ever reaching this one).
+    /// Regression test for the field-id fix on `(1281, ttype::STRING)` above
+    /// -- see that arm's own comment for the full story.
     #[test]
     fn operation_status_resp_reads_display_message_from_field_1281_not_12() {
         let mut w = Writer::new();

@@ -22,14 +22,12 @@ use arrow::array::{
     Int16Array, Int32Array, Int64Array, StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow::buffer::NullBuffer;
-use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Date32Type, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde_json::Value as JsonValue;
 
 use crate::client::{ApiError, ColumnDescription};
-
-const UNIX_EPOCH_DATE: fn() -> NaiveDate = || NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
 
 fn conv_err(column: &str, value: &str, type_name: &str, detail: impl std::fmt::Display) -> ApiError {
     ApiError {
@@ -38,9 +36,6 @@ fn conv_err(column: &str, value: &str, type_name: &str, detail: impl std::fmt::D
     }
 }
 
-/// `Err` here always means "this column's type (or a value in it) isn't one
-/// `json_convert` handles" -- the caller falls back to the normal fetch path
-/// rather than ever guessing at a conversion.
 pub fn json_array_to_record_batch(
     rows: &[Vec<Option<String>>],
     columns: &[ColumnDescription],
@@ -193,7 +188,6 @@ fn build_column(
             Ok((DataType::Utf8, Arc::new(StringArray::from(out))))
         }
         "DATE" => {
-            let epoch = UNIX_EPOCH_DATE();
             let mut out = Vec::new();
             for v in values {
                 out.push(match v {
@@ -201,7 +195,7 @@ fn build_column(
                     Some(s) => {
                         let date =
                             NaiveDate::parse_from_str(&s, "%Y-%m-%d").map_err(|e| conv_err(name, &s, type_name, e))?;
-                        Some((date - epoch).num_days() as i32)
+                        Some(Date32Type::from_naive_date(date))
                     }
                 });
             }
@@ -270,9 +264,8 @@ fn build_column(
 
             // One parsed JSON object per row (`None` = the whole struct is
             // NULL for that row) -- Databricks encodes a STRUCT value as a
-            // JSON object with every leaf value still a string (confirmed
-            // against a real workspace), same string-typed-leaf contract as
-            // every scalar type above.
+            // JSON object with every leaf value still a string, confirmed
+            // against a real workspace.
             let mut rows_parsed: Vec<Option<serde_json::Map<String, JsonValue>>> = Vec::new();
             for v in values {
                 match v {
@@ -405,10 +398,7 @@ fn parse_one_field(raw: &str) -> Result<(String, String, Option<u8>, Option<i8>)
     // SQL DDL spelling differs from this manifest's own top-level type_name
     // vocabulary for exactly these three widths -- confirmed against a real
     // workspace (`STRUCT<a: TINYINT NOT NULL, ...>` etc.); every other name
-    // (INT/INTEGER/FLOAT/DOUBLE/BOOLEAN/STRING/DATE/TIMESTAMP/TIMESTAMP_NTZ/
-    // BINARY) already matches `build_column`'s own match arms as-is, and an
-    // unrecognized one (a nested STRUCT/ARRAY/MAP/VARIANT) passes through
-    // unchanged too, to be caught by that function's catch-all.
+    // already matches `build_column`'s own match arms as-is.
     let mapped = match type_part {
         "TINYINT" => "BYTE",
         "SMALLINT" => "SHORT",
@@ -435,14 +425,8 @@ fn parse_decimal_to_i128(s: &str, scale: i8) -> Result<i128, String> {
     };
     let scale = scale.max(0) as usize;
     let mut frac_digits = frac_part.to_string();
-    if frac_digits.len() > scale {
-        frac_digits.truncate(scale);
-    } else {
-        while frac_digits.len() < scale {
-            frac_digits.push('0');
-        }
-    }
-    let digits = format!("{int_part}{frac_digits}");
+    frac_digits.truncate(scale);
+    let digits = format!("{int_part}{frac_digits:0<scale$}");
     let magnitude: i128 = if digits.is_empty() {
         0
     } else {
