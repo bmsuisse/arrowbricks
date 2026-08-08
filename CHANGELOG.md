@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.0.2
+
+- **Fix**: a Thrift-protocol query returning zero rows (e.g. a `WHERE 1=0`
+  filter) left `cursor.description` empty instead of the real column
+  names/types. `execute_lazy_thrift` populated `schema`/`columns` only once
+  a batch had actually been decoded, which never happens for a zero-row
+  result -- SEA didn't have this gap, since its columns come from the
+  manifest at submit time regardless of row count. Now decodes the schema
+  directly out of `TGetResultSetMetadataResp.arrowSchema` (already
+  captured, previously discarded) up front. Along the way, found and
+  worked around a real `arrow_ipc::StreamDecoder` gotcha: its internal
+  state machine only finalizes a message on the *next* message's arrival,
+  so a buffer ending exactly at a bare schema message's last byte silently
+  never sets the schema -- fixed by appending the same 8-byte end-of-stream
+  marker `StreamWriter::finish()` itself writes.
+- **Perf**: `fetchone()`/`async for row in cursor` read row-at-a-time
+  through a fixed ~110us PyO3/asyncio round trip per row, measured at
+  226-320x slower than `fetchall()`. Added a Python-side read-ahead row
+  buffer (1000 rows per underlying `fetchmany_arrow` pull) so row iteration
+  no longer pays that cost per row -- measured after the fix: ~3x slower
+  than `fetchall()`, not 226-320x.
+- **Perf**: merged two pairs of back-to-back `Python::attach` calls in
+  `PyTokenProvider::get_token` (runs on every authenticated request for a
+  custom `token_provider`) that had no `.await` between them, cutting
+  redundant GIL-attach overhead on that hot path.
+- **Cleanup**: removed the JSON_ARRAY pipeline (`run_json_pipeline` et al.),
+  confirmed dead since `prefer_inline`'s fallback path was the only
+  possible caller and never actually used it; merged `SessionPool`/
+  `ThriftSessionPool`'s ~90 lines of duplicated checkout/checkin logic into
+  one generic `Pool<T>`; trimmed comments across the Rust core and Python
+  facade that restated information already stated elsewhere, while leaving
+  every comment citing a real incident, measured benchmark, or non-obvious
+  protocol/library quirk untouched.
+
+No behavior change beyond the fixes above -- still measurably faster than
+`databricks-sql-connector` on a real warehouse after this release (~1.5-2x
+on a 200k-row query in repeated runs).
+
 ## 3.0.1
 
 Three follow-up fixes found via a deliberate real-warehouse audit pass and
