@@ -558,16 +558,7 @@ pub async fn execute_lazy_thrift(
 
     let concurrency = client.chunk_fetch_concurrency.max(1);
     let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
-    tokio::spawn(drive_thrift_fetch_loop(
-        client,
-        ready.operation,
-        ready.schema_bytes,
-        ready.lz4_compressed,
-        ready.initial_rowset,
-        ready.already_closed,
-        throwaway_session,
-        tx,
-    ));
+    tokio::spawn(drive_thrift_fetch_loop(client, ready, throwaway_session, tx));
 
     Ok(ResultStream {
         statement_id,
@@ -599,14 +590,17 @@ pub async fn execute_lazy_thrift(
 /// the session-close specifically matters.
 async fn drive_thrift_fetch_loop(
     client: Arc<DbClient>,
-    operation: thrift::OperationHandle,
-    schema_bytes: Option<bytes::Bytes>,
-    lz4_compressed: bool,
-    initial_rowset: Option<(thrift::RowSet, bool)>,
-    already_closed: bool,
+    ready: ThriftStatementReady,
     throwaway_session: Option<thrift::SessionHandle>,
     tx: mpsc::Sender<Result<ChunkItem, ApiError>>,
 ) {
+    let ThriftStatementReady {
+        operation,
+        schema_bytes,
+        lz4_compressed,
+        initial_rowset,
+        already_closed,
+    } = ready;
     run_thrift_fetch_loop(&client, &operation, schema_bytes, lz4_compressed, initial_rowset, &tx).await;
     // Closes the channel *before* the two cleanup RPCs below, not after this
     // whole function returns -- `tx` is otherwise dropped at the end of this
@@ -666,7 +660,7 @@ struct ThriftLinkWork {
 /// happens exactly once, on the one decode that was always going to happen
 /// anyway.
 async fn fetch_thrift_link(
-    client: Arc<DbClient>,
+    client: &Arc<DbClient>,
     work: ThriftLinkWork,
     compressed: bool,
 ) -> Result<ChunkItem, ApiError> {
@@ -750,7 +744,7 @@ async fn run_thrift_fetch_loop(
                 let work = { link_rx.lock().await.recv().await };
                 let Some(work) = work else { return };
                 let compressed = compressed_flag.load(std::sync::atomic::Ordering::Relaxed);
-                let result = fetch_thrift_link(client.clone(), work, compressed).await;
+                let result = fetch_thrift_link(&client, work, compressed).await;
                 if out_tx.send(result).await.is_err() {
                     return;
                 }
@@ -903,9 +897,30 @@ async fn run_thrift_fetch_loop(
     }
 
     drop(link_tx); // lets every worker's `recv()` return `None` once the queue drains
-    for handle in worker_handles {
-        let _ = handle.await;
+    if let Some(e) = first_worker_panic(worker_handles).await {
+        let _ = tx.send(Err(e)).await;
     }
+}
+
+/// A panicked download worker has already pulled its `ThriftLinkWork` off
+/// the queue and sends nothing on `out_tx` -- silently discarding that (a
+/// bare `let _ = handle.await`) would mean the channel closing normally
+/// looks to the consumer exactly like a complete, successful result instead
+/// of a truncated one. Same failure mode `client.rs`'s `join_first_error`
+/// exists to prevent on the SEA side; this is the Thrift-side analogue so
+/// both protocols have the same defense, not because a real panic was ever
+/// observed here (these workers return `()`, not a `Result`, since a
+/// download error is sent through `out_tx` from inside the loop rather than
+/// returned from the task -- so unlike `join_first_error`, only a genuine
+/// panic is possible here, never an `Ok(Err(..))`).
+async fn first_worker_panic(handles: Vec<tokio::task::JoinHandle<()>>) -> Option<ApiError> {
+    let mut first = None;
+    for handle in handles {
+        if let Err(join_err) = handle.await {
+            first.get_or_insert_with(|| join_error(join_err));
+        }
+    }
+    first
 }
 
 /// Concatenates `schema_bytes` (the stream's Arrow-IPC schema message,
@@ -1375,86 +1390,33 @@ pub async fn execute_ndjson_stream(
     })
 }
 
-pub struct JsonResult {
-    pub statement_id: String,
-    pub num_chunks: usize,
-    pub rows: Vec<Vec<Option<String>>>,
-    pub columns: Vec<ColumnDescription>,
-}
-
-/// JSON_ARRAY's contract (Databricks' own, not ours): each chunk is a JSON
-/// array of rows, each row an array of values where every non-null value is
-/// a *string* regardless of its real column type; null stays JSON null.
-/// Casting by the manifest's column type_name, if wanted, is left to the
-/// caller -- same pass-through the Python original leaves to its own
-/// caller.
-///
-/// `truncate_to`, if `Some(n)` and the chunk decodes to more than `n` rows,
-/// slices to exactly the first `n` -- the JSON_ARRAY counterpart to
-/// `decode_chunk_item`'s Arrow-IPC truncation (see its own doc comment and
-/// `fetch_chunks_with_backpressure`'s `truncate_to` wiring): a JSON_ARRAY
-/// chunk is delivered through the exact same cloud-fetch blob-storage
-/// mechanism as an Arrow one, just decoded differently, so the same
-/// "server can over-deliver past its declared row count" risk applies here
-/// too. No batch-boundary complexity to worry about here (unlike the Arrow
-/// case) -- rows are already a flat `Vec`, so this is a plain `truncate`.
-fn decode_json_chunk(blob: &Bytes, truncate_to: Option<i64>) -> Result<Vec<Vec<Option<String>>>, ApiError> {
-    let mut rows: Vec<Vec<Option<String>>> = serde_json::from_slice(&blob[..]).map_err(|e| ApiError {
-        message: format!("bad JSON_ARRAY chunk: {e}"),
-        transient: false,
-    })?;
-    if let Some(n) = truncate_to.filter(|n| *n > 0) {
-        rows.truncate(n as usize);
-    }
-    Ok(rows)
-}
-
-/// JSON_ARRAY counterpart to `run_pipeline` -- same submit/poll/fetch/
-/// reorder machinery (chunk bytes are chunk bytes regardless of format),
-/// decoding each chunk as a JSON array of rows instead of Arrow-IPC.
-pub async fn run_json_pipeline(
-    client: Arc<DbClient>,
-    statement: &str,
-    catalog: Option<&str>,
-    schema: Option<&str>,
-    parameters: Option<Value>,
-) -> Result<JsonResult, ApiError> {
-    let submitted = client
-        .execute_json_statement(statement, catalog, schema, parameters)
-        .await?;
-    let num_chunks = submitted.chunk_metas.len();
-
-    let rx = client.clone().fetch_chunks_with_backpressure(
-        submitted.statement_id.clone(),
-        submitted.chunk_metas,
-        submitted.compressed,
-    );
-    let mut reorder = ReorderBuffer::new(rx);
-
-    let mut decode_handles = Vec::with_capacity(num_chunks);
-    while let Some(item) = reorder.next().await? {
-        let truncate_to = item.truncate_to;
-        decode_handles.push(tokio::task::spawn_blocking(move || {
-            decode_json_chunk(&item.blob, truncate_to)
-        }));
-    }
-
-    let mut rows = Vec::new();
-    for handle in decode_handles {
-        rows.extend(handle.await.map_err(join_error)??);
-    }
-
-    Ok(JsonResult {
-        statement_id: submitted.statement_id,
-        num_chunks,
-        rows,
-        columns: submitted.columns,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ok_worker() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
+    }
+
+    fn panicking_worker() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async { panic!("simulated download-worker panic") })
+    }
+
+    #[tokio::test]
+    async fn first_worker_panic_is_none_when_all_workers_finish_cleanly() {
+        let handles = vec![ok_worker(), ok_worker(), ok_worker()];
+        assert!(first_worker_panic(handles).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn first_worker_panic_surfaces_a_real_panic() {
+        let handles = vec![ok_worker(), panicking_worker(), ok_worker()];
+        let err = first_worker_panic(handles).await;
+        assert!(
+            err.is_some(),
+            "a panicked worker must surface as an error, not be silently dropped"
+        );
+    }
 
     fn item(idx: i64) -> ChunkItem {
         ChunkItem {

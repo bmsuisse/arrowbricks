@@ -1,7 +1,6 @@
 //! Converts a JSON_ARRAY result (`Vec<Vec<Option<String>>>` rows -- every
 //! non-null value a string regardless of real column type, Databricks' own
-//! contract, see `client.rs`'s `execute_json_statement`) into a proper,
-//! correctly-typed Arrow `RecordBatch`, driven by the manifest's
+//! contract) into a proper, correctly-typed Arrow `RecordBatch`, driven by the manifest's
 //! `ColumnDescription`s (`type_name`, plus `type_precision`/`type_scale` for
 //! `DECIMAL`).
 //!

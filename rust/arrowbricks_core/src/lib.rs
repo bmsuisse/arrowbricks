@@ -248,6 +248,27 @@ impl PyDbClient {
         protocol: String,
     ) -> PyResult<Self> {
         let protocol = Protocol::parse(&protocol).map_err(PyValueError::new_err)?;
+        // `Duration::from_secs_f64` panics on negative/NaN/infinite input --
+        // reached directly from this constructor via `with_http_timeout`/
+        // `with_warehouse_start_timeout`/`with_warehouse_confirmed_running_ttl`
+        // below, a Rust panic across the FFI boundary surfaces to a Python
+        // caller as an opaque `PanicException` instead of the `ValueError`
+        // a bad constructor argument should raise. Found via adversarial
+        // testing of hostile constructor args (e.g. `http_timeout=-5.0`),
+        // not a real workload -- validated here, once, rather than making
+        // every `with_*` setter fallible for every caller including
+        // internal Rust ones that only ever pass known-good constants.
+        for (name, seconds) in [
+            ("http_timeout", http_timeout),
+            ("warehouse_start_timeout", warehouse_start_timeout),
+            ("warehouse_confirmed_running_ttl_s", warehouse_confirmed_running_ttl_s),
+        ] {
+            if !seconds.is_finite() || seconds < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be a finite, non-negative number of seconds, got {seconds}"
+                )));
+            }
+        }
         let db_client = match (token, token_provider) {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(

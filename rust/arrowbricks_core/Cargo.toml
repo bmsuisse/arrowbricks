@@ -22,8 +22,13 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Decompresses cloud-fetch chunk bytes when the server honors our
 # `result_compression: LZ4_FRAME` request (see client.rs's execute_statement)
 # -- the same LZ4 Frame format databricks-sql-python's `lz4.frame` decodes.
-# Pure Rust (no C toolchain dependency), matching this crate's reasoning for
-# avoiding aws-lc-sys-style native-build pain elsewhere.
+# Pure Rust, no C toolchain dependency -- unlike reqwest's `rustls` feature
+# below, which *does* pull one in (`__rustls-aws-lc-rs` -> aws-lc-rs ->
+# aws-lc-sys, confirmed via `cargo tree -i aws-lc-sys`; this crate has no
+# `ring` feature available in reqwest 0.13 to avoid it with). A previous
+# version of this comment claimed the opposite -- that this crate avoids
+# aws-lc-sys-style native-build pain elsewhere too -- found wrong on review;
+# see AGENTS.md's build-prerequisites note.
 lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
 pyo3 = { version = "0.29.1", features = ["abi3-py311"] }
 # pyo3-arrow's only optional feature is buffer_protocol (on by default),
@@ -51,6 +56,13 @@ extension-module = ["pyo3/extension-module"]
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 wiremock = "0.6.5"
+
+# Currently clean on all three by luck, not enforcement -- pinning them here
+# so a future PR that introduces one fails CI instead of silently landing.
+[lints.clippy]
+redundant_clone = "warn"
+large_enum_variant = "warn"
+needless_collect = "warn"
 
 [profile.release]
 # opt-level stays at the implicit default (3, speed) rather than "s"/"z" --

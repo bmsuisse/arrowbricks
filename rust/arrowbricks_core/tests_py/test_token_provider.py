@@ -249,3 +249,20 @@ def test_client_rejects_both_token_and_token_provider():
             token_provider=lambda: "fake",
             protocol="sea",
         )
+
+
+@pytest.mark.parametrize("kwarg", ["http_timeout", "warehouse_start_timeout", "warehouse_confirmed_running_ttl_s"])
+@pytest.mark.parametrize("bad_value", [-1.0, float("nan"), float("inf")])
+def test_client_rejects_invalid_duration_kwargs_with_value_error(kwarg: str, bad_value: float):
+    """Regression test: these three kwargs feed Rust's Duration::from_secs_f64,
+    which panics on negative/NaN/infinite input -- a panic crossing the PyO3
+    boundary surfaces as an opaque PanicException instead of a catchable
+    ValueError. Found via adversarial testing, not a real workload."""
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        arrowbricks_core.Client(
+            host="https://example.com",
+            warehouse_id=WAREHOUSE_ID,
+            token="fake",
+            protocol="sea",
+            **{kwarg: bad_value},
+        )

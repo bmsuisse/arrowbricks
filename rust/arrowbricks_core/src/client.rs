@@ -148,8 +148,7 @@ struct ResultBody {
     external_links: Vec<ResultLinkBody>,
     /// Only present for `disposition: INLINE` + `format: JSON_ARRAY` -- each
     /// row a `Vec<Option<String>>` (every non-null value a string,
-    /// Databricks' own JSON_ARRAY contract, same as `execute_json_statement`'s
-    /// normal `EXTERNAL_LINKS`+`JSON_ARRAY` chunks). Consumed by
+    /// Databricks' own JSON_ARRAY contract). Consumed by
     /// `json_convert::json_array_to_record_batch` on the `prefer_inline`
     /// fast path.
     #[serde(default)]
@@ -329,7 +328,7 @@ pub struct StatementSubmitResult {
 
 /// What `execute_arrow_statement_prefer_inline` gets you -- either the whole
 /// result inline as raw JSON_ARRAY rows (every non-null value a string,
-/// same contract as `execute_json_statement`; converting these into a real
+/// Databricks' own JSON_ARRAY contract; converting these into a real
 /// `RecordBatch` is `pipeline.rs`'s job via `json_convert`, not this
 /// Arrow-agnostic module's -- see this file's own module doc comment), or a
 /// normal `StatementSubmitResult` to fetch chunks for exactly as if
@@ -353,15 +352,18 @@ pub struct ChunkItem {
     pub blob: Bytes,
     pub row_count: Option<i64>,
     pub chunk_index: i64,
-    /// Set only by the Thrift cloud-fetch path (`pipeline.rs`'s
-    /// `fetch_thrift_link`) -- a declared row-count bound this chunk's own
-    /// decoded batches must be sliced down to if they exceed it, since a
-    /// Thrift `resultLinks` file (like SEA's own cloud-fetch files) can
+    /// A declared row-count bound this chunk's own decoded batches must be
+    /// sliced down to if they exceed it, since a cloud-fetch file can
     /// legitimately contain more rows than its own declared count for a
     /// `LIMIT`-bounded query (see `pipeline.rs`'s `decode_chunk_item`).
-    /// `None` for every other producer (SEA's own chunk fetch, Thrift's
-    /// inline `arrowBatches`) -- their row counts are never overshot the
-    /// same way, so there's nothing to slice.
+    /// Every real producer sets this now -- Thrift `resultLinks`
+    /// (`pipeline.rs`'s `fetch_thrift_link`), Thrift's inline `arrowBatches`
+    /// (`pipeline.rs`'s `run_thrift_fetch_loop`), and SEA's own chunk fetch
+    /// (`fetch_chunks_with_backpressure`, below, though only when a
+    /// `chunk_index` resolves to exactly one blob -- see that function's own
+    /// comment for why more than one blob is left untruncated). `None`
+    /// means no authoritative bound is known, not "this chunk was never
+    /// overshot" -- `decode_chunk_item` treats it as a no-op either way.
     pub truncate_to: Option<i64>,
 }
 
@@ -529,6 +531,13 @@ pub struct DbClient {
 /// ever split into -- see `DbClient::download_slots`.
 pub const MAX_SPLIT_PARTS: usize = 8;
 
+/// `chunk_fetch_concurrency`'s own default -- see `DbClient::new`'s own
+/// comment on it for the measured numbers behind picking 64. Named so
+/// `download_slots` (sized to this same number, since it's a budget over
+/// the same worker count) can't drift from it the way a second bare `64`
+/// silently could.
+const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 64;
+
 /// Session pool for the Thrift backend -- same checkout/checkin shape and
 /// the exact same two hard constraints as `SessionPool` above (a session is
 /// created *for* one (catalog, schema) pair and can't be redirected; Thrift's
@@ -544,8 +553,8 @@ pub const MAX_SPLIT_PARTS: usize = 8;
 /// call and close it again immediately after (see `execute_lazy_thrift`).
 #[derive(Default)]
 struct ThriftSessionPool {
-    idle: Mutex<HashMap<(Option<String>, Option<String>), Vec<thrift::SessionHandle>>>,
-    total: Mutex<HashMap<(Option<String>, Option<String>), usize>>,
+    idle: Mutex<HashMap<SessionKey, Vec<thrift::SessionHandle>>>,
+    total: Mutex<HashMap<SessionKey, usize>>,
 }
 
 /// How long the Thrift path polls `GetOperationStatus` when a statement
@@ -621,13 +630,18 @@ const THRIFT_DIRECT_RESULTS_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 /// still throws away a perfectly good session), but guarantees a session
 /// that might be in the same bad state behind the SparkSession-null crash
 /// above is never handed to a second caller.
+/// A session pool key -- `(catalog, schema)`, named since a session is
+/// created *for* one such pair and can't be redirected to another (see
+/// `SessionPool`/`ThriftSessionPool`'s own doc comments).
+type SessionKey = (Option<String>, Option<String>);
+
 #[derive(Default)]
 struct SessionPool {
     // ponytail: fixed cap, not a constructor kwarg -- nothing's asked to
     // tune this yet; raise (or expose one) if a workload needs more
     // concurrent sessions per (catalog, schema) pair than this.
-    idle: Mutex<HashMap<(Option<String>, Option<String>), Vec<String>>>,
-    total: Mutex<HashMap<(Option<String>, Option<String>), usize>>,
+    idle: Mutex<HashMap<SessionKey, Vec<String>>>,
+    total: Mutex<HashMap<SessionKey, usize>>,
 }
 
 pub const MAX_SESSIONS_PER_KEY: usize = 8;
@@ -672,7 +686,7 @@ impl DbClient {
             // a claim that 64 is the true optimum. A caller with a very
             // large chunk count or a fast/low-latency link to the warehouse
             // may still want to raise it further.
-            chunk_fetch_concurrency: 64,
+            chunk_fetch_concurrency: DEFAULT_CHUNK_FETCH_CONCURRENCY,
             warehouse_start_timeout: Duration::from_secs(300),
             warehouse_confirmed_running_ttl: Duration::from_secs(30),
             warehouse_confirmed_running_at: Mutex::new(None),
@@ -680,7 +694,7 @@ impl DbClient {
             session_pool: SessionPool::default(),
             protocol: Protocol::Thrift,
             thrift_session_pool: ThriftSessionPool::default(),
-            download_slots: tokio::sync::Semaphore::new(64),
+            download_slots: tokio::sync::Semaphore::new(DEFAULT_CHUNK_FETCH_CONCURRENCY),
         }
     }
 
@@ -843,8 +857,16 @@ impl DbClient {
         // One permit per download is mandatory; the worker pool already
         // bounds concurrent links to `chunk_fetch_concurrency`, so this
         // never blocks in practice -- it just makes the budget accounting
-        // exact.
-        let _base = self.download_slots.acquire().await;
+        // exact. `acquire()`'s `Err` case (the semaphore closed) can't
+        // happen -- nothing in this crate ever calls `.close()` on
+        // `download_slots` -- but propagating it as a real error instead of
+        // an `.expect()` costs nothing and avoids a panic if that ever
+        // changes.
+        let _base = self
+            .download_slots
+            .acquire()
+            .await
+            .map_err(|e| ApiError::permanent(format!("download_slots semaphore closed unexpectedly: {e}")))?;
         let want = (MAX_SPLIT_PARTS - 1).min(self.download_slots.available_permits());
         let extra = if want > 0 {
             self.download_slots.try_acquire_many(want as u32).ok()
@@ -960,8 +982,33 @@ impl DbClient {
 
         let mut out = bytes::BytesMut::with_capacity(total.unwrap_or(head.len() as u64) as usize);
         out.extend_from_slice(&head);
-        for h in handles {
-            out.extend_from_slice(&h.await.map_err(join_error)??);
+        // Parts must concatenate in order, so this can't use `JoinSet`
+        // (which yields in completion order) without tracking indices --
+        // simpler to keep the `Vec` and explicitly `.abort()` every
+        // not-yet-awaited sibling the moment one part fails, rather than
+        // silently leaving them running (a bare `?` here would return
+        // early and just drop the rest, which does NOT cancel them --
+        // `JoinHandle::drop` detaches, it doesn't abort -- leaving up to
+        // `MAX_SPLIT_PARTS - 1` sibling Range downloads, each with their
+        // own `retry_call` backoff, still in flight for a link the caller
+        // has already given up on).
+        let mut iter = handles.into_iter();
+        while let Some(h) = iter.next() {
+            match h.await {
+                Ok(Ok(part)) => out.extend_from_slice(&part),
+                Ok(Err(e)) => {
+                    for remaining in iter {
+                        remaining.abort();
+                    }
+                    return Err(e);
+                }
+                Err(join_err) => {
+                    for remaining in iter {
+                        remaining.abort();
+                    }
+                    return Err(join_error(join_err));
+                }
+            }
         }
         let bytes = out.freeze();
         if let Some(t) = total
@@ -1443,24 +1490,6 @@ impl DbClient {
                 .await
                 .map(InlineOrExternal::External),
         }
-    }
-
-    /// Like `execute_arrow_statement`, fixed to JSON_ARRAY -- each fetched
-    /// chunk's bytes are then a JSON array of rows, each row itself an array
-    /// of values where every non-null value is a *string* regardless of its
-    /// real column type (Databricks' own JSON_ARRAY contract; null stays
-    /// JSON null) -- casting by the manifest's column type_name, if wanted,
-    /// is left to the caller, same as the Python original does nothing extra
-    /// here either.
-    pub async fn execute_json_statement(
-        &self,
-        statement: &str,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        parameters: Option<Value>,
-    ) -> Result<StatementSubmitResult, ApiError> {
-        self.execute_statement(statement, "JSON_ARRAY", catalog, schema, parameters)
-            .await
     }
 
     /// Shared by `execute_statement` and `execute_arrow_statement_prefer_inline`:
