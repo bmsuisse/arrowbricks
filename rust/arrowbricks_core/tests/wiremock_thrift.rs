@@ -467,6 +467,71 @@ async fn thrift_small_query_returns_data_inline_with_zero_fetch_results_calls() 
     assert_ids_in_order(&batches, 3);
 }
 
+/// Regression test: a zero-row Thrift result (e.g. `WHERE 1=0`) must still
+/// expose `columns`/`schema` -- before this fix, `ResultStream` was built
+/// with `schema: None, columns: Vec::new()` unconditionally, and since no
+/// batch is ever decoded when there are zero rows, nothing ever populated
+/// them, leaving `cursor.description == []` (SEA doesn't have this gap: its
+/// `ResultStream.columns` comes from the manifest at submit time, present
+/// regardless of row count). `TGetResultSetMetadataResp.arrowSchema` carries
+/// the real schema even for zero rows -- this test proves it's now decoded
+/// into both fields immediately, before `fetchall_arrow` is ever called.
+#[tokio::test]
+async fn thrift_zero_row_result_still_has_schema_and_columns() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+
+    let schema = test_schema();
+    let (schema_bytes, _batch_bytes) = build_schema_and_batch_messages(&schema, &[]);
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(
+                b"op-empty",
+                b"opsecret-empty",
+                Some(DirectResultsSpec {
+                    operation_state: Some(operation_state::FINISHED),
+                    operation_error: None,
+                    metadata: Some((false, Some(schema_bytes))),
+                    fetch: Some(FetchSpec {
+                        has_more_rows: false,
+                        ..Default::default()
+                    }),
+                }),
+            ),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("FetchResults"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let stream = execute_lazy_thrift(client, "SELECT * FROM t WHERE 1 = 0", None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stream.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        vec!["id", "label"],
+        "columns must be populated from TGetResultSetMetadataResp.arrowSchema even with zero rows"
+    );
+    let schema = stream
+        .schema
+        .expect("schema must be set even before any batch is fetched");
+    assert_eq!(schema.field(0).name(), "id");
+    assert_eq!(schema.field(1).name(), "label");
+}
+
 /// Regression test for a real gap found on review: `execute_ndjson_stream`
 /// (backing `stream_query_json`) unconditionally submitted via SEA
 /// regardless of `protocol=`, so every Thrift caller (the default) got

@@ -474,7 +474,7 @@ async fn submit_and_await_thrift_statement(
 /// underneath), so `PyResultSet` and everything above it needs zero
 /// Thrift-specific handling.
 ///
-/// Session handling mirrors the SEA session pool (`client::SessionPool`)
+/// Session handling mirrors the SEA session pool (`client::Pool<String>`)
 /// exactly, with one necessary difference: Thrift's `TExecuteStatementReq`
 /// *requires* a `sessionHandle` (unlike SEA's optional `session_id`), so
 /// pool exhaustion/creation failure can't fall back to a session-less
@@ -493,7 +493,7 @@ async fn submit_and_await_thrift_statement(
 /// lifetime the way one might expect from a "session" name.
 ///
 /// **A session checked out for this call (whether pooled or a throwaway,
-/// see `client::ThriftSessionPool`'s doc comment) must stay open until the
+/// see `client::Pool<thrift::SessionHandle>`'s doc comment) must stay open until the
 /// operation it created is fully drained and closed -- not just until the
 /// statement reaches a terminal "finished" state.** Found the hard way by
 /// testing genuine concurrent load against the real warehouse: closing a
@@ -523,12 +523,33 @@ pub async fn execute_lazy_thrift(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
-    let (statement_id, rx) = submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
+    let (statement_id, schema_bytes, rx) =
+        submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
+    // Populate `schema`/`columns` up front from Thrift's own result-set
+    // metadata, the same way SEA's `manifest.schema.columns` already does --
+    // otherwise both stay empty until a batch is actually decoded, which for
+    // a zero-row result never happens, leaving `cursor.description == []`.
+    let schema = schema_bytes.as_ref().and_then(decode_ipc_schema);
+    let columns = schema
+        .as_ref()
+        .map(|s| {
+            s.fields()
+                .iter()
+                .map(|f| ColumnDescription {
+                    name: f.name().clone(),
+                    type_name: Some(f.data_type().to_string()),
+                    type_precision: None,
+                    type_scale: None,
+                    type_text: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(ResultStream {
         statement_id,
         num_chunks: 0,
-        schema: None,
-        columns: Vec::new(),
+        schema,
+        columns,
         reorder: ReorderBuffer::new(rx),
         pending: VecDeque::new(),
         pending_rows: 0,
@@ -551,7 +572,14 @@ async fn submit_thrift_and_start_fetch(
     catalog: Option<&str>,
     schema: Option<&str>,
     parameters: Option<Value>,
-) -> Result<(String, mpsc::Receiver<Result<ChunkItem, ApiError>>), ApiError> {
+) -> Result<
+    (
+        String,
+        Option<bytes::Bytes>,
+        mpsc::Receiver<Result<ChunkItem, ApiError>>,
+    ),
+    ApiError,
+> {
     client.ensure_warehouse_running().await?;
     let pooled = client.thrift_checkout_session(catalog, schema).await;
     let (session, from_pool) = match pooled {
@@ -584,12 +612,52 @@ async fn submit_thrift_and_start_fetch(
     let ready = ready?;
 
     let statement_id = hex_encode(&ready.operation.operation_id.guid);
+    // Cheap: `Bytes::clone()` is a refcount bump, not a copy. The loop below
+    // takes ownership of `ready` (and so of the original), but the caller
+    // needs this to populate `description`/`schema()` before any row is
+    // fetched -- see `execute_lazy_thrift`'s own doc comment on why SEA's
+    // manifest-derived fallback has no Thrift equivalent without this.
+    let schema_bytes = ready.schema_bytes.clone();
 
     let concurrency = client.chunk_fetch_concurrency.max(1);
     let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
     tokio::spawn(drive_thrift_fetch_loop(client, ready, throwaway_session, tx));
 
-    Ok((statement_id, rx))
+    Ok((statement_id, schema_bytes, rx))
+}
+
+/// Decodes just the Arrow-IPC *schema message* out of `blob` -- no batches
+/// required, unlike `decode_chunk`. Used to give Thrift a `description`/
+/// `schema()` before any row has been fetched (SEA gets this for free from
+/// the manifest; Thrift's equivalent, `TGetResultSetMetadataResp.arrowSchema`,
+/// otherwise sits unused until the first real batch is decoded -- which
+/// never happens for a zero-row result, see `execute_lazy_thrift`).
+///
+/// `blob` here is *exactly* one bare schema message and nothing else --
+/// unlike every other caller of `StreamDecoder` in this file, which always
+/// feeds it a schema followed by a batch or an explicit end-of-stream
+/// marker. Found in code review and confirmed directly against
+/// `arrow_ipc::reader::StreamDecoder`'s own source: its internal state
+/// machine only finalizes a message (`self.schema = Some(..)`) on the
+/// buffer-emptiness check for the *next* message, so a buffer that ends
+/// exactly at this message's last byte leaves `decode()` returning `Ok(None)`
+/// with the schema silently never set, not an error -- appending the same
+/// 8-byte end-of-stream marker `StreamWriter::finish()` itself writes
+/// (continuation marker `0xFFFFFFFF` + zero length) gives it the trailing
+/// byte it needs to notice the schema message is actually complete.
+fn decode_ipc_schema(blob: &Bytes) -> Option<SchemaRef> {
+    let mut bytes = Vec::with_capacity(blob.len() + 8);
+    bytes.extend_from_slice(blob);
+    bytes.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    bytes.extend_from_slice(&0i32.to_le_bytes());
+    let mut buffer = ArrowBuffer::from(Bytes::from(bytes));
+    let mut decoder = StreamDecoder::new();
+    while !buffer.is_empty() {
+        if decoder.decode(&mut buffer).is_err() {
+            return None;
+        }
+    }
+    decoder.schema()
 }
 
 /// Drives the sequential `FetchResults(orientation: FETCH_NEXT)` loop for
@@ -1406,7 +1474,11 @@ pub async fn execute_ndjson_stream(
     non_finite_as_string: bool,
 ) -> Result<NdjsonStream, ApiError> {
     let (statement_id, num_chunks, rx) = if client.protocol == Protocol::Thrift {
-        let (statement_id, rx) = submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
+        // NDJSON output has no `description`/column-schema concept, so the
+        // schema bytes `submit_thrift_and_start_fetch` now also returns
+        // (see `execute_lazy_thrift`) aren't needed here.
+        let (statement_id, _schema_bytes, rx) =
+            submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
         (statement_id, 0, rx)
     } else {
         let submitted = client
