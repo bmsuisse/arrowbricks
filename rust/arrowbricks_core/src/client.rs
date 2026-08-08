@@ -509,9 +509,23 @@ pub struct DbClient {
     /// rebuild the extension to do it. Also doubles, on the Thrift path, as
     /// `TExecuteStatementReq.canDecompressLZ4Result`.
     compress_results: bool,
-    session_pool: SessionPool,
+    session_pool: Pool<String>,
     pub protocol: Protocol,
-    thrift_session_pool: ThriftSessionPool,
+    /// Same checkout/checkin shape and the exact same two hard constraints
+    /// as `session_pool` above (a session is created *for* one (catalog,
+    /// schema) pair and can't be redirected; Thrift's session model is
+    /// *mandatory* per statement, unlike SEA's optional `session_id`, and
+    /// this crate has not independently confirmed whether concurrent
+    /// statements on one Thrift session are safe against a real workspace
+    /// the way the SEA crash was -- so this pool exists defensively,
+    /// following the same proven-safe pattern regardless of whether the
+    /// analogous crash reproduces here). Unlike SEA, there is no
+    /// "sessionless" fallback available at all -- `TExecuteStatementReq.
+    /// sessionHandle` is required by the protocol -- so a pool-exhaustion/
+    /// creation-failure `None` from `thrift_checkout_session` means the
+    /// caller must open one throwaway session for that single call and
+    /// close it again immediately after (see `execute_lazy_thrift`).
+    thrift_session_pool: Pool<thrift::SessionHandle>,
     /// Global budget for concurrent cloud-fetch HTTP requests, sized to
     /// `chunk_fetch_concurrency`. Every link download takes one permit; a
     /// download that finds spare permits (few links in flight -- exactly
@@ -537,25 +551,6 @@ pub const MAX_SPLIT_PARTS: usize = 8;
 /// the same worker count) can't drift from it the way a second bare `64`
 /// silently could.
 const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 64;
-
-/// Session pool for the Thrift backend -- same checkout/checkin shape and
-/// the exact same two hard constraints as `SessionPool` above (a session is
-/// created *for* one (catalog, schema) pair and can't be redirected; Thrift's
-/// session model is *mandatory* per statement, unlike SEA's optional
-/// `session_id`, and this crate has not independently confirmed whether
-/// concurrent statements on one Thrift session are safe against a real
-/// workspace the way the SEA crash was -- so this pool exists defensively,
-/// following the same proven-safe pattern regardless of whether the
-/// analogous crash reproduces here. Unlike SEA, there is no "sessionless"
-/// fallback available at all -- `TExecuteStatementReq.sessionHandle` is
-/// required by the protocol -- so a pool-exhaustion/creation-failure `None`
-/// here means the caller must open one throwaway session for that single
-/// call and close it again immediately after (see `execute_lazy_thrift`).
-#[derive(Default)]
-struct ThriftSessionPool {
-    idle: Mutex<HashMap<SessionKey, Vec<thrift::SessionHandle>>>,
-    total: Mutex<HashMap<SessionKey, usize>>,
-}
 
 /// How long the Thrift path polls `GetOperationStatus` when a statement
 /// doesn't finish within its `getDirectResults` budget (see
@@ -635,13 +630,65 @@ const THRIFT_DIRECT_RESULTS_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 /// `SessionPool`/`ThriftSessionPool`'s own doc comments).
 type SessionKey = (Option<String>, Option<String>);
 
-#[derive(Default)]
-struct SessionPool {
+/// Generic checkout/checkin pool keyed by (catalog, schema) -- shared by
+/// SEA's session ids (`Pool<String>`) and Thrift's session handles
+/// (`Pool<thrift::SessionHandle>`), which had this exact logic duplicated
+/// twice over before this. See `checkout_session`/`thrift_checkout_session`
+/// for the constraints that shape it (session pinned to one (catalog,
+/// schema) pair, safe for sequential reuse only, checkout never blocks on
+/// exhaustion).
+struct Pool<T> {
     // ponytail: fixed cap, not a constructor kwarg -- nothing's asked to
     // tune this yet; raise (or expose one) if a workload needs more
     // concurrent sessions per (catalog, schema) pair than this.
-    idle: Mutex<HashMap<SessionKey, Vec<String>>>,
+    idle: Mutex<HashMap<SessionKey, Vec<T>>>,
     total: Mutex<HashMap<SessionKey, usize>>,
+}
+
+// Manual impl instead of `#[derive(Default)]`: the derive would wrongly
+// require `T: Default` even though neither field actually needs it.
+impl<T> Default for Pool<T> {
+    fn default() -> Self {
+        Self {
+            idle: Mutex::new(HashMap::new()),
+            total: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<T> Pool<T> {
+    fn take(&self, key: &SessionKey) -> Option<T> {
+        self.idle.lock().unwrap().get_mut(key).and_then(Vec::pop)
+    }
+
+    /// Reserves a slot for `key` if under `MAX_SESSIONS_PER_KEY`. The
+    /// increment happens before the caller's own creation call so two
+    /// concurrent callers can't both squeeze past the cap; call `release` if
+    /// creation then fails.
+    fn reserve(&self, key: &SessionKey) -> bool {
+        let mut total = self.total.lock().unwrap();
+        let count = total.entry(key.clone()).or_insert(0);
+        if *count >= MAX_SESSIONS_PER_KEY {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+
+    fn release(&self, key: &SessionKey) {
+        let mut total = self.total.lock().unwrap();
+        if let Some(count) = total.get_mut(key) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    fn put(&self, key: SessionKey, item: T) {
+        self.idle.lock().unwrap().entry(key).or_default().push(item);
+    }
+
+    fn drain_idle(&self) -> Vec<T> {
+        self.idle.lock().unwrap().drain().flat_map(|(_, v)| v).collect()
+    }
 }
 
 pub const MAX_SESSIONS_PER_KEY: usize = 8;
@@ -691,9 +738,9 @@ impl DbClient {
             warehouse_confirmed_running_ttl: Duration::from_secs(30),
             warehouse_confirmed_running_at: Mutex::new(None),
             compress_results: true,
-            session_pool: SessionPool::default(),
+            session_pool: Pool::default(),
             protocol: Protocol::Thrift,
-            thrift_session_pool: ThriftSessionPool::default(),
+            thrift_session_pool: Pool::default(),
             download_slots: tokio::sync::Semaphore::new(DEFAULT_CHUNK_FETCH_CONCURRENCY),
         }
     }
@@ -1102,29 +1149,16 @@ impl DbClient {
     /// releases the reservation again.
     async fn checkout_session(&self, catalog: Option<&str>, schema: Option<&str>) -> Option<String> {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
-        {
-            let mut idle = self.session_pool.idle.lock().unwrap();
-            if let Some(ids) = idle.get_mut(&key)
-                && let Some(id) = ids.pop()
-            {
-                return Some(id);
-            }
+        if let Some(id) = self.session_pool.take(&key) {
+            return Some(id);
         }
-        {
-            let mut total = self.session_pool.total.lock().unwrap();
-            let count = total.entry(key.clone()).or_insert(0);
-            if *count >= MAX_SESSIONS_PER_KEY {
-                return None;
-            }
-            *count += 1;
+        if !self.session_pool.reserve(&key) {
+            return None;
         }
         match self.create_session(catalog, schema).await {
             Ok(id) => Some(id),
             Err(_) => {
-                let mut total = self.session_pool.total.lock().unwrap();
-                if let Some(count) = total.get_mut(&key) {
-                    *count = count.saturating_sub(1);
-                }
+                self.session_pool.release(&key);
                 None
             }
         }
@@ -1137,18 +1171,9 @@ impl DbClient {
     fn checkin_session(&self, catalog: Option<&str>, schema: Option<&str>, session_id: String, keep: bool) {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
         if keep {
-            self.session_pool
-                .idle
-                .lock()
-                .unwrap()
-                .entry(key)
-                .or_default()
-                .push(session_id);
+            self.session_pool.put(key, session_id);
         } else {
-            let mut total = self.session_pool.total.lock().unwrap();
-            if let Some(count) = total.get_mut(&key) {
-                *count = count.saturating_sub(1);
-            }
+            self.session_pool.release(&key);
         }
     }
 
@@ -1160,11 +1185,7 @@ impl DbClient {
     /// this before every pending statement has finished is a caller
     /// ordering issue, not something this method can fix from inside.
     pub async fn close_all_sessions(&self) {
-        let ids: Vec<String> = {
-            let mut idle = self.session_pool.idle.lock().unwrap();
-            idle.drain().flat_map(|(_, v)| v).collect()
-        };
-        for id in ids {
+        for id in self.session_pool.drain_idle() {
             self.delete_session(&id).await;
         }
     }
@@ -1264,29 +1285,16 @@ impl DbClient {
         schema: Option<&str>,
     ) -> Option<thrift::SessionHandle> {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
-        {
-            let mut idle = self.thrift_session_pool.idle.lock().unwrap();
-            if let Some(ids) = idle.get_mut(&key)
-                && let Some(id) = ids.pop()
-            {
-                return Some(id);
-            }
+        if let Some(handle) = self.thrift_session_pool.take(&key) {
+            return Some(handle);
         }
-        {
-            let mut total = self.thrift_session_pool.total.lock().unwrap();
-            let count = total.entry(key.clone()).or_insert(0);
-            if *count >= MAX_SESSIONS_PER_KEY {
-                return None;
-            }
-            *count += 1;
+        if !self.thrift_session_pool.reserve(&key) {
+            return None;
         }
         match self.thrift_open_session_raw(catalog, schema).await {
             Ok(handle) => Some(handle),
             Err(_) => {
-                let mut total = self.thrift_session_pool.total.lock().unwrap();
-                if let Some(count) = total.get_mut(&key) {
-                    *count = count.saturating_sub(1);
-                }
+                self.thrift_session_pool.release(&key);
                 None
             }
         }
@@ -1301,29 +1309,16 @@ impl DbClient {
     ) {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
         if keep {
-            self.thrift_session_pool
-                .idle
-                .lock()
-                .unwrap()
-                .entry(key)
-                .or_default()
-                .push(session);
+            self.thrift_session_pool.put(key, session);
         } else {
-            let mut total = self.thrift_session_pool.total.lock().unwrap();
-            if let Some(count) = total.get_mut(&key) {
-                *count = count.saturating_sub(1);
-            }
+            self.thrift_session_pool.release(&key);
         }
     }
 
     /// Best-effort close of every currently-idle pooled Thrift session --
     /// same contract as `close_all_sessions` (SEA).
     pub async fn close_all_thrift_sessions(&self) {
-        let sessions: Vec<thrift::SessionHandle> = {
-            let mut idle = self.thrift_session_pool.idle.lock().unwrap();
-            idle.drain().flat_map(|(_, v)| v).collect()
-        };
-        for s in sessions {
+        for s in self.thrift_session_pool.drain_idle() {
             self.thrift_close_session_raw(&s).await;
         }
     }
