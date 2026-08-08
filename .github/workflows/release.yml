@@ -34,12 +34,15 @@ jobs:
   # no per-Python-version build matrix needed, unlike a non-abi3 PyO3 crate.
   #
   # aarch64 builds natively on a hosted arm64 runner rather than
-  # cross-compiling from x86_64 -- reqwest's `rustls` feature pulls in
-  # aws-lc-sys (its only crypto backend in this reqwest version, no `ring`
-  # alternative), whose C build reliably fails under aarch64 cross-compile
-  # toolchains in maturin-action's manylinux container. Building natively
-  # sidesteps the whole cross-compilation class of aws-lc-sys issues instead
-  # of fighting the specific toolchain flags.
+  # cross-compiling from x86_64 -- this crate's TLS crypto backend (`ring`,
+  # previously `aws-lc-sys` -- see Cargo.toml's own comment on why) compiles
+  # native C/assembly via a `cc` build-dependency, and aws-lc-sys's version
+  # of that reliably failed under aarch64 cross-compile toolchains in
+  # maturin-action's manylinux container. Building natively sidesteps the
+  # whole cross-compilation class of issues generically, regardless of which
+  # crypto backend's C code is being compiled -- not re-verified that `ring`
+  # specifically still has the same cross-compile problem aws-lc-sys did,
+  # since native building never needed to find out.
   linux:
     needs: test
     strategy:

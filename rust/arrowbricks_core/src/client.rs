@@ -698,12 +698,26 @@ impl<T> Pool<T> {
 
 pub const MAX_SESSIONS_PER_KEY: usize = 8;
 
+/// rustls (via reqwest's `rustls-no-provider` feature, see this crate's own
+/// Cargo.toml comment on why) has no crypto backend wired in until one is
+/// installed process-wide, and building a `reqwest::Client` panics if none
+/// has been -- called from every `DbClient` constructor rather than from
+/// the PyO3 module's own init, since a plain `cargo test`/pure-Rust caller
+/// never runs that init at all. `install_default` only errors if a
+/// provider was already installed (a second `DbClient`, or another
+/// extension in the same interpreter already installed one) -- not a real
+/// failure for us either way, so ignored.
+fn install_default_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 impl DbClient {
     pub fn new(host: &str, warehouse_id: &str, token: &str) -> Self {
         Self::with_token_provider(host, warehouse_id, Arc::new(StaticToken(token.to_string())))
     }
 
     pub fn with_token_provider(host: &str, warehouse_id: &str, token_provider: Arc<dyn TokenProvider>) -> Self {
+        install_default_crypto_provider();
         let host = host.trim_end_matches('/');
         // Only force https:// when no scheme was given at all -- same as
         // Python's check, but relaxed to not clobber an explicit http://

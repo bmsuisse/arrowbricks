@@ -23,7 +23,7 @@ Why arro3-core specifically, and why it can't be dropped without real new engine
 ## Commands
 
 ```bash
-uv sync --all-extras          # builds the Rust extension via maturin -- needs a Rust toolchain AND a C/C++ one (aws-lc-sys, pulled in transitively by reqwest's rustls feature -- see Cargo.toml's own comment on lz4_flex for the exact dependency chain; this is not obvious from the crate's own direct dependencies)
+uv sync --all-extras          # builds the Rust extension via maturin -- needs a Rust toolchain AND a C one (`ring`, this crate's TLS crypto backend, compiles its own hand-optimized assembly via a `cc` build-dependency -- see Cargo.toml's own comment on the `rustls`/`hyper-rustls` deps for why `ring` over the default `aws-lc-rs`; this is not obvious from the crate's own direct dependencies)
 uv run pytest -q              # Cursor-level suite (tests/)
 uv run pytest rust/arrowbricks_core/tests_py -v  # PyO3-level suite, not auto-discovered by the above
 uv run ruff check .

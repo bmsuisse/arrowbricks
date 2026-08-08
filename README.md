@@ -204,15 +204,15 @@ Measured against a real Databricks SQL warehouse (Azure Databricks, `2X-Small` *
 
 | | avg | stdev | range | peak RSS during the query |
 |---|---|---|---|---|
-| `databricks-sql-connector` | 1.05s | 0.17s | 0.92s - 1.24s | 16 MB |
-| arrowbricks | 0.53s | 0.05s | 0.49s - 0.58s | 16 MB |
+| `databricks-sql-connector` | 0.88s | 0.06s | 0.83s - 0.95s | 16 MB |
+| arrowbricks | 0.50s | 0.02s | 0.48s - 0.52s | 16 MB |
 
-**arrowbricks: ~2x faster**, same order-of-magnitude peak memory *for this query size* -- at 200k rows the Python interpreter's own baseline footprint dominates over the actual result data for both libraries, so this particular number doesn't show a difference. The real memory/footprint difference is in what gets installed, not what a single small query allocates:
+**arrowbricks: ~1.8x faster**, same order-of-magnitude peak memory *for this query size* -- at 200k rows the Python interpreter's own baseline footprint dominates over the actual result data for both libraries, so this particular number doesn't show a difference. The real memory/footprint difference is in what gets installed, not what a single small query allocates:
 
 | | installed size (package + all required deps) |
 |---|---|
 | `databricks-sql-connector` | 71 MB (pulls in `pandas`, `numpy`, `thrift`, `oauthlib`, `lz4`, `requests`, `urllib3`, `openpyxl`, ... as hard dependencies -- `pandas`+`numpy` alone are 61 MB of that) |
-| arrowbricks | 10 MB (zero required runtime dependencies -- the whole thing is one compiled Rust extension, built with `opt-level="s"` and no unused HTTP/2 support -- see `rust/arrowbricks_core/Cargo.toml`'s own `[profile.release]` comment for the measurements behind that choice) |
+| arrowbricks | 9 MB (zero required runtime dependencies -- the whole thing is one compiled Rust extension, built with `opt-level="s"`, `ring` instead of the heavier default TLS crypto backend, and no unused HTTP/2 support -- see `rust/arrowbricks_core/Cargo.toml`'s own `[profile.release]` and `rustls`/`hyper-rustls` comments for the measurements behind those choices) |
 
 Run it yourself: [`examples/benchmark_vs_connector.py`](examples/benchmark_vs_connector.py) (needs both packages installed: `pip install arrowbricks databricks-sql-connector`). Reads `DATABRICKS_HOST`/`DATABRICKS_WAREHOUSE_ID`/`DATABRICKS_TOKEN` from the environment or a `.env` file (never commit one with a real token in it) and runs each library in its own subprocess so peak memory reflects that library alone:
 

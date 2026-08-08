@@ -22,14 +22,8 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Decompresses cloud-fetch chunk bytes when the server honors our
 # `result_compression: LZ4_FRAME` request (see client.rs's execute_statement)
 # -- the same LZ4 Frame format databricks-sql-python's `lz4.frame` decodes.
-# Pure Rust, no C toolchain dependency -- unlike reqwest's `rustls` feature
-# below, which *does* pull one in (`__rustls-aws-lc-rs` -> aws-lc-rs ->
-# aws-lc-sys, confirmed via `cargo tree -i aws-lc-sys`; this crate has no
-# `ring` feature available in reqwest 0.13 to avoid it with). A previous
-# version of this comment claimed the opposite -- that this crate avoids
-# aws-lc-sys-style native-build pain elsewhere too -- found wrong on review;
-# see AGENTS.md's build-prerequisites note.
-lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
+# Pure Rust, no C toolchain dependency -- unlike reqwest's TLS stack below.
+lz4_flex = { version = "0.14", default-features = false, features = ["frame", "std"] }
 pyo3 = { version = "0.29.1", features = ["abi3-py311"] }
 # pyo3-arrow's only optional feature is buffer_protocol (on by default),
 # which we don't use -- numpy/chrono/chrono-tz/arrow-cast(prettyprint) below
@@ -39,15 +33,31 @@ pyo3 = { version = "0.29.1", features = ["abi3-py311"] }
 pyo3-arrow = { version = "0.19.0", default-features = false }
 pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
 pythonize = "0.29.0"
-# No "http2": every request this crate makes is a plain, independent
-# HTTPS call from its own connection pool (no client-side multiplexing to
-# gain from HTTP/2's stream interleaving), and reqwest/hyper transparently
-# fall back to HTTP/1.1 when a peer doesn't offer h2 via ALPN -- dropping
-# this feature is a binary-size cut (the h2 crate, plus hyper's own HTTP/2
-# code paths), not a functional change, *if* the real Databricks endpoints
-# this crate talks to actually serve HTTP/1.1 -- confirmed against a real
-# workspace before landing this (see AGENTS.md).
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls"] }
+# reqwest's own `rustls` feature is hardcoded to `__rustls-aws-lc-rs`, no way
+# to opt out from that alias alone -- `rustls-no-provider` instead pulls in
+# rustls/hyper-rustls with *no* crypto backend wired in, and we supply our
+# own via the two direct deps below (`ring`, not `aws-lc-rs`: smaller
+# compiled footprint, confirmed by direct measurement -- both still need a C
+# compiler for their own hand-optimized assembly, so this isn't a "no C
+# toolchain" win the way `lz4_flex` above is) -- see
+# `install_default_crypto_provider` in client.rs, the one place that backend
+# choice actually has to be wired up. No "http2": every request this crate
+# makes is a plain, independent HTTPS call from its own connection pool (no
+# client-side multiplexing to gain from HTTP/2's stream interleaving), and
+# reqwest/hyper transparently fall back to HTTP/1.1 when a peer doesn't offer
+# h2 via ALPN -- dropping this feature is a binary-size cut (the h2 crate,
+# plus hyper's own HTTP/2 code paths), not a functional change, *if* the real
+# Databricks endpoints this crate talks to actually serve HTTP/1.1 --
+# confirmed against a real workspace before landing this (see AGENTS.md).
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls-no-provider"] }
+# Pinned to the same instance reqwest/hyper-rustls already resolve to
+# (feature unification, not a second copy) purely to turn on their "ring"
+# feature instead of the default aws-lc-rs -- see reqwest's own comment
+# above. `prefer-post-quantum` (rustls' own default) needs aws-lc-rs
+# specifically (ring has no ML-KEM support), so it's dropped along with it;
+# not required to talk to Databricks.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
