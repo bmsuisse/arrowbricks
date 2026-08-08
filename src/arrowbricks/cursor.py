@@ -74,10 +74,9 @@ class Cursor:
         # Prefers the *actual* Arrow schema off the first fetched chunk once
         # one has been pulled -- the manifest's own columns (used for
         # `_manifest_description` above) is only a pre-fetch estimate.
-        # (name, type_name) pairs from `._core.ResultSet.schema()` -- not a
-        # `core.Table`'s own `.schema` property, which specifically requires
-        # a real arro3 install to construct its return value (see
-        # cursor.py's `fetchmany_arrow`/`fetchall_arrow`).
+        # (name, type_name) pairs from `._core.ResultSet.schema()`, not a
+        # `core.Table`'s own `.schema` property -- see that method's own doc
+        # comment (lib.rs) for why.
         self._schema: list[tuple[str, str]] | None = None
         # fetchone()'s read-ahead buffer -- rows already pulled off the
         # underlying result but not yet returned to the caller.
@@ -205,9 +204,8 @@ class Cursor:
 
     def _take_buffered(self, n: int) -> list[Row]:
         """Pops up to `n` rows already sitting in fetchone()'s read-ahead
-        buffer, without touching the underlying result -- fetchmany()/
-        fetchall() call this first so nothing already pulled off the wire
-        is silently skipped."""
+        buffer, without touching the underlying result -- see `_row_buffer`'s
+        own comment for why fetchmany()/fetchall() call this first."""
         end = min(self._row_pos + n, len(self._row_buffer))
         rows = self._row_buffer[self._row_pos : end]
         self._row_pos = end
@@ -266,21 +264,11 @@ class Cursor:
         heartbeats stop the moment the statement is ready, before any chunk
         has actually been fetched. Yields HEARTBEAT zero or more times, then
         the final `list[Row]`."""
-
-        async def _gen() -> AsyncIterator[Any]:
-            async for item in await_with_heartbeat(self.fetchall(), total_timeout_s=total_timeout_s):
-                yield item
-
-        return _gen()
+        return await_with_heartbeat(self.fetchall(), total_timeout_s=total_timeout_s)
 
     def fetchall_arrow_streamed(self, *, total_timeout_s: float | None = None) -> AsyncIterator[Any]:
         """Arrow-`Table` counterpart to fetchall_streamed -- see its docstring."""
-
-        async def _gen() -> AsyncIterator[Any]:
-            async for item in await_with_heartbeat(self.fetchall_arrow(), total_timeout_s=total_timeout_s):
-                yield item
-
-        return _gen()
+        return await_with_heartbeat(self.fetchall_arrow(), total_timeout_s=total_timeout_s)
 
     def __aiter__(self) -> Cursor:
         return self

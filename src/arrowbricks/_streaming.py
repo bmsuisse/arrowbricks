@@ -110,9 +110,8 @@ async def await_with_heartbeat(
             done, _ = await asyncio.wait({task}, timeout=wait_for)
             if not done:
                 if deadline is not None and loop.time() >= deadline:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+                    # The `finally` block below cancels and awaits `task`
+                    # before this exception reaches the caller.
                     raise QueryTimeout(f"Query exceeded {total_timeout_s}s timeout")
                 yield HEARTBEAT
         yield await task

@@ -59,23 +59,11 @@ class DatabricksClient:
         # bottleneck for a result that size. Set False if your link to the
         # warehouse is fast/low-latency enough that decompression CPU time
         # stops paying for itself.
-        # protocol: "thrift" (the default, as of this crate's own
-        # benchmarking against a real production warehouse -- see
-        # AGENTS.md's design-invariant entry on this) speaks the same
-        # HiveServer2-compatible Thrift-over-HTTPS protocol
-        # databricks-sql-connector uses by *default* (when its own
-        # `use_sea` isn't set) -- measurably faster for small queries,
-        # since its ExecuteStatement RPC can return a small result inline
-        # in the same call that submits the statement (`getDirectResults`),
-        # where SEA always needs at least one further poll/fetch round
-        # trip -- and never slower than SEA on any query shape tested.
-        # "sea" submits statements via the REST Statement Execution API
-        # instead -- still fully supported, opt in with `protocol="sea"`
-        # if you have a reason to prefer it (e.g. matching prior behavior,
-        # or a workspace/network shape where SEA measures faster for you).
-        # `prefer_inline` has no effect under `protocol="thrift"` (silently
-        # ignored, not an error) -- Thrift has no INLINE-disposition
-        # equivalent, and doesn't need one.
+        # protocol: "thrift" (the default) or "sea" -- see client.rs's own
+        # `Protocol` doc comment for the full picture (measured numbers,
+        # AGENTS.md's design-invariant entry). `prefer_inline` has no effect
+        # under `protocol="thrift"` (silently ignored, not an error) --
+        # Thrift has no INLINE-disposition equivalent, and doesn't need one.
         if protocol not in ("sea", "thrift"):
             raise ValueError(f'DatabricksClient protocol must be "sea" or "thrift", got {protocol!r}')
         self._core_client = _core.Client(
@@ -136,14 +124,10 @@ class DatabricksClient:
         non_finite_floats: str = "null",
     ) -> AsyncIterator[Any]:
         """Convenience method form of the free function `stream_query_json(client,
-        sql, ...)` -- `client.stream_query_json(sql, ...)` reads more naturally at
-        a call site than passing `client` as the first positional argument of a
-        module-level function. Same behavior, same arguments minus `client`
-        itself; see `arrowbricks.stream_query_json`'s own docstring for what each
-        one does. The free function still exists and isn't going away -- this
-        just delegates to it (a lazy import here avoids a circular import
-        between this module and `_streaming.py`, which imports `DatabricksClient`
-        from here for its own type hint)."""
+        sql, ...)`, delegating to it with the same arguments minus `client` --
+        see its own docstring for what each one does. Lazy import here avoids
+        a circular import between this module and `_streaming.py`, which
+        imports `DatabricksClient` from here for its own type hint."""
         from ._streaming import stream_query_json as _stream_query_json
 
         return _stream_query_json(
