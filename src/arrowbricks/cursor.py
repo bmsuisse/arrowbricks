@@ -35,6 +35,17 @@ __all__ = ["Connection", "Cursor", "connect"]
 Row = tuple[Any, ...]
 Description = tuple[str, str | None, None, None, None, None, None]
 
+# fetchone()'s own read-ahead batch size. Measured against this package's own
+# mock warehouse (10k rows, warm): the PyO3/asyncio round trip a bare
+# fetchmany_arrow(1) pays is a ~110us *fixed* cost per call, not per row --
+# `async for row in cursor` (which is fetchone() under the hood) was 226-320x
+# slower than fetchall() as a result. Reading ahead in batches this size
+# amortizes that fixed cost by roughly the same factor; 1000 rows is a few
+# hundred KB to a couple MB for a typical result, not a meaningful memory
+# cost, and nowhere near defeating the "chunks are fetched lazily, not all
+# upfront" design (a whole chunk is already tens of thousands of rows).
+_ROW_BATCH = 1000
+
 
 def _table_to_rows(table: Any) -> list[Row]:
     if table.num_rows == 0:
@@ -68,6 +79,16 @@ class Cursor:
         # a real arro3 install to construct its return value (see
         # cursor.py's `fetchmany_arrow`/`fetchall_arrow`).
         self._schema: list[tuple[str, str]] | None = None
+        # fetchone()'s read-ahead buffer -- rows already pulled off the
+        # underlying result but not yet returned to the caller.
+        # fetchmany()/fetchall() drain this first (so nothing fetchone()
+        # already consumed from the wire is silently skipped -- see
+        # `test_fetchone_then_fetchall_gets_remaining_rows`), and
+        # fetchmany_arrow()/fetchall_arrow() refuse to run while it's
+        # non-empty, since there's no way to hand pulled-ahead rows back
+        # to a caller expecting a `Table`.
+        self._row_buffer: list[Row] = []
+        self._row_pos = 0
 
     @property
     def description(self) -> list[Description] | None:
@@ -118,6 +139,8 @@ class Cursor:
             self._result = None
             self._schema = None
             self._manifest_description = None
+            self._row_buffer = []
+            self._row_pos = 0
             core_client = self._client._core_client  # noqa: SLF001 -- same package, see client.py
             submit = core_client.execute(
                 sql, catalog=catalog, schema=schema, parameters=parameters, prefer_inline=prefer_inline
@@ -171,17 +194,55 @@ class Cursor:
             raise RuntimeError("no active result set -- call execute() first")
         return self._result
 
+    def _require_empty_row_buffer(self, caller: str) -> None:
+        if self._row_pos < len(self._row_buffer):
+            raise RuntimeError(
+                f"{caller}() can't run while fetchone()/__anext__ has already pulled rows ahead into "
+                "Cursor's internal read-ahead buffer -- drain them first with fetchmany()/fetchall(), "
+                "or avoid mixing row methods (fetchone/fetchmany/fetchall/`async for row in cursor`) "
+                "with Arrow methods (fetchmany_arrow/fetchall_arrow) on the same Cursor"
+            )
+
+    def _take_buffered(self, n: int) -> list[Row]:
+        """Pops up to `n` rows already sitting in fetchone()'s read-ahead
+        buffer, without touching the underlying result -- fetchmany()/
+        fetchall() call this first so nothing already pulled off the wire
+        is silently skipped."""
+        end = min(self._row_pos + n, len(self._row_buffer))
+        rows = self._row_buffer[self._row_pos : end]
+        self._row_pos = end
+        return rows
+
     async def fetchone(self) -> Row | None:
-        rows = _table_to_rows(await self.fetchmany_arrow(1))
-        return rows[0] if rows else None
+        """Reads ahead in batches of `_ROW_BATCH` rather than pulling one row
+        at a time off the underlying result -- see `_ROW_BATCH`'s own
+        comment for why. `__anext__`/`async for row in cursor` go through
+        this too."""
+        if self._row_pos >= len(self._row_buffer):
+            result = self._require_result()
+            table = await result.fetchmany_arrow(_ROW_BATCH)
+            if self._schema is None:
+                self._schema = await result.schema()
+            self._row_buffer = _table_to_rows(table)
+            self._row_pos = 0
+        if self._row_pos >= len(self._row_buffer):
+            return None
+        row = self._row_buffer[self._row_pos]
+        self._row_pos += 1
+        return row
 
     async def fetchmany(self, size: int) -> list[Row]:
-        return _table_to_rows(await self.fetchmany_arrow(size))
+        buffered = self._take_buffered(size)
+        if len(buffered) == size:
+            return buffered
+        return buffered + _table_to_rows(await self.fetchmany_arrow(size - len(buffered)))
 
     async def fetchall(self) -> list[Row]:
-        return _table_to_rows(await self.fetchall_arrow())
+        buffered = self._take_buffered(len(self._row_buffer))
+        return buffered + _table_to_rows(await self.fetchall_arrow())
 
     async def fetchmany_arrow(self, size: int) -> core.Table:
+        self._require_empty_row_buffer("fetchmany_arrow")
         result = self._require_result()
         table = await result.fetchmany_arrow(size)
         if self._schema is None:
@@ -189,6 +250,7 @@ class Cursor:
         return table
 
     async def fetchall_arrow(self) -> core.Table:
+        self._require_empty_row_buffer("fetchall_arrow")
         result = self._require_result()
         table = await result.fetchall_arrow()
         if self._schema is None:

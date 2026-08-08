@@ -277,6 +277,46 @@ async def test_fetchone_past_end_returns_none(mock_warehouse):
 
 
 @pytest.mark.asyncio
+async def test_fetchone_reads_ahead_in_batches_across_chunk_boundaries(mock_warehouse):
+    """fetchone()'s read-ahead buffer (_ROW_BATCH=1000) must span multiple
+    chunks correctly, not just the trivial single-chunk case every other
+    fetchone test uses -- 15 chunks of 100 rows each covers several full
+    _ROW_BATCH refills plus one that straddles a chunk boundary."""
+    server, _route = mock_warehouse(n_chunks=15, rows_per_chunk=100)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+    cursor = Cursor(client)
+
+    await cursor.execute("SELECT * FROM whatever")
+    seen = []
+    while (row := await cursor.fetchone()) is not None:
+        seen.append(row[0])
+    assert seen == list(range(1500))
+
+
+@pytest.mark.asyncio
+async def test_fetchmany_arrow_after_fetchone_raises_a_clear_error(mock_warehouse):
+    """fetchone() pulls rows ahead into a Python-side buffer that
+    fetchmany_arrow/fetchall_arrow have no way to hand back as a Table --
+    must fail loud with a clear message, not silently skip the buffered
+    rows (see cursor.py's own `_require_empty_row_buffer`)."""
+    server, _route = mock_warehouse(n_chunks=1, rows_per_chunk=5)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+    cursor = Cursor(client)
+
+    await cursor.execute("SELECT * FROM whatever")
+    await cursor.fetchone()
+    with pytest.raises(RuntimeError, match="read-ahead buffer"):
+        await cursor.fetchmany_arrow(10)
+    with pytest.raises(RuntimeError, match="read-ahead buffer"):
+        await cursor.fetchall_arrow()
+
+    # The buffer isn't corrupted by the failed attempts -- draining it the
+    # supported way still gets every remaining row.
+    rest = await cursor.fetchall()
+    assert [r[0] for r in rest] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
 async def test_fetchall_arrow_returns_a_table_with_all_rows(mock_warehouse):
     server, _route = mock_warehouse(n_chunks=2, rows_per_chunk=4)
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
