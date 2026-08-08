@@ -25,11 +25,8 @@ use pipeline::{NdjsonStream, ResultStream};
 /// `RecordBatchReader` from this crate, arro3, pyarrow, or anything else
 /// Arrow-C-Data-Interface-compatible) as Arrow-IPC stream bytes to `buf` (a
 /// Python file-like object with a `.write(bytes)` method) -- always
-/// uncompressed. arro3's own default (`compression="LZ4"`) is transparently
-/// decompressed by some Arrow readers (e.g. DuckDB's) but not all --
-/// `duckdb-wasm`'s browser-side decoder silently fails to parse it. Plain,
-/// uncompressed bodies are the safe default for bytes that might end up read
-/// by anything.
+/// uncompressed. See `_streaming.py`'s own `write_ipc_stream` (the
+/// user-facing wrapper) for why uncompressed is the safe default.
 #[pyfunction]
 #[pyo3(signature = (stream, buf))]
 fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyAny>) -> PyResult<()> {
@@ -159,11 +156,10 @@ impl TokenProvider for PyTokenProvider {
         let locals = {
             let mut guard = self.locals.lock().unwrap();
             // Unconditional, not `if guard.is_none()` -- see this struct's
-            // own doc comment for why caching only once pinned the client to
-            // its first-ever event loop. Best-effort: if this particular
-            // call isn't in a context with a running loop either (a worker
-            // task), leave whatever's already cached alone and fall through
-            // to using that (or the no-scope path below, if nothing has ever
+            // own doc comment for why. Best-effort: if this particular call
+            // isn't in a context with a running loop either (a worker task),
+            // leave whatever's already cached alone and fall through to
+            // using that (or the no-scope path below, if nothing has ever
             // been captured at all).
             if let Ok(captured) = Python::attach(pyo3_async_runtimes::tokio::get_current_locals) {
                 *guard = Some(captured);
@@ -204,10 +200,8 @@ impl TokenProvider for PyTokenProvider {
 }
 
 /// One Databricks SQL warehouse endpoint -- a persistent `reqwest::Client`
-/// (connection pool) reused across every `execute` call, same reason
-/// Python's own `DatabricksClient` reuses one `httpx.AsyncClient`
-/// rather than building a fresh one per statement: repeated TCP+TLS
-/// handshakes are pure waste against the same host.
+/// (connection pool) reused across every `execute` call, since repeated
+/// TCP+TLS handshakes against the same host are pure waste.
 #[pyclass(name = "Client")]
 struct PyDbClient {
     inner: Arc<DbClient>,
@@ -217,8 +211,8 @@ struct PyDbClient {
 impl PyDbClient {
     /// Auth is either `token` (a static string) or `token_provider` (a
     /// callable, sync or async, returning a token string -- called on every
-    /// request, no caching here) -- exactly one of the two, matching
-    /// `DatabricksClient`'s own `__init__` validation.
+    /// request, no caching here), matching `DatabricksClient`'s own
+    /// `__init__` validation.
     #[new]
     #[pyo3(signature = (
         host,
@@ -462,6 +456,13 @@ fn column_pairs(columns: &[client::ColumnDescription]) -> Vec<(String, Option<St
     columns.iter().map(|c| (c.name.clone(), c.type_name.clone())).collect()
 }
 
+/// `schema` is `None` for a zero-batch result -- falls back to an empty
+/// schema rather than a schema-less `Table`.
+fn batches_to_pytable(batches: Vec<RecordBatch>, schema: Option<SchemaRef>) -> PyResult<PyTable> {
+    let schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
+    PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
 #[pymethods]
 impl PyResultSet {
     /// Returns a `Table` with up to `n` rows -- fewer if the result is
@@ -474,8 +475,7 @@ impl PyResultSet {
                 .fetchmany_arrow(n)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.message))?;
-            let arrow_schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
-            PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            batches_to_pytable(batches, schema)
         })
     }
 
@@ -488,8 +488,7 @@ impl PyResultSet {
                 .fetchall_arrow()
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.message))?;
-            let arrow_schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
-            PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            batches_to_pytable(batches, schema)
         })
     }
 
@@ -556,9 +555,7 @@ impl PyFetchallArrowStreamedIter {
                 Ok(Some(Tick::Heartbeat)) => Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any())),
                 Ok(Some(Tick::Ready((batches, schema)))) => {
                     *guard = None;
-                    let arrow_schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
-                    let table =
-                        PyTable::try_new(batches, arrow_schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    let table = batches_to_pytable(batches, schema)?;
                     Python::attach(|py| Py::new(py, table).map(|t| t.into_any()))
                 }
                 Ok(None) => Err(PyStopAsyncIteration::new_err(())),
@@ -644,7 +641,6 @@ impl PyNdjsonStreamIter {
                             stream: Arc::new(AsyncMutex::new(stream)),
                             heartbeat: HeartbeatStream::new(total_timeout_s),
                         };
-                        // Loop back around to the now-`Running` arm below.
                     }
                     PyNdjsonStreamState::Running { stream, heartbeat } => {
                         let stream_for_pull = stream.clone();
