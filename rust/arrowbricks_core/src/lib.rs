@@ -152,33 +152,39 @@ struct PyTokenProvider {
 
 impl TokenProvider for PyTokenProvider {
     fn get_token(&self) -> TokenFuture {
-        let callable = Python::attach(|py| self.callable.clone_ref(py));
-        let locals = {
+        // One `attach` for both: neither call below crosses an `.await`, so
+        // there's no need to pay for two separate GIL-attach round trips.
+        let (callable, locals) = {
             let mut guard = self.locals.lock().unwrap();
-            // Unconditional, not `if guard.is_none()` -- see this struct's
-            // own doc comment for why. Best-effort: if this particular call
-            // isn't in a context with a running loop either (a worker task),
-            // leave whatever's already cached alone and fall through to
-            // using that (or the no-scope path below, if nothing has ever
-            // been captured at all).
-            if let Ok(captured) = Python::attach(pyo3_async_runtimes::tokio::get_current_locals) {
-                *guard = Some(captured);
-            }
-            guard.clone()
+            Python::attach(|py| {
+                let callable = self.callable.clone_ref(py);
+                // Unconditional, not `if guard.is_none()` -- see this
+                // struct's own doc comment for why. Best-effort: if this
+                // particular call isn't in a context with a running loop
+                // either (a worker task), leave whatever's already cached
+                // alone and fall through to using that (or the no-scope
+                // path below, if nothing has ever been captured at all).
+                if let Ok(captured) = pyo3_async_runtimes::tokio::get_current_locals(py) {
+                    *guard = Some(captured);
+                }
+                (callable, guard.clone())
+            })
         };
 
         Box::pin(async move {
-            let called: Py<PyAny> = Python::attach(|py| -> PyResult<Py<PyAny>> {
-                let bound = callable.bind(py);
-                Ok(bound.call0()?.unbind())
+            // Same one-`attach` reasoning as above: calling the token
+            // callable and checking `__await__` on its result never cross
+            // an `.await` either.
+            let (called, is_awaitable): (Py<PyAny>, bool) = Python::attach(|py| {
+                let bound = callable.bind(py).call0()?;
+                // Mirrors Python's own `inspect.isawaitable(result)` check
+                // in `_bearer_token`: a plain sync callable's return value
+                // has no `__await__`, an async callable's coroutine/Future
+                // does.
+                let is_awaitable = bound.hasattr("__await__")?;
+                Ok::<_, PyErr>((bound.unbind(), is_awaitable))
             })
             .map_err(py_err_to_api_error)?;
-
-            // Mirrors Python's own `inspect.isawaitable(result)` check in
-            // `_bearer_token`: a plain sync callable's return value has no
-            // `__await__`, an async callable's coroutine/Future does.
-            let is_awaitable =
-                Python::attach(|py| called.bind(py).hasattr("__await__")).map_err(py_err_to_api_error)?;
 
             let result_obj: Py<PyAny> = if is_awaitable {
                 let awaited = async move {
