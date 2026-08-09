@@ -548,7 +548,7 @@ pub const MAX_SPLIT_PARTS: usize = 8;
 /// `download_slots` (sized to this same number, since it's a budget over
 /// the same worker count) can't drift from it the way a second bare `64`
 /// silently could.
-const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 96;
+const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 64;
 
 /// How long the Thrift path polls `GetOperationStatus` when a statement
 /// doesn't finish within its `getDirectResults` budget (see
@@ -738,18 +738,41 @@ impl DbClient {
             // Python's DatabricksClient defaults to 6, tuned for asyncio+GIL
             // where higher concurrency stops paying off past single digits
             // (see its own comment). This Rust core's real OS-thread
-            // parallelism keeps paying off well past that -- originally
-            // measured against a 400-chunk/5.6M-row/120-column table
-            // (16=140s, 32=~113s avg of 3, 64=114s, 96=~102s avg of 2,
-            // 128=122s). Re-measured 2026-08-09 after switching away from
-            // http2/aws-lc-rs to ring: concurrency=64 baseline runs were
-            // 122.59s, 100.90s; concurrency=96 was 93.94s, 98.16s; and
-            // concurrency=128 was 97.78s, 98.77s on the same
-            // bms_dna.core.dim_article table (5.6M rows, 120 cols). 96 is
-            // ~13% faster than 64 and more stable than 128, and is picked as
-            // the new default. The exact peak is still workload/warehouse-
-            // shaped; a caller with different network/warehouse characteristics
-            // may still want to tune this further.
+            // parallelism keeps paying off well past that -- measured
+            // against a 400-chunk/5.6M-row/120-column table (16=140s,
+            // 32=~113s avg of 3, 64=114s, 96=~102s avg of 2, 128=122s). 64
+            // was picked as a safe middle-ground bump with no observed
+            // downside on real data, not a claim that it's the true optimum.
+            //
+            // Re-attempted 2026-08-09 after switching away from http2/
+            // aws-lc-rs to ring, on the theory that either transport change
+            // could have moved the optimum: a first pass reported 96 as
+            // ~13-16% faster than 64 on both this table and a second,
+            // larger one (fact_sales_order_invoiced, 20M rows/295 cols) --
+            // **found on review to be a false positive**. The benchmark
+            // script called `connect()`/`arrowbricks.connect()` without
+            // ever passing `chunk_fetch_concurrency=` explicitly, so every
+            // "level" it claimed to test actually ran at whatever
+            // `PyDbClient::new`'s own `#[pyo3(signature = ...)]` default
+            // was (unchanged at 64 throughout, since only this Rust-side
+            // constant had been edited, and it's overridden unconditionally
+            // by `PyDbClient::new`'s explicit `.with_concurrency(...)` call
+            // for every real Python caller regardless of this constant's
+            // value) -- i.e. every "64 vs 96 vs 128" comparison was actually
+            // 64 vs 64 vs 64, and the reported gap was warehouse/network
+            // run-to-run noise, not a code effect. Caught by re-running a
+            // controlled, interleaved A/B (`chunk_fetch_concurrency=`
+            // passed explicitly each time, no rebuild needed) on
+            // `dim_article`: 64/96/64/96 measured 125.60s/129.92s/137.50s/
+            // 134.30s -- no consistent winner, well within run-to-run
+            // noise. Reverted to 64. If re-attempting this again, always
+            // pass `chunk_fetch_concurrency=` explicitly in the benchmark
+            // script itself rather than relying on rebuilding with a
+            // different default -- this exact mistake is easy to repeat
+            // otherwise, since the four independent places this default is
+            // hardcoded (see AGENTS.md) make "I changed the constant" and "a
+            // real Python caller now uses that constant" two different,
+            // easily-conflated claims.
             chunk_fetch_concurrency: DEFAULT_CHUNK_FETCH_CONCURRENCY,
             warehouse_start_timeout: Duration::from_secs(300),
             warehouse_confirmed_running_ttl: Duration::from_secs(30),

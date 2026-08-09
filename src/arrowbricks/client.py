@@ -50,7 +50,9 @@ class DatabricksClient:
         # chunk's raw bytes in memory. 64 -- tuned for the Rust core's real
         # OS-thread parallelism, which scales well past what asyncio+GIL
         # concurrency used to buy; measured against a real 400-chunk/
-        # 5.6M-row table (see client.rs's own comment for the numbers).
+        # 5.6M-row table (see client.rs's own comment for the numbers, and
+        # for a since-reverted attempt to bump this further that turned out
+        # to be a benchmarking false positive).
         # compress_results: requests LZ4-compressed cloud-fetch chunks
         # (matches databricks-sql-connector's own
         # enable_query_result_lz4_compression default) -- measured ~2x
