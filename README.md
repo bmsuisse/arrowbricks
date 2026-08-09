@@ -65,9 +65,14 @@ async for item in client.stream_query_json("SELECT * FROM my_catalog.my_schema.b
 
 See [`examples/basic.py`](examples/basic.py) for a runnable version,
 [`examples/cursor_paging.py`](examples/cursor_paging.py) for paging a large
-result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront, or
+result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront,
 [`examples/azure_auth.py`](examples/azure_auth.py) for a caching
-`token_provider` built on Azure AD (`DefaultAzureCredential`).
+`token_provider` built on Azure AD (`DefaultAzureCredential`, needs
+`azure-identity`), or [`examples/oauth_m2m_auth.py`](examples/oauth_m2m_auth.py)
+for the same idea using Databricks' own OAuth machine-to-machine
+client-credentials flow instead -- like `databricks-sql-connector`'s
+`auth_type="databricks-oauth"`, but stdlib-only (`urllib.request`), no
+extra dependency.
 
 ## FastAPI SSE example
 
