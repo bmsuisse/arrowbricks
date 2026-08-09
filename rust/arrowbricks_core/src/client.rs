@@ -548,7 +548,7 @@ pub const MAX_SPLIT_PARTS: usize = 8;
 /// `download_slots` (sized to this same number, since it's a budget over
 /// the same worker count) can't drift from it the way a second bare `64`
 /// silently could.
-const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 64;
+const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 96;
 
 /// How long the Thrift path polls `GetOperationStatus` when a statement
 /// doesn't finish within its `getDirectResults` budget (see
@@ -738,20 +738,18 @@ impl DbClient {
             // Python's DatabricksClient defaults to 6, tuned for asyncio+GIL
             // where higher concurrency stops paying off past single digits
             // (see its own comment). This Rust core's real OS-thread
-            // parallelism keeps paying off well past that -- measured against
-            // a real 400-chunk/5.6M-row/120-column table, repeated runs (full
-            // download time, same query, same warehouse): 16=140s,
-            // 32=~113s (avg of 3), 64=114s, 96=~102s (avg of 2), 128=122s.
-            // 16 is clearly worse and 128 clearly regresses (concurrency
-            // outrunning what the warehouse/network can actually keep fed);
-            // 32-96 all land in roughly the same band with 96 nominally
-            // fastest on this table/warehouse, but the gap over 32 is modest
-            // (~10%) and the exact peak is workload/warehouse-shaped, not a
-            // fixed constant -- 64 is picked as a safe middle-ground default
-            // headroom above the old value with no observed downside, not
-            // a claim that 64 is the true optimum. A caller with a very
-            // large chunk count or a fast/low-latency link to the warehouse
-            // may still want to raise it further.
+            // parallelism keeps paying off well past that -- originally
+            // measured against a 400-chunk/5.6M-row/120-column table
+            // (16=140s, 32=~113s avg of 3, 64=114s, 96=~102s avg of 2,
+            // 128=122s). Re-measured 2025-08-09 after switching away from
+            // http2/aws-lc-rs to ring: concurrency=64 baseline runs were
+            // 122.59s, 100.90s; concurrency=96 was 93.94s, 98.16s; and
+            // concurrency=128 was 97.78s, 98.77s on the same
+            // bms_dna.core.dim_article table (5.6M rows, 120 cols). 96 is
+            // ~13% faster than 64 and more stable than 128, and is picked as
+            // the new default. The exact peak is still workload/warehouse-
+            // shaped; a caller with different network/warehouse characteristics
+            // may still want to tune this further.
             chunk_fetch_concurrency: DEFAULT_CHUNK_FETCH_CONCURRENCY,
             warehouse_start_timeout: Duration::from_secs(300),
             warehouse_confirmed_running_ttl: Duration::from_secs(30),
