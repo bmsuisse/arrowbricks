@@ -741,7 +741,7 @@ impl DbClient {
             // parallelism keeps paying off well past that -- originally
             // measured against a 400-chunk/5.6M-row/120-column table
             // (16=140s, 32=~113s avg of 3, 64=114s, 96=~102s avg of 2,
-            // 128=122s). Re-measured 2025-08-09 after switching away from
+            // 128=122s). Re-measured 2026-08-09 after switching away from
             // http2/aws-lc-rs to ring: concurrency=64 baseline runs were
             // 122.59s, 100.90s; concurrency=96 was 93.94s, 98.16s; and
             // concurrency=128 was 97.78s, 98.77s on the same
