@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.0.4
+
+- **Perf**: the Thrift inline-`arrowBatches` path (`build_inline_blob`) now pre-sizes its output buffer and decompresses LZ4-compressed batches directly into it, instead of decompressing into an intermediate buffer and copying that into the final one -- one fewer full copy per compressed inline batch. Pure internal refactor, no behavior change; existing LZ4/multi-batch test coverage passes unchanged.
+- **No change, but worth recording**: an attempt to bump `chunk_fetch_concurrency`'s default from 64 to 96 (re-measured after 3.0.3's transport changes, on the theory that dropping `http2` or switching to `ring` could have moved the optimum) was investigated, benchmarked, and reverted after the benchmark that produced the "~13-16% faster" numbers turned out to have a real bug: it never passed `chunk_fetch_concurrency=` explicitly, so it was silently comparing the same real concurrency value against itself on every "level." A corrected, controlled, interleaved A/B (parameter passed explicitly, no rebuild needed) showed no consistent winner between 64 and 96 on the same real table. The default stays 64. See `client.rs`'s own doc comment on `DEFAULT_CHUNK_FETCH_CONCURRENCY` and AGENTS.md for the full story, including why this default is easy to accidentally half-update (it's hardcoded in four independent places) and how to avoid repeating the benchmarking mistake.
+
+No behavior change beyond the `build_inline_blob` optimization above -- all 96 Rust tests and 81 Python tests pass; real-warehouse benchmark still shows arrowbricks ~2-3x faster than `databricks-sql-connector`.
+
 ## 3.0.3
 
 Shipped `.so` shrunk from 13.1 MiB to 9.1 MiB (~31%), no measured speed cost -- each step re-measured before/after against a real workspace and/or a local CPU-bound decode benchmark (isolates decode cost from network noise):
