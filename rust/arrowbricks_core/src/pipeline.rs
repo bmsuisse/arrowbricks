@@ -1008,7 +1008,24 @@ fn build_inline_blob(
     batches: Vec<thrift::ArrowBatch>,
     lz4_compressed: bool,
 ) -> Result<(bytes::Bytes, i64), ApiError> {
-    let mut out = Vec::new();
+    // Pre-size the output buffer to avoid repeated allocations. Schema is
+    // typically a few KB; batches are typically 10s-100s of KB uncompressed.
+    // For compressed data, use the same * 4 heuristic as decompress_lz4_frame
+    // (Arrow IPC data typically compresses several-fold); for uncompressed,
+    // the exact sizes are known.
+    let schema_size = schema_bytes.as_ref().map(|s| s.len()).unwrap_or(0);
+    let batches_size: usize = batches
+        .iter()
+        .map(|b| {
+            if lz4_compressed {
+                b.batch.len() * 4
+            } else {
+                b.batch.len()
+            }
+        })
+        .sum();
+    let mut out = Vec::with_capacity(schema_size + batches_size);
+
     if let Some(s) = &schema_bytes {
         out.extend_from_slice(s);
     }
@@ -1016,8 +1033,16 @@ fn build_inline_blob(
     for b in batches {
         row_count += b.row_count;
         if lz4_compressed {
-            let decoded = crate::client::decompress_lz4_frame(&b.batch)?;
-            out.extend_from_slice(&decoded);
+            // Decompress directly into the output buffer using FrameDecoder,
+            // avoiding a separate intermediate allocation and copy. The
+            // FrameDecoder's read_to_end appends to the existing buffer.
+            use std::io::Read;
+            let mut decoder = lz4_flex::frame::FrameDecoder::new(&b.batch[..]);
+            while !decoder.get_ref().is_empty() {
+                decoder
+                    .read_to_end(&mut out)
+                    .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
+            }
         } else {
             out.extend_from_slice(&b.batch);
         }
