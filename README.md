@@ -128,19 +128,71 @@ arrowbricks has no opinion on *how* you get a token and no cloud-SDK dependency 
 conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 ```
 
+## Observability
+
+Pass `on_event` to `connect`/`DatabricksClient` to get a `QueryStats` snapshot once per query, at completion (success, cancelled, timed out, or errored):
+
+```python
+def log_query(stats):
+    print(
+        f"{stats.statement_id}: {stats.outcome} in {stats.fetch_s:.2f}s, {stats.bytes_downloaded} bytes, {stats.retry_count} retries"
+    )
+
+
+conn = connect(host=..., warehouse_id=..., token=..., on_event=log_query)
+```
+
+`on_event` is sync or async, same as `token_provider`, and applies to every query run through that client (not passed per-call). It's strictly fire-and-forget: any exception it raises is caught and swallowed on the Rust side, never surfaced to your query, and dispatching it never blocks or measurably slows the actual fetch -- a slow or broken logging/metrics callback can't make your queries slower or fail them. `QueryStats` fields: `statement_id: str`, `protocol: "thrift" | "sea"`, `warehouse_wait_s: float` (0.0 if the client already knew the warehouse was running), `submit_to_ready_s: float` (statement submit -> ready to fetch), `fetch_s: float` (download + decode), `num_chunks: int`, `bytes_downloaded: int`, `retry_count: int`, `concurrency_used: int`, and `outcome: "success" | "cancelled" | "timeout" | "error"`.
+
+`on_event` fires once the fetch of a given query actually completes (or is abandoned) -- a `Cursor` whose result is never fully drained (e.g. only a partial `fetchmany()`, then abandoned) never fires one, same category as this package's existing documented gap around GC-based cleanup.
+
+## Cancellation
+
+When a chunk download times out (`total_timeout_s`) or your code cancels the surrounding coroutine (`task.cancel()`/`asyncio.wait_for`) while it's in flight, arrowbricks fires a best-effort server-side cancel in the background (Thrift's `CancelOperation`, or SEA's `POST .../cancel`) so Databricks stops running the query instead of finishing it for nobody. This is fire-and-forget: the `QueryTimeout`/cancellation still reaches you immediately, and the cancel call's own result (success or failure) is never surfaced or awaited.
+
+This covers `Cursor.fetchall_streamed()`/`fetchall_arrow_streamed()`, `client.stream_query_json(...)`, and the lower-level `._core.Client`'s own streamed APIs -- everything that wraps the chunk-download phase in the Rust-level heartbeat. Neither `total_timeout_s` nor a bare `task.cancel()` on `Cursor.execute()`/`execute_streamed()` itself (the initial submit/poll wait) triggers a cancel -- by the time a query's chunks are being fetched at all, the statement has typically already finished running server-side, so there's usually nothing left to cancel there in practice.
+
+## Errors
+
+Every exception arrowbricks raises itself is an `ArrowbricksError` -- a `RuntimeError` subclass, so an `except RuntimeError` written before this hierarchy existed keeps catching everything unchanged. Three subclasses split by what actually changes what your code should do next:
+
+- `TransientError` -- a network blip, connection reset, or 5xx that survived every internal retry (`retry_attempts`, exponential backoff up to `retry_max_wait_s` -- see below) before ever reaching you. Back off further and try again later; retrying immediately just repeats what already failed.
+- `AuthError` -- HTTP 401/403, even after every internal retry re-fetched a token from your `token_provider`, *or* your `token_provider` itself raised (e.g. its own OAuth refresh call came back unauthorized). Treat the credential itself as bad/expired, not a transient blip.
+- `StatementError` -- the SQL statement itself failed or was canceled server-side (bad SQL, a permissions error, a warehouse-side query failure). Retrying the identical statement will fail identically; this isn't a transport problem.
+
+Anything else (a generic non-auth/non-statement HTTP error, an internal parse/decode failure) raises the plain `ArrowbricksError` base.
+
+```python
+from arrowbricks import ArrowbricksError, AuthError, StatementError, TransientError
+
+try:
+    await cursor.execute(sql)
+except AuthError:
+    refresh_credentials()
+except StatementError:
+    raise  # bad SQL -- don't retry
+except TransientError:
+    await asyncio.sleep(5)
+    await cursor.execute(sql)  # safe to retry
+except ArrowbricksError:
+    raise
+```
+
+`QueryTimeout` (`total_timeout_s` exceeded -- see Cancellation above) also subclasses `ArrowbricksError`, so `except ArrowbricksError` is a genuine catch-all for every exception this package raises itself.
+
 ## API
 
 - `connect(host, warehouse_id, *, token=None, token_provider=None, ...) -> Connection`
 - `Connection.cursor() -> Cursor`
 - `Connection.client -> DatabricksClient` -- the same client `cursor()` uses, for lower-level access (e.g. `stream_query_json`, `upload_volume_file`).
-- `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None, prefer_inline=False) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`. `prefer_inline=True` tries fetching a small result (well under Databricks' 25 MiB inline cap) in the same round trip as the submission itself, skipping the chunk-fetch entirely -- if the result turns out too big, or has a column type this can't convert (nested ARRAY/MAP/STRUCT, VARIANT), it transparently re-runs the query the normal way, so a caller who sets this without actually expecting a small result pays for the query twice. Leave it off unless you know the result is small.
+- `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None, prefer_inline=False) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`. `prefer_inline=True` tries fetching a small result (well under Databricks' 25 MiB inline cap) in the same round trip as the submission itself, skipping the chunk-fetch entirely. If the result turns out too big, the statement fails server-side before ever really executing, and arrowbricks transparently re-runs it the normal way -- safe to double-submit, since nothing committed the first time; a caller who sets `prefer_inline` without actually expecting a small result just pays for the query twice in this case. If instead the result comes back but has a column type this can't convert (nested ARRAY/MAP/STRUCT, VARIANT), the statement already *succeeded* -- arrowbricks does **not** silently re-run it (that could duplicate a write for non-idempotent SQL); it raises `ArrowbricksError` naming the statement instead, so you know it ran and can decide yourself whether re-running is safe. Leave `prefer_inline` off unless you know the result is small, and unless you know the query is a `SELECT` (or otherwise idempotent) if you want the byte-limit fallback's automatic retry to be safe too.
 - `Cursor.execute_streamed(...)` -- same args, but an async generator yielding `HEARTBEAT` while waiting on a slow cold start, then the ready `Cursor` -- for bridging e.g. an SSE connection. Its timeout/heartbeats stop the moment the statement is ready, *before* any chunk has been downloaded -- see `fetchall_streamed` below for the download phase itself.
 - `Cursor.fetchone() -> tuple | None`, `Cursor.fetchmany(size) -> list[tuple]`, `Cursor.fetchall() -> list[tuple]`, and iterating a `Cursor` directly -- row tuples; needs the `arro3` extra.
 - `Cursor.fetchmany_arrow(size) -> Table`, `Cursor.fetchall_arrow() -> Table` -- an Arrow table (implements `__arrow_c_stream__`, so arro3/pyarrow/DuckDB can all consume it directly, zero-copy).
 - `Cursor.fetchall_streamed(*, total_timeout_s=None)` / `Cursor.fetchall_arrow_streamed(*, total_timeout_s=None)` -- like `fetchall()`/`fetchall_arrow()`, but yield `HEARTBEAT` while pulling chunks instead of blocking silently, then the final rows/Table -- for a caller downloading a large result over SSE who needs heartbeats (and a timeout) through the *download*, not just the initial wait. Compose with `execute_streamed` and a shared deadline if you want one combined budget across both phases (see `examples/fastapi_sse_pivot.py`).
 - `Cursor.description` -- DB-API-style `[(name, type_name, None, None, None, None, None), ...]` after `execute()`.
 - `client.stream_query_json(sql, **kwargs)` (or the equivalent free function `stream_query_json(client, sql, **kwargs)`) -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives. Timestamps come out as full ISO-8601, every column key is always present (`"col":null` for a null value, never an omitted key). JSON has no literal for NaN/Infinity/-Infinity, so those come back as `"col":null` by default -- pass `non_finite_floats="string"` to get `"col":"NaN"`/`"col":"Infinity"`/`"col":"-Infinity"` instead if you need to tell them apart from a real NULL.
-- `DatabricksClient(host, warehouse_id, *, token=None, token_provider=None, protocol="thrift", ...)` -- the lower-level client `Connection` wraps. `client.upload_volume_file(volume_path, data)`/`client.delete_volume_file(volume_path)` for the Files API. Pass `protocol="sea"` to opt into the REST Statement Execution API backend instead of the default Thrift one (see above) -- `prefer_inline` (SEA-only) has no effect under `protocol="thrift"` (silent no-op, not an error), since Thrift's own inline-result mechanism already covers that case.
+- `DatabricksClient(host, warehouse_id, *, token=None, token_provider=None, protocol="thrift", on_event=None, retry_attempts=6, retry_max_wait_s=20.0, ...)` -- the lower-level client `Connection` wraps. `client.upload_volume_file(volume_path, data)`/`client.delete_volume_file(volume_path)` for the Files API. Pass `protocol="sea"` to opt into the REST Statement Execution API backend instead of the default Thrift one (see above) -- `prefer_inline` (SEA-only) has no effect under `protocol="thrift"` (silent no-op, not an error), since Thrift's own inline-result mechanism already covers that case. `on_event` -- see Observability below. `retry_attempts`/`retry_max_wait_s` tune the retry policy behind `TransientError`/`AuthError` (see Errors above) -- total attempts (the first try plus `retry_attempts - 1` retries) and the exponential-backoff ceiling in seconds, for every retryable request this client makes (statement submit/poll, chunk-index resolution, chunk download, volume file ops). `retry_attempts` must be at least 1 (raises `ValueError` otherwise).
 - `write_ipc_stream(table, buf)` -- writes any Arrow-C-Data-Interface-compatible object as an uncompressed Arrow-IPC stream (see below).
 - `ReplayableArrowChunk(data: bytes, chunk_index, declared_row_count=None)` -- wraps raw Arrow-IPC stream bytes (e.g. previously downloaded and stored) so they can be read more than once via `__arrow_c_stream__` (a schema peek, then the actual scan -- DuckDB's registration path does this), and `.to_table()` for a one-shot parse. No extra dependency needed.
 

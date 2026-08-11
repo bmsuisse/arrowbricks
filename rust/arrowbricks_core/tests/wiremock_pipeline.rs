@@ -4,15 +4,19 @@
 //! correctness itself is unit-tested in `pipeline.rs`; this only proves the
 //! HTTP submit->poll->fetch->decode path is wired correctly end to end.
 
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::array::{Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol};
-use arrowbricks_core::pipeline::{execute_lazy, execute_lazy_prefer_inline, run_pipeline};
+use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol, QueryStatsAccumulator};
+use arrowbricks_core::heartbeat::{HeartbeatWait, Tick};
+use arrowbricks_core::pipeline::{cancel_hook, execute_lazy, execute_lazy_prefer_inline, run_pipeline};
+use common::wait_for_calls;
 use serde_json::json;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -933,13 +937,35 @@ impl wiremock::Match for HasDisposition {
 /// **fresh** EXTERNAL_LINKS submission (a distinct statement execution, not
 /// a retry -- see `execute_arrow_statement_prefer_inline`'s doc comment),
 /// and still return the correct, complete result via that normal path.
+///
+/// **Mount order bug found and fixed alongside the prefer_inline
+/// resubmission fix above (2026-08-11):** this test used to call
+/// `install_mock_warehouse` (whose own POST /statements mock matches
+/// unconditionally, no `HasDisposition` filter) *before* mounting the
+/// INLINE-tagged mock below -- per `MountedMockSet::handle_request`'s own
+/// stable sort by priority (confirmed directly in wiremock 0.6.5's source,
+/// `mock_set.rs`), a tie between two equally-matching mocks goes to
+/// whichever was *mounted first*. That meant `install_mock_warehouse`'s
+/// generic mock -- not the INLINE-tagged one -- actually won the very first
+/// (INLINE) submission too, since it matches unconditionally and was
+/// mounted first; the "byte limit exceeded" response below was never
+/// actually served. This test still passed regardless, for the wrong
+/// reason: the *old*, unsafe `None => resubmit` fallback this session
+/// removed from `execute_arrow_statement_prefer_inline` (see that
+/// function's own doc comment) silently caught the resulting "SUCCEEDED
+/// with no data_array" case and resubmitted anyway, landing on the same
+/// generic mock a second time and coincidentally producing the same
+/// correct-looking 15-row result via a completely untested code path.
+/// Removing that unsafe fallback surfaced this mount-order bug immediately
+/// (a hard `unwrap()` panic, not a silent pass) -- fixed by mounting the
+/// INLINE-tagged mock *first*, so it correctly wins the tie for the first
+/// request; `install_mock_warehouse`'s generic mock then only ever matches
+/// the *second* (EXTERNAL_LINKS, no `"disposition":"INLINE"` in the body)
+/// submission, which the INLINE-tagged mock's own `HasDisposition` filter
+/// no longer matches at all -- no more tie to break.
 #[tokio::test]
 async fn prefer_inline_falls_back_to_external_links_on_byte_limit_exceeded() {
     let server = MockServer::start().await;
-    // Mounted first so its unconditional POST /statements matcher is the
-    // fallback for the second (EXTERNAL_LINKS) submission -- the INLINE-only
-    // mock below only ever matches the first attempt.
-    install_mock_warehouse(&server, 3, 5, false).await;
 
     Mock::given(method("POST"))
         .and(path("/api/2.0/sql/statements"))
@@ -956,6 +982,11 @@ async fn prefer_inline_falls_back_to_external_links_on_byte_limit_exceeded() {
         })))
         .mount(&server)
         .await;
+    // Mounted *after* the INLINE-tagged mock above -- see this test's own
+    // doc comment for why the order matters. Its unconditional POST
+    // /statements matcher only ever gets a chance to serve the *second*
+    // (EXTERNAL_LINKS) submission now.
+    install_mock_warehouse(&server, 3, 5, false).await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
@@ -971,14 +1002,28 @@ async fn prefer_inline_falls_back_to_external_links_on_byte_limit_exceeded() {
     assert_ids_in_order(&batches, 15);
 }
 
-/// Regression test: an INLINE response whose schema contains a column type
-/// `json_convert` doesn't handle (ARRAY, here) must fall back to a fresh
-/// EXTERNAL_LINKS submission too, not error out or silently mis-convert.
+/// Regression test for a real data-safety bug found in code review
+/// (2026-08-11): an INLINE response that already reached SUCCEEDED, whose
+/// schema contains a column type `json_convert` doesn't handle (ARRAY,
+/// here), must **not** silently resubmit the identical SQL as a fresh
+/// EXTERNAL_LINKS statement -- that statement already ran and (for
+/// non-idempotent SQL) may have already committed a write; resubmitting it
+/// would duplicate that write with nothing surfaced to the caller. Unlike
+/// `prefer_inline_falls_back_to_external_links_on_byte_limit_exceeded`
+/// below (a genuinely safe fallback, since that statement reached FAILED,
+/// not SUCCEEDED -- nothing committed), this must return a clear `Err`
+/// instead. Only the INLINE-tagged mock is mounted (no generic/EXTERNAL_LINKS
+/// fallback route at all) with `.expect(1)` -- if the fixed code ever
+/// resubmitted again, this test would fail on that expectation with no
+/// matching mock for the second request, not just on the wrong return type.
 #[tokio::test]
-async fn prefer_inline_falls_back_to_external_links_on_unsupported_column_type() {
+async fn prefer_inline_on_unsupported_column_type_errors_instead_of_resubmitting() {
     let server = MockServer::start().await;
-    install_mock_warehouse(&server, 3, 5, false).await;
-
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/api/2.0/sql/statements"))
         .and(HasDisposition("INLINE"))
@@ -991,21 +1036,70 @@ async fn prefer_inline_falls_back_to_external_links_on_unsupported_column_type()
             },
             "result": {"data_array": [["[\"1\",\"2\"]"]]},
         })))
+        .expect(1)
         .mount(&server)
         .await;
 
     let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
-    let mut stream = execute_lazy_prefer_inline(client, "SELECT * FROM t", None, None, None)
-        .await
-        .unwrap();
-    let (batches, _schema) = stream.fetchall_arrow().await.unwrap();
+    // Not `.expect_err(...)` -- `ResultStream` (the `Ok` side) doesn't
+    // implement `Debug`.
+    let Err(err) = execute_lazy_prefer_inline(client, "INSERT INTO t VALUES (1)", None, None, None).await else {
+        panic!("a JSON-conversion failure after SUCCEEDED must error, not silently resubmit the statement");
+    };
 
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(
-        total_rows, 15,
-        "must fall back to the normal EXTERNAL_LINKS path, not error or mis-convert"
+    assert!(
+        err.message.contains("stmt-inline-unsupported") && err.message.to_lowercase().contains("re-run"),
+        "error should name the statement and explain why it isn't being re-run: {}",
+        err.message
     );
-    assert_ids_in_order(&batches, 15);
+}
+
+/// Companion regression test for the identical bug fixed one layer down, in
+/// `DbClient::execute_arrow_statement_prefer_inline` itself: a SUCCEEDED
+/// INLINE response with no `result.data_array` at all (a defensive,
+/// shouldn't-normally-happen case -- see that match arm's own doc comment)
+/// used to fall back to a fresh EXTERNAL_LINKS resubmission the same
+/// unsafe way the unsupported-column-type case above did. Only the
+/// INLINE-tagged mock is mounted, `.expect(1)`, so a regression back to
+/// resubmitting would fail this test on the missing second mock, not just
+/// on the wrong `Result` variant.
+#[tokio::test]
+async fn prefer_inline_on_missing_data_array_errors_instead_of_resubmitting() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .and(HasDisposition("INLINE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": "stmt-inline-no-data-array",
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": [], "schema": {"columns": []}},
+            "result": {},
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea);
+    let stats = QueryStatsAccumulator::default();
+    // Not `.expect_err(...)` -- `InlineOrExternal` (the `Ok` side) doesn't
+    // implement `Debug`.
+    let Err(err) = client
+        .execute_arrow_statement_prefer_inline("INSERT INTO t VALUES (1)", None, None, None, &stats)
+        .await
+    else {
+        panic!("a SUCCEEDED INLINE response with no data_array must error, not silently resubmit");
+    };
+
+    assert!(
+        err.message.contains("stmt-inline-no-data-array") && err.message.to_lowercase().contains("re-run"),
+        "error should name the statement and explain why it isn't being re-run: {}",
+        err.message
+    );
 }
 
 /// Concatenates every batch's `id` column and checks it runs 0..n_rows in
@@ -1353,4 +1447,164 @@ async fn close_all_sessions_deletes_every_idle_pooled_session() {
     let calls = delete_calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "the idle pooled session must be closed exactly once");
     assert_eq!(calls[0]["warehouse_id"], WAREHOUSE_ID);
+}
+
+// ============================================================================
+// Server-side cancellation (2026-08-11 design doc): `heartbeat::HeartbeatWait`'s
+// two trigger points (`tick()`'s own `total_timeout_s` branch, and `Drop`
+// while still genuinely in flight) each fire `POST .../cancel` via
+// `pipeline::cancel_hook` -- exactly the mechanism `lib.rs`'s
+// `PyResultSet::fetchall_arrow_streamed` wires up, but constructed directly
+// here so it's testable with no PyO3/Python involved at all. See
+// `wiremock_thrift.rs`'s identically-shaped pair of tests for the Thrift
+// (`CancelOperation`) side.
+// ============================================================================
+
+/// One statement, one deliberately slow (500ms) cloud-fetch chunk -- long
+/// enough that either trigger below reliably fires while the download is
+/// still genuinely in flight.
+async fn mount_slow_single_chunk_statement(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": [{"chunk_index": 0, "row_count": 5}]},
+        })))
+        .mount(server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/0")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "external_links": [{"external_link": format!("{uri}/_data/slow-chunk")}]
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_data/slow-chunk$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(build_chunk_bytes(0, 5), "application/vnd.apache.arrow.stream")
+                .set_delay(std::time::Duration::from_millis(500)),
+        )
+        .mount(server)
+        .await;
+}
+
+/// Mounts `POST .../cancel` and hands back a counter of how many times it
+/// was actually hit.
+async fn mount_cancel_statement_ok(server: &MockServer) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_mock = calls.clone();
+    Mock::given(method("POST"))
+        .and(path(format!("/api/2.0/sql/statements/{STATEMENT_ID}/cancel")))
+        .respond_with(move |_req: &wiremock::Request| {
+            calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({}))
+        })
+        .mount(server)
+        .await;
+    calls
+}
+
+#[tokio::test]
+async fn sea_total_timeout_fires_cancel_statement() {
+    let server = MockServer::start().await;
+    mount_slow_single_chunk_statement(&server).await;
+    let cancel_calls = mount_cancel_statement_ok(&server).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    let stream = execute_lazy(client.clone(), "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let cancel_handle = stream.cancel_handle.clone();
+    let stats = stream.stats.clone();
+    let inner = Arc::new(tokio::sync::Mutex::new(stream));
+    let fut = {
+        let inner = inner.clone();
+        async move { inner.lock().await.fetchall_arrow().await }
+    };
+    let mut wait = HeartbeatWait::with_interval(fut, Some(0.05), std::time::Duration::from_millis(20))
+        .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
+
+    let mut last_err = None;
+    for _ in 0..50 {
+        match wait.tick().await {
+            Ok(Some(Tick::Heartbeat)) => continue,
+            Ok(other) => panic!(
+                "must not complete before total_timeout_s fires -- the chunk download is deliberately slow: {other:?}"
+            ),
+            Err(e) => {
+                last_err = Some(e);
+                break;
+            }
+        }
+    }
+    let err = last_err.expect("total_timeout_s must fire within 50 ticks of a 20ms interval against a 50ms deadline");
+    assert!(err.message.contains("0.05"), "error should mention the configured timeout: {}", err.message);
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        1,
+        "POST .../cancel must fire exactly once when total_timeout_s elapses"
+    );
+    assert_eq!(
+        stats.pending_outcome(),
+        Some("timeout"),
+        "the total_timeout_s trigger must record outcome=timeout, not cancelled"
+    );
+}
+
+#[tokio::test]
+async fn sea_dropping_the_heartbeat_wait_mid_fetch_fires_cancel_statement() {
+    let server = MockServer::start().await;
+    mount_slow_single_chunk_statement(&server).await;
+    let cancel_calls = mount_cancel_statement_ok(&server).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    let stream = execute_lazy(client.clone(), "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let cancel_handle = stream.cancel_handle.clone();
+    let stats = stream.stats.clone();
+    let inner = Arc::new(tokio::sync::Mutex::new(stream));
+    let fut = {
+        let inner = inner.clone();
+        async move { inner.lock().await.fetchall_arrow().await }
+    };
+    // No `total_timeout_s` at all -- matches `task.cancel()`/`asyncio.wait_for`
+    // dropping the *surrounding* coroutine, the second of the two triggers
+    // this design covers.
+    let mut wait: HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)> =
+        HeartbeatWait::with_interval(fut, None, std::time::Duration::from_millis(20))
+            .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
+
+    match wait.tick().await.unwrap() {
+        Some(Tick::Heartbeat) => {}
+        other => panic!("expected a heartbeat while the 500ms chunk download is still in flight: {other:?}"),
+    }
+
+    drop(wait);
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        1,
+        "POST .../cancel must fire exactly once when the wait is dropped mid-fetch"
+    );
+    assert_eq!(
+        stats.pending_outcome(),
+        Some("cancelled"),
+        "a bare drop (not through tick()'s own timeout branch) must record outcome=cancelled, not timeout"
+    );
 }

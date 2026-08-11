@@ -1,6 +1,6 @@
 [package]
 name = "arrowbricks_core"
-version = "3.0.4"
+version = "3.1.0"
 edition = "2024"
 
 [lib]
@@ -74,6 +74,20 @@ extension-module = ["pyo3/extension-module"]
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 wiremock = "0.6.5"
+# Property-based fuzzing for the hand-rolled wire-protocol parsers
+# (thrift.rs's Reader, json_convert.rs's STRUCT type_text tokenizer,
+# client.rs's decompress_lz4_frame) -- dev-only, runs inside plain
+# `cargo test` via the `proptest!` macro (`#[test]` under the hood, no
+# separate fuzz-target/corpus infra the way cargo-fuzz/afl need, and no
+# nightly toolchain requirement either). Never touches the shipped wheel's
+# dependency graph -- `[dev-dependencies]` are only ever linked into `cargo
+# test`/`cargo bench` binaries, never into the `cdylib` maturin actually
+# builds (see this crate's own `extension-module` feature/profile split
+# above for how that build works). Default config (256 cases/property) is
+# left alone; per-property `ProptestConfig` below trims a couple of the
+# slower ones (deep nesting, wide byte vectors) so `cargo test` doesn't
+# become noticeably slower overall.
+proptest = "1"
 
 # Currently clean on all three by luck, not enforcement -- pinning them here
 # so a future PR that introduces one fails CI instead of silently landing.

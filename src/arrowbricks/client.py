@@ -14,6 +14,11 @@ from . import _core
 
 TokenProvider = Callable[[], "str | Awaitable[str]"]
 
+# Sync or async, same shape as TokenProvider -- see DatabricksClient's own
+# `on_event` doc comment for the fire-and-forget contract this must honor
+# (never raises to the caller, never delays/affects the query it describes).
+EventCallback = Callable[["_core.QueryStats"], "None | Awaitable[None]"]
+
 
 class DatabricksClient:
     """One Databricks SQL warehouse endpoint. Auth is entirely bring-your-own:
@@ -38,6 +43,9 @@ class DatabricksClient:
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
         protocol: str = "thrift",
+        on_event: EventCallback | None = None,
+        retry_attempts: int = 6,
+        retry_max_wait_s: float = 20.0,
     ) -> None:
         if not token and not token_provider:
             raise ValueError("DatabricksClient needs either `token` or `token_provider`")
@@ -66,6 +74,28 @@ class DatabricksClient:
         # AGENTS.md's design-invariant entry). `prefer_inline` has no effect
         # under `protocol="thrift"` (silently ignored, not an error) --
         # Thrift has no INLINE-disposition equivalent, and doesn't need one.
+        # on_event: optional observability hook, attached once here (same
+        # attachment point as token_provider) -- fires exactly once per
+        # query, at completion (success/cancelled/timeout/error), with a
+        # `QueryStats` snapshot (timing, chunk/byte/retry counters). Sync or
+        # async; fire-and-forget -- any exception it raises is caught and
+        # swallowed in Rust, never surfaced here, and dispatching it never
+        # blocks or slows the actual fetch. See README.md's "Observability"
+        # section for the full field list and an example.
+        # retry_attempts/retry_max_wait_s: how many total attempts (the first
+        # try plus retry_attempts - 1 retries) and how long the exponential
+        # backoff between them is capped at, for a transient failure
+        # (network blip, 401/403/408/429/5xx -- see `TransientError`/
+        # `AuthError` in README.md's "Errors" section) on any retryable
+        # request this client makes (statement submit/poll, chunk-index
+        # resolution, chunk download, volume file ops, the fire-and-forget
+        # cancel/close RPCs). Same threading pattern as
+        # `chunk_fetch_concurrency` above (Rust constant -> this kwarg's
+        # default -> `_core.pyi`'s stub, all three kept in step) -- see
+        # `client.rs`'s own `DbClient::retry_attempts`/`retry_max_wait_s` doc
+        # comment. Rejects `retry_attempts < 1` with a `ValueError` (raised by
+        # the Rust core, same as the finite/non-negative check on the
+        # timeout kwargs above -- not duplicated here).
         if protocol not in ("sea", "thrift"):
             raise ValueError(f'DatabricksClient protocol must be "sea" or "thrift", got {protocol!r}')
         self._core_client = _core.Client(
@@ -80,6 +110,9 @@ class DatabricksClient:
             warehouse_confirmed_running_ttl_s=warehouse_confirmed_running_ttl_s,
             compress_results=compress_results,
             protocol=protocol,
+            on_event=on_event,
+            retry_attempts=retry_attempts,
+            retry_max_wait_s=retry_max_wait_s,
         )
 
     async def aclose(self) -> None:

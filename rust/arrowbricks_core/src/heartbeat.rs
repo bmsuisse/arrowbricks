@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
 
-use crate::client::{ApiError, join_error};
+use crate::client::{ApiError, ApiErrorKind, join_error};
 
 /// Matches `_streaming.py`'s `_HEARTBEAT_INTERVAL_S` -- well under typical
 /// PaaS idle-connection ceilings for a caller forwarding these as SSE
@@ -32,11 +32,19 @@ pub enum Tick<T> {
 /// `__anext__` is) so it keeps making progress between separate `tick()`
 /// calls, exactly like Python's `asyncio.ensure_future(aw)` schedules the
 /// wrapped awaitable to run independently of when it's next polled.
+/// A best-effort server-side cancel hook -- see `HeartbeatWait::with_cancel`/
+/// `HeartbeatStream::with_cancel`. `FnOnce`, not `Fn`: fired at most once,
+/// consumed (`Option::take`) the moment it fires, same "fire exactly once"
+/// contract as the cancel RPC/REST call itself.
+type CancelHook = Box<dyn FnOnce(bool) + Send>;
+
 pub struct HeartbeatWait<T> {
     handle: Option<JoinHandle<Result<T, ApiError>>>,
     deadline: Option<Instant>,
     total_timeout_s: Option<f64>,
     heartbeat_interval: Duration,
+    /// See `with_cancel`'s own doc comment.
+    on_cancel: Option<CancelHook>,
 }
 
 impl<T: Send + 'static> HeartbeatWait<T> {
@@ -63,7 +71,28 @@ impl<T: Send + 'static> HeartbeatWait<T> {
             deadline: total_timeout_s.map(|s| Instant::now() + Duration::from_secs_f64(s)),
             total_timeout_s,
             heartbeat_interval,
+            on_cancel: None,
         }
+    }
+
+    /// Registers a best-effort server-side cancel to fire exactly once, at
+    /// the moment this wait's own `total_timeout_s` elapses inside `tick()`
+    /// (called with `true`) or it's dropped while the wrapped future is
+    /// still genuinely in flight for any other reason -- `task.cancel()`/
+    /// `asyncio.wait_for` timing out the *surrounding* coroutine (called
+    /// with `false`) -- see `Drop for HeartbeatWait`'s own doc comment for
+    /// why those are the only two triggers this can ever see. Never called
+    /// on a clean `Ready`/`Err` completion of the wrapped future itself.
+    ///
+    /// The `bool` argument distinguishes the two triggers for the caller's
+    /// own benefit (`lib.rs`'s hook records "timeout" vs "cancelled" into
+    /// `QueryStatsAccumulator` *before* firing the actual cancel RPC/REST
+    /// call) -- by the time this fires, the wrapped future may already be
+    /// mid-drop or fully gone, so this is the last point anything outside
+    /// `heartbeat.rs` itself gets a say in what happened.
+    pub fn with_cancel(mut self, on_cancel: impl FnOnce(bool) + Send + 'static) -> Self {
+        self.on_cancel = Some(Box::new(on_cancel));
+        self
     }
 
     /// One step: `Ok(Some(Tick::Heartbeat))` if still waiting,
@@ -80,6 +109,14 @@ impl<T: Send + 'static> HeartbeatWait<T> {
             Some(deadline) => {
                 let now = Instant::now();
                 if now >= deadline {
+                    // Fired *before* `abort()` -- once the task is aborted
+                    // and joined, this struct's own `on_cancel` (and
+                    // anything it captured, e.g. `ResultStream`'s shared
+                    // `QueryStatsAccumulator`) may already be unreachable
+                    // from outside; see `with_cancel`'s own doc comment.
+                    if let Some(on_cancel) = self.on_cancel.take() {
+                        on_cancel(true);
+                    }
                     handle.abort();
                     // `abort()` only *requests* cancellation -- the task
                     // (running on pyo3-async-runtimes' own persistent
@@ -104,6 +141,7 @@ impl<T: Send + 'static> HeartbeatWait<T> {
                     return Err(ApiError {
                         message: format!("Query exceeded {secs}s timeout"),
                         transient: false,
+                        kind: ApiErrorKind::Other,
                     });
                 }
                 self.heartbeat_interval.min(deadline - now)
@@ -143,6 +181,13 @@ impl<T> Drop for HeartbeatWait<T> {
     /// afterward.
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
+            // Same ordering reasoning as `tick()`'s own timeout branch:
+            // fired before `abort()`, so anything it needs to signal (e.g.
+            // `QueryStatsAccumulator::store_outcome_if_unset`) is visible
+            // before the wrapped future's own `Drop` impls actually run.
+            if let Some(on_cancel) = self.on_cancel.take() {
+                on_cancel(false);
+            }
             handle.abort();
         }
     }
@@ -164,6 +209,9 @@ pub struct HeartbeatStream<T> {
     deadline: Option<Instant>,
     total_timeout_s: Option<f64>,
     heartbeat_interval: Duration,
+    /// See `HeartbeatWait::with_cancel`'s own doc comment -- identical
+    /// contract, just for the chunk-download phase.
+    on_cancel: Option<CancelHook>,
 }
 
 impl<T: Send + 'static> HeartbeatStream<T> {
@@ -177,7 +225,15 @@ impl<T: Send + 'static> HeartbeatStream<T> {
             deadline: total_timeout_s.map(|s| Instant::now() + Duration::from_secs_f64(s)),
             total_timeout_s,
             heartbeat_interval,
+            on_cancel: None,
         }
+    }
+
+    /// See `HeartbeatWait::with_cancel`'s own doc comment -- identical
+    /// contract.
+    pub fn with_cancel(mut self, on_cancel: impl FnOnce(bool) + Send + 'static) -> Self {
+        self.on_cancel = Some(Box::new(on_cancel));
+        self
     }
 
     /// One step: `Ok(Some(Tick::Heartbeat))` while still waiting on the
@@ -201,6 +257,11 @@ impl<T: Send + 'static> HeartbeatStream<T> {
             Some(deadline) => {
                 let now = Instant::now();
                 if now >= deadline {
+                    // See `HeartbeatWait::tick`'s identical comment on why
+                    // this fires before `abort()`.
+                    if let Some(on_cancel) = self.on_cancel.take() {
+                        on_cancel(true);
+                    }
                     handle.abort();
                     // See HeartbeatWait::tick's identical comment on why this
                     // await matters.
@@ -210,6 +271,7 @@ impl<T: Send + 'static> HeartbeatStream<T> {
                     return Err(ApiError {
                         message: format!("Query exceeded {secs}s timeout"),
                         transient: false,
+                        kind: ApiErrorKind::Other,
                     });
                 }
                 self.heartbeat_interval.min(deadline - now)
@@ -235,6 +297,9 @@ impl<T> Drop for HeartbeatStream<T> {
     /// its own doc comment.
     fn drop(&mut self) {
         if let Some(handle) = self.current.take() {
+            if let Some(on_cancel) = self.on_cancel.take() {
+                on_cancel(false);
+            }
             handle.abort();
         }
     }
@@ -398,6 +463,7 @@ mod tests {
                 Err(ApiError {
                     message: "boom".into(),
                     transient: false,
+                    kind: ApiErrorKind::Other,
                 })
             },
             None,

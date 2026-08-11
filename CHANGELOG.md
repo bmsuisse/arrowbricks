@@ -1,5 +1,120 @@
 # Changelog
 
+## 3.1.0
+
+- **Fix (data safety)**: `prefer_inline=True` no longer silently re-runs a
+  statement that already succeeded. Found in code review: when an INLINE
+  result's JSON couldn't be converted to Arrow (an unsupported column type,
+  or -- defensively -- a SUCCEEDED response with no `data_array` at all),
+  arrowbricks used to transparently resubmit the identical SQL as a fresh
+  statement to fetch it the normal way. That statement had already run and
+  produced real rows server-side -- for non-idempotent SQL (INSERT/MERGE/
+  UPDATE/DELETE), resubmitting it duplicated the write, with nothing
+  surfaced to the caller. Both cases now raise `ArrowbricksError` naming the
+  statement instead of re-executing anything; see README.md's `prefer_inline`
+  entry for the corrected behavior (the *other* `prefer_inline` fallback --
+  the result being too big for INLINE's byte cap -- is unaffected and still
+  safely re-runs, since that statement fails server-side before ever really
+  executing).
+- **New**: typed exception hierarchy. Every `ApiError` crossing the PyO3
+  boundary used to collapse to a plain `RuntimeError` (message only) --
+  callers couldn't programmatically distinguish "safe to retry" from "don't
+  retry" from "auth problem" without regex-parsing the message. Now raises
+  one of `ArrowbricksError` (the base), `TransientError` (a network blip or
+  5xx that survived every internal retry), `AuthError` (401/403, survived
+  every internal retry too -- each one re-fetches a token -- *or* your own
+  `token_provider` callable itself raised, e.g. its OAuth refresh came back
+  unauthorized), or `StatementError` (the SQL statement itself failed/was
+  canceled server-side) -- see README.md's new "Errors" section.
+  **Backward compatible**: every new exception type subclasses
+  `RuntimeError`, so an `except RuntimeError` written before this change
+  keeps working unchanged. `QueryTimeout` now additionally subclasses
+  `ArrowbricksError` (previously just `RuntimeError`) for a consistent
+  catch-all -- its own behavior/call sites are otherwise untouched.
+  Implemented via PyO3's `create_exception!` (real CPython exception types
+  registered in the compiled `._core` submodule, not Python classes reached
+  via a per-error module lookup) -- see
+  `rust/arrowbricks_core/src/lib.rs`'s "Typed error taxonomy" section.
+- **New**: `retry_attempts`/`retry_max_wait_s` constructor kwargs on
+  `connect`/`DatabricksClient`/`Client`, defaulting to `6`/`20.0` (unchanged
+  from the previous hardcoded behavior). Tunes the retry policy behind
+  `TransientError`/`AuthError` above -- total attempts and the exponential-
+  backoff ceiling, for every retryable request this client makes (statement
+  submit/poll, chunk-index resolution, chunk download, volume file ops).
+  `retry_attempts` must be at least 1, and always raises `ValueError` (not
+  `OverflowError`) for an out-of-range value including negative ones -- the
+  PyO3-facing parameter is a signed `i64`, not `u32`, specifically so a
+  negative Python int reaches this crate's own validation instead of
+  failing PyO3's own argument conversion first with the wrong exception
+  type. Same "Rust constant -> PyO3 default -> Python kwarg default ->
+  `.pyi` stub" threading pattern `chunk_fetch_concurrency` already uses --
+  see AGENTS.md's own entry on that one's footgun for why each layer's
+  default has to actually match, not just look like it does.
+- **New** (Rust-internal, not user-facing): `proptest`-based property tests
+  for the hand-rolled wire-protocol parsers (`thrift.rs`'s `Reader`,
+  `json_convert.rs`'s STRUCT `type_text` tokenizer, `client.rs`'s
+  `decompress_lz4_frame`) -- dev-only dependency, runs inside plain `cargo
+  test`. Found and fixed a real bug: `thrift.rs`'s `skip()` (used to
+  generically skip any field this crate doesn't care about) recursed with no
+  depth bound into nested STRUCT/LIST/SET/MAP fields -- a small (~12KB),
+  well-formed-*looking* buffer of a few thousand nested STRUCT field headers
+  crashed the whole process with a hard stack-overflow abort, not a
+  catchable exception. Fixed with a `MAX_SKIP_DEPTH` (64) ceiling, comfortably
+  above any real struct this crate parses; a message nested past it now
+  returns a clean `Err` instead. See `thrift.rs`'s own `MAX_SKIP_DEPTH` doc
+  comment and its `skip_rejects_nesting_past_max_skip_depth_but_allows_shallow_nesting`
+  regression test.
+- **New**: server-side query cancellation. When a chunk download's
+  `total_timeout_s` elapses, or the surrounding coroutine is cancelled
+  (`task.cancel()`/`asyncio.wait_for`) while it's in flight, arrowbricks now
+  fires a best-effort server-side cancel in the background -- Thrift's
+  `CancelOperation` (already built and wire-tested, but never called before
+  this), or a new SEA `POST /api/2.0/sql/statements/{id}/cancel` client call
+  -- so Databricks stops running the query instead of finishing it for
+  nobody. Fire-and-forget by design: the timeout/cancellation error still
+  reaches the caller immediately, and the cancel call's own result is never
+  awaited or surfaced. Plugs into the two points that already detect these
+  triggers (`heartbeat.rs`'s `tick()` timeout branch and `Drop for
+  HeartbeatWait`/`Drop for HeartbeatStream`) -- no new detection logic.
+  `Cursor.fetchall_streamed()`/`fetchall_arrow_streamed()` now route through
+  this same Rust-level heartbeat (they used to wrap `fetchall()`/
+  `fetchall_arrow()` in a separate, Python-level timeout that never reached
+  it), so a `total_timeout_s` timeout on either now fires the cancel too,
+  not just `stream_query_json`/`stream_ndjson_lines` and the lower-level
+  `._core.Client`/`ResultSet` streamed APIs. **Known gap, not addressed by
+  this release**: a timeout/cancellation during the *initial* submit/poll
+  wait (`Cursor.execute()`/`execute_streamed()`) isn't covered -- by the
+  time any chunk is being fetched, the statement has normally already
+  reached a terminal state server-side, so there's typically nothing left
+  to cancel there in practice anyway.
+- **New**: `on_event` observability hook. Pass a sync or async callable to
+  `connect`/`DatabricksClient`/`Client` (same attachment point as
+  `token_provider`) to receive a `QueryStats` snapshot once per query, at
+  completion (`outcome` is `"success"`/`"cancelled"`/`"timeout"`/`"error"`):
+  `statement_id`, `protocol`, `warehouse_wait_s`, `submit_to_ready_s`,
+  `fetch_s`, `num_chunks`, `bytes_downloaded` (new counter), `retry_count`
+  (new counter -- `retry_call`'s own retries were previously invisible),
+  and `concurrency_used`. Strictly fire-and-forget: any exception the
+  callback raises is caught and swallowed on the Rust side, and dispatching
+  it (spawned, not awaited inline) never blocks or measurably slows the
+  actual fetch. See README.md's new "Observability" section for the full
+  field list and an example. A query whose result is never fully drained
+  (e.g. a partial `fetchmany()`, then abandoned) never fires an event --
+  same category as this package's existing documented GC-cleanup gap.
+- Counters/timers are accumulated for every query unconditionally (a
+  handful of atomic increments), not just when `on_event` is actually
+  registered -- cheap enough not to bother gating; only the dispatch itself
+  is skipped when there's no callback to receive it.
+
+No behavior change for a caller who doesn't pass `on_event` and never hits
+a `total_timeout_s`/cancellation during a chunk download -- both features
+are purely additive. New Rust tests in `wiremock_pipeline.rs`/
+`wiremock_thrift.rs` prove the cancel RPC/REST call actually fires (both
+the `total_timeout_s` and bare-cancellation triggers, for both protocols);
+new Python tests in `tests/test_observability.py` cover `QueryStats` for
+each outcome and confirm a raising `on_event` callback never propagates or
+delays the result.
+
 ## 3.0.4
 
 - **Perf**: the Thrift inline-`arrowBatches` path (`build_inline_blob`) now pre-sizes its output buffer and decompresses LZ4-compressed batches directly into it, instead of decompressing into an intermediate buffer and copying that into the final one -- one fewer full copy per compressed inline batch. Pure internal refactor, no behavior change; existing LZ4/multi-batch test coverage passes unchanged.

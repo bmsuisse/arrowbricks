@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use arrow::array::{Array, AsArray};
 use arrow::buffer::Buffer as ArrowBuffer;
@@ -14,7 +16,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::{
-    ApiError, ChunkItem, ColumnDescription, DbClient, InlineOrExternal, Protocol, StatementSubmitResult, join_error,
+    ApiError, ApiErrorKind, CancelHandle, ChunkItem, ColumnDescription, DbClient, InlineOrExternal, Protocol,
+    QueryStatsAccumulator, QueryStatsData, StatementSubmitResult, join_error,
 };
 use crate::thrift;
 
@@ -90,6 +93,38 @@ pub struct ExecuteResult {
     pub columns: Vec<ColumnDescription>,
 }
 
+/// Builds the closure `heartbeat::HeartbeatWait::with_cancel`/
+/// `heartbeat::HeartbeatStream::with_cancel` fire on `total_timeout_s`/
+/// cancellation -- shared by `lib.rs`'s `PyResultSet::fetchall_arrow_streamed`
+/// and `PyNdjsonStreamIter`'s `Running` state, the two Rust-side wrappers
+/// this design's cancellation feature plugs into (see `heartbeat.rs`'s own
+/// doc comments for exactly which two triggers that is). Lives here, not in
+/// `lib.rs`, specifically so this -- the actual mechanism those two triggers
+/// fire -- is constructible (and therefore testable against a real mock
+/// HTTP/Thrift server) from a plain `#[tokio::test]` with no PyO3/Python
+/// involved at all; see `tests/wiremock_pipeline.rs`/`tests/wiremock_thrift.rs`'s
+/// own cancellation tests.
+///
+/// Records the outcome hint into `stats` *before* spawning the actual cancel
+/// RPC/REST call -- both must happen synchronously, in that order, inside
+/// the closure itself (not after awaiting anything), since `with_cancel`'s
+/// own contract requires this to run before the wrapped future/task is
+/// aborted -- see that method's doc comment for why.
+pub fn cancel_hook(
+    client: Arc<DbClient>,
+    handle: CancelHandle,
+    stats: Arc<QueryStatsAccumulator>,
+) -> impl FnOnce(bool) + Send + 'static {
+    move |is_timeout: bool| {
+        stats.store_outcome_if_unset(is_timeout);
+        // Bare statement, not `let _ = ...` -- see `PyEventSink::on_event`'s
+        // identical comment on why (clippy's `let_underscore_future`).
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            client.cancel_statement(&handle).await;
+        });
+    }
+}
+
 impl ExecuteResult {
     pub fn num_batches(&self) -> usize {
         self.batches.len()
@@ -138,6 +173,7 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
         return Err(ApiError {
             message: "empty Arrow IPC chunk: expected at least a schema message".to_string(),
             transient: false,
+            kind: ApiErrorKind::Other,
         });
     }
     let mut buffer = ArrowBuffer::from(blob.clone());
@@ -151,6 +187,7 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
                 return Err(ApiError {
                     message: format!("Arrow IPC decode error: {e}"),
                     transient: false,
+                    kind: ApiErrorKind::Other,
                 });
             }
         }
@@ -158,6 +195,7 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
     decoder.finish().map_err(|e| ApiError {
         message: format!("bad Arrow IPC stream: {e}"),
         transient: false,
+        kind: ApiErrorKind::Other,
     })?;
     Ok(batches)
 }
@@ -190,6 +228,90 @@ pub struct ResultStream {
     /// Set (via `PoisonOnDrop`) if a `fetch_at_least` call ever exits
     /// without reaching its own end -- see that guard's doc comment.
     poisoned: bool,
+    /// Enough to fire a best-effort server-side cancel -- see
+    /// `client::CancelHandle`'s own doc comment. Read (cloned) by `lib.rs`
+    /// at construction time to build the `on_cancel` hook `heartbeat.rs`'s
+    /// `HeartbeatWait`/`HeartbeatStream` fire on `total_timeout_s`/
+    /// cancellation, without needing to lock this stream's own
+    /// `Arc<AsyncMutex<..>>` to get at it.
+    pub cancel_handle: CancelHandle,
+    /// Shared with `heartbeat.rs`'s own `on_cancel` hook the same way --
+    /// see `QueryStatsAccumulator`'s own doc comment for why sharing this
+    /// Arc (rather than this struct's own private counters) is what lets a
+    /// `total_timeout_s`/cancellation trigger tell `StatsReporter` which
+    /// outcome to report from *inside* a `Drop` impl, where nothing else
+    /// reachable from this struct's own fields would still be valid.
+    pub stats: Arc<QueryStatsAccumulator>,
+    reporter: StatsReporter,
+}
+
+/// Per-`ResultStream`/`NdjsonStream` bookkeeping needed to build and
+/// dispatch exactly one `QueryStatsData` per query, at completion -- see
+/// `client::QueryStatsAccumulator`/`EventSink` for the counters/dispatch
+/// mechanism this wraps. Everything here is plain, single-owner data (this
+/// struct is never shared across a `tokio::spawn` boundary); the counters
+/// that genuinely need concurrent access from spawned chunk-fetch workers
+/// live in `QueryStatsAccumulator` instead, passed into `finish` explicitly
+/// rather than duplicated here.
+struct StatsReporter {
+    client: Arc<DbClient>,
+    statement_id: String,
+    protocol: &'static str,
+    warehouse_wait_s: f64,
+    submit_to_ready_s: f64,
+    fetch_s: f64,
+    fetch_started_at: Option<Instant>,
+    /// `Some` for SEA, whose whole chunk manifest (and therefore its count)
+    /// is known upfront -- `chunk_metas.len()`, the same number
+    /// `ResultStream.num_chunks`/`NdjsonStream.num_chunks` already carry.
+    /// `None` for Thrift, which doesn't know its chunk count until it's
+    /// fully discovered them; `finish` falls back to
+    /// `QueryStatsAccumulator::chunks_seen` in that case instead.
+    static_num_chunks: Option<usize>,
+    /// Self-once guard: an explicit `finish("success"/"error")` call and
+    /// `PoisonOnDrop`/`ReportOnDrop`'s own fallback call can both race to be
+    /// the one that actually reports (a genuine error already calls
+    /// `finish` explicitly, then the guard's own `Drop` fires too, on the
+    /// far side of the `return`) -- only the first one to run wins.
+    reported: bool,
+}
+
+impl StatsReporter {
+    fn begin_fetch(&mut self) {
+        self.fetch_started_at.get_or_insert_with(Instant::now);
+    }
+
+    fn end_fetch(&mut self) {
+        if let Some(t) = self.fetch_started_at.take() {
+            self.fetch_s += t.elapsed().as_secs_f64();
+        }
+    }
+
+    fn finish(&mut self, outcome: &'static str, stats: &QueryStatsAccumulator) {
+        self.end_fetch();
+        if self.reported {
+            return;
+        }
+        self.reported = true;
+        let Some(sink) = self.client.on_event() else {
+            return;
+        };
+        let data = QueryStatsData {
+            statement_id: self.statement_id.clone(),
+            protocol: self.protocol,
+            warehouse_wait_s: self.warehouse_wait_s,
+            submit_to_ready_s: self.submit_to_ready_s,
+            fetch_s: self.fetch_s,
+            num_chunks: self
+                .static_num_chunks
+                .unwrap_or_else(|| stats.chunks_seen.load(Ordering::Relaxed)),
+            bytes_downloaded: stats.bytes_downloaded.load(Ordering::Relaxed),
+            retry_count: stats.retry_count.load(Ordering::Relaxed),
+            concurrency_used: self.client.chunk_fetch_concurrency,
+            outcome,
+        };
+        sink.on_event(data);
+    }
 }
 
 /// Arms on construction, poisons `*poisoned` on `Drop` unless `defuse()` was
@@ -213,18 +335,52 @@ pub struct ResultStream {
 /// but truncated row count (20 of 30 expected) with no error at all --
 /// `fetch_at_least` checking `poisoned` up front turns that into a loud,
 /// immediate error on the next use instead.
+///
+/// Also doubles as the completion signal for observability's `QueryStats`:
+/// a `Drop` that fires while still armed means this call never reached its
+/// own normal end for *any* reason -- most commonly the same abandonment
+/// this guard already exists to poison against. `QueryStatsAccumulator::
+/// pending_outcome()` tells "the total_timeout_s/cancellation this
+/// abandonment actually is" apart from a genuine mid-batch data/network
+/// error (which already called `finish("error", ..)` explicitly, and
+/// therefore already reported, before propagating its own `Err` up through
+/// this guard's own `Drop`) -- see that method's own doc comment for why
+/// this is the only point from which that distinction can be made at all.
 struct PoisonOnDrop<'a> {
     poisoned: &'a mut bool,
+    reporter: &'a mut StatsReporter,
+    stats: &'a QueryStatsAccumulator,
     armed: bool,
 }
 
 impl<'a> PoisonOnDrop<'a> {
-    fn new(poisoned: &'a mut bool) -> Self {
-        Self { poisoned, armed: true }
+    fn new(poisoned: &'a mut bool, reporter: &'a mut StatsReporter, stats: &'a QueryStatsAccumulator) -> Self {
+        reporter.begin_fetch();
+        Self {
+            poisoned,
+            reporter,
+            stats,
+            armed: true,
+        }
     }
 
     fn defuse(&mut self) {
         self.armed = false;
+    }
+
+    /// Reports `outcome="error"` and hands `e` back wrapped in `Err`, so a
+    /// call site can just `return guard.fail(e);` instead of repeating
+    /// `guard.reporter.finish("error", guard.stats); return Err(e);` at
+    /// every one of `fetch_at_least`'s several error-producing points
+    /// (found in review: that exact pair was duplicated 3x in this one
+    /// function alone). Does *not* defuse -- an explicit `Err` here is a
+    /// genuine data/network failure, which must still poison the stream the
+    /// same way an abandoned-mid-batch `Drop` would (see this guard's own
+    /// doc comment on why a genuine error is poisoned too, not just
+    /// cancellation).
+    fn fail<T>(&mut self, e: ApiError) -> Result<T, ApiError> {
+        self.reporter.finish("error", self.stats);
+        Err(e)
     }
 }
 
@@ -232,6 +388,55 @@ impl Drop for PoisonOnDrop<'_> {
     fn drop(&mut self) {
         if self.armed {
             *self.poisoned = true;
+            let outcome = self.stats.pending_outcome().unwrap_or("cancelled");
+            self.reporter.finish(outcome, self.stats);
+        }
+    }
+}
+
+/// `NdjsonStream`'s counterpart to `PoisonOnDrop`, minus the poisoning --
+/// `next_chunk` pulls and hands off exactly one already-fully-dequeued item
+/// at a time (no local, multi-item `decode_handles` list an early exit could
+/// abandon mid-batch the way `fetch_at_least` could), so there's no
+/// analogous correctness bug to guard against here. Exists purely so
+/// observability's "abandoned mid-fetch" `QueryStats` dispatch (see
+/// `PoisonOnDrop`'s own doc comment for why this has to be a `Drop` impl at
+/// all) covers `stream_ndjson_lines`/`stream_query_json` too, not just the
+/// `ResultStream`-backed fetch methods.
+struct ReportOnDrop<'a> {
+    reporter: &'a mut StatsReporter,
+    stats: &'a QueryStatsAccumulator,
+    armed: bool,
+}
+
+impl<'a> ReportOnDrop<'a> {
+    fn new(reporter: &'a mut StatsReporter, stats: &'a QueryStatsAccumulator) -> Self {
+        reporter.begin_fetch();
+        Self {
+            reporter,
+            stats,
+            armed: true,
+        }
+    }
+
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+
+    /// See `PoisonOnDrop::fail`'s identical doc comment -- same
+    /// deduplication, no poisoning concern here (see this struct's own doc
+    /// comment for why).
+    fn fail<T>(&mut self, e: ApiError) -> Result<T, ApiError> {
+        self.reporter.finish("error", self.stats);
+        Err(e)
+    }
+}
+
+impl Drop for ReportOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let outcome = self.stats.pending_outcome().unwrap_or("cancelled");
+            self.reporter.finish(outcome, self.stats);
         }
     }
 }
@@ -254,9 +459,10 @@ impl ResultStream {
                           re-run the query instead of continuing to use this cursor/result"
                     .to_string(),
                 transient: false,
+                kind: ApiErrorKind::Other,
             });
         }
-        let mut guard = PoisonOnDrop::new(&mut self.poisoned);
+        let mut guard = PoisonOnDrop::new(&mut self.poisoned, &mut self.reporter, self.stats.as_ref());
         while self.pending_rows < want_rows && !self.exhausted {
             let mut decode_handles = Vec::new();
             let mut estimated_new_rows = 0usize;
@@ -264,19 +470,25 @@ impl ResultStream {
                 && !self.exhausted
                 && decode_handles.len() < MAX_CHUNKS_PER_FETCH_BATCH
             {
-                match self.reorder.next().await? {
-                    Some(item) => {
+                match self.reorder.next().await {
+                    Ok(Some(item)) => {
                         estimated_new_rows += item.row_count.unwrap_or(0).max(0) as usize;
                         let truncate_to = item.truncate_to;
                         decode_handles.push(tokio::task::spawn_blocking(move || {
                             decode_chunk_item(&item.blob, truncate_to)
                         }));
                     }
-                    None => self.exhausted = true,
+                    Ok(None) => self.exhausted = true,
+                    Err(e) => return guard.fail(e),
                 }
             }
             for handle in decode_handles {
-                for batch in handle.await.map_err(join_error)?? {
+                let batches = match handle.await {
+                    Ok(Ok(batches)) => batches,
+                    Ok(Err(e)) => return guard.fail(e),
+                    Err(join_err) => return guard.fail(join_error(join_err)),
+                };
+                for batch in batches {
                     if self.schema.is_none() {
                         self.schema = Some(batch.schema());
                     }
@@ -286,6 +498,10 @@ impl ResultStream {
             }
         }
         guard.defuse();
+        guard.reporter.end_fetch();
+        if self.exhausted {
+            guard.reporter.finish("success", guard.stats);
+        }
         Ok(())
     }
 
@@ -327,6 +543,94 @@ impl ResultStream {
     }
 }
 
+/// Reports a `QueryStats` event (outcome `"error"`) for the case a query
+/// fails *before* a `ResultStream`/`NdjsonStream` -- and therefore a
+/// `StatsReporter` -- ever exists: `ensure_warehouse_running`/submit/poll
+/// itself failing (a FAILED/CANCELED statement, a network error, or a
+/// stopped/unreachable warehouse). Without this, an `on_event` caller would
+/// never hear about the single most common real "error" case (e.g. bad
+/// SQL, or the warehouse being down) at all, since that never reaches the
+/// point `StatsReporter` is normally constructed at. `warehouse_wait_s` is
+/// read back from `stats` (see `QueryStatsAccumulator::warehouse_wait_s`),
+/// not passed in separately -- `submit_and_poll`/`submit_thrift_and_start_fetch`
+/// record it there themselves, including on their own failure paths, so
+/// it's always current by the time any caller of this function has an
+/// error in hand.
+///
+/// `statement_id` is best-effort empty (`""`) here: `ApiError` doesn't carry
+/// it, so a failure that happened after the server *did* assign one (a
+/// polled FAILED/CANCELED statement) still can't be attributed to it from
+/// here -- a real, accepted gap, not something this call site can close
+/// without a wider change to `ApiError` itself.
+///
+/// Deliberately does **not** attempt to catch task-cancellation/
+/// `total_timeout_s` *during* this submit/poll phase the way `PoisonOnDrop`/
+/// `ReportOnDrop` do for the fetch phase -- no `heartbeat.rs` wrapper covers
+/// this phase either (see this design's own scope note: both `on_event` and
+/// the cancellation feature share the identical blind spot here), so there
+/// is nothing for a `Drop`-based guard to distinguish it from `finish`'s own
+/// "already reported" idempotency without a real, working hint. A caller
+/// who cancels a `Cursor.execute()`/`stream_query_json` call mid-submit
+/// today gets no `on_event` at all for that attempt, same as before this
+/// feature existed.
+fn report_submit_error(client: &Arc<DbClient>, protocol: &'static str, submit_to_ready_s: f64, stats: &QueryStatsAccumulator) {
+    let Some(sink) = client.on_event() else {
+        return;
+    };
+    sink.on_event(QueryStatsData {
+        statement_id: String::new(),
+        protocol,
+        warehouse_wait_s: stats.warehouse_wait_s(),
+        submit_to_ready_s,
+        fetch_s: 0.0,
+        num_chunks: stats.chunks_seen.load(Ordering::Relaxed),
+        bytes_downloaded: stats.bytes_downloaded.load(Ordering::Relaxed),
+        retry_count: stats.retry_count.load(Ordering::Relaxed),
+        concurrency_used: client.chunk_fetch_concurrency,
+        outcome: "error",
+    });
+}
+
+/// Shared by `execute_lazy` and `execute_ndjson_stream`'s SEA branch --
+/// submits via `execute_arrow_statement`, timing `submit_to_ready_s` and
+/// reporting `on_event`'s `"error"` outcome (via `report_submit_error`) if
+/// it fails. `warehouse_wait_s` is *not* timed here at all -- it's recorded
+/// once, internally, by `client::DbClient::submit_and_poll` (which this
+/// calls into exactly once), and read back from `stats.warehouse_wait_s()`
+/// by this function's own caller. Extracting this one shared helper (rather
+/// than repeating "time it, call it, report_submit_error on failure" at
+/// each call site) is what makes fixing that error-reporting path
+/// consistent across every SEA call site instead of three separate,
+/// easily-desynced copies -- found in code review as real duplication, not
+/// just a style nit, since one of the three copies used to also silently
+/// re-time `ensure_warehouse_running` a second time per query. Doesn't
+/// cover `execute_arrow_statement_prefer_inline`'s own submission --
+/// `execute_lazy_prefer_inline` needs its own copy of this shape, since
+/// `InlineOrExternal`'s return type differs and its own fallback (a JSON
+/// conversion failure, not a submission failure) needs to keep timing
+/// `submit_to_ready_s` across a second, additional submission rather than
+/// just once.
+async fn submit_sea_and_report(
+    client: &Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+    stats: &QueryStatsAccumulator,
+) -> Result<(StatementSubmitResult, f64), ApiError> {
+    let submit_t0 = Instant::now();
+    match client
+        .execute_arrow_statement(statement, catalog, schema, parameters, stats)
+        .await
+    {
+        Ok(s) => Ok((s, submit_t0.elapsed().as_secs_f64())),
+        Err(e) => {
+            report_submit_error(client, "sea", submit_t0.elapsed().as_secs_f64(), stats);
+            Err(e)
+        }
+    }
+}
+
 /// Submit -> poll -> start background chunk fetching, without draining
 /// anything yet -- pairs with `ResultStream`'s `fetchmany_arrow`/
 /// `fetchall_arrow` for on-demand pulling.
@@ -337,21 +641,35 @@ pub async fn execute_lazy(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
-    let submitted = client
-        .execute_arrow_statement(statement, catalog, schema, parameters)
-        .await?;
-    Ok(result_stream_from_submitted(client, submitted))
+    let stats = Arc::new(QueryStatsAccumulator::default());
+    let (submitted, submit_to_ready_s) =
+        submit_sea_and_report(&client, statement, catalog, schema, parameters, &stats).await?;
+    let warehouse_wait_s = stats.warehouse_wait_s();
+    Ok(result_stream_from_submitted(
+        client,
+        submitted,
+        stats,
+        warehouse_wait_s,
+        submit_to_ready_s,
+    ))
 }
 
-fn result_stream_from_submitted(client: Arc<DbClient>, submitted: StatementSubmitResult) -> ResultStream {
+fn result_stream_from_submitted(
+    client: Arc<DbClient>,
+    submitted: StatementSubmitResult,
+    stats: Arc<QueryStatsAccumulator>,
+    warehouse_wait_s: f64,
+    submit_to_ready_s: f64,
+) -> ResultStream {
     let num_chunks = submitted.chunk_metas.len();
-    let rx = client.fetch_chunks_with_backpressure(
+    let rx = client.clone().fetch_chunks_with_backpressure(
         submitted.statement_id.clone(),
         submitted.chunk_metas,
         submitted.compressed,
+        stats.clone(),
     );
     ResultStream {
-        statement_id: submitted.statement_id,
+        statement_id: submitted.statement_id.clone(),
         num_chunks,
         schema: None,
         columns: submitted.columns,
@@ -360,6 +678,21 @@ fn result_stream_from_submitted(client: Arc<DbClient>, submitted: StatementSubmi
         pending_rows: 0,
         exhausted: false,
         poisoned: false,
+        cancel_handle: CancelHandle::Sea {
+            statement_id: submitted.statement_id.clone(),
+        },
+        stats,
+        reporter: StatsReporter {
+            client,
+            statement_id: submitted.statement_id,
+            protocol: "sea",
+            warehouse_wait_s,
+            submit_to_ready_s,
+            fetch_s: 0.0,
+            fetch_started_at: None,
+            static_num_chunks: Some(num_chunks),
+            reported: false,
+        },
     }
 }
 
@@ -395,9 +728,10 @@ async fn submit_and_await_thrift_statement(
     session: &thrift::SessionHandle,
     statement: &str,
     parameters: Option<&Value>,
+    stats: &QueryStatsAccumulator,
 ) -> Result<ThriftStatementReady, ApiError> {
     let resp = client
-        .thrift_execute_statement_raw(session, statement, parameters)
+        .thrift_execute_statement_raw(session, statement, parameters, stats)
         .await?;
 
     let operation = resp
@@ -422,7 +756,7 @@ async fn submit_and_await_thrift_statement(
         }
         if let Some(op_status) = &direct.operation_status {
             if let Some(e) = op_status.terminal_error() {
-                return Err(ApiError::permanent(format!("Thrift statement failed: {e}")));
+                return Err(ApiError::statement_failed(format!("Thrift statement failed: {e}")));
             }
             already_finished = op_status.is_finished();
         }
@@ -445,9 +779,9 @@ async fn submit_and_await_thrift_statement(
 
     if !already_finished {
         loop {
-            let status = client.thrift_get_operation_status_raw(&operation).await?;
+            let status = client.thrift_get_operation_status_raw(&operation, stats).await?;
             if let Some(e) = status.terminal_error() {
-                return Err(ApiError::permanent(format!("Thrift statement failed: {e}")));
+                return Err(ApiError::statement_failed(format!("Thrift statement failed: {e}")));
             }
             if status.is_finished() {
                 break;
@@ -523,8 +857,15 @@ pub async fn execute_lazy_thrift(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
-    let (statement_id, schema_bytes, rx) =
-        submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
+    let ThriftSubmitResult {
+        statement_id,
+        schema_bytes,
+        rx,
+        operation,
+        stats,
+        warehouse_wait_s,
+        submit_to_ready_s,
+    } = submit_thrift_and_start_fetch(client.clone(), statement, catalog, schema, parameters).await?;
     // Populate `schema`/`columns` up front from Thrift's own result-set
     // metadata, the same way SEA's `manifest.schema.columns` already does --
     // otherwise both stay empty until a batch is actually decoded, which for
@@ -546,7 +887,7 @@ pub async fn execute_lazy_thrift(
         })
         .unwrap_or_default();
     Ok(ResultStream {
-        statement_id,
+        statement_id: statement_id.clone(),
         num_chunks: 0,
         schema,
         columns,
@@ -555,36 +896,87 @@ pub async fn execute_lazy_thrift(
         pending_rows: 0,
         exhausted: false,
         poisoned: false,
+        cancel_handle: CancelHandle::Thrift { operation },
+        stats,
+        reporter: StatsReporter {
+            client,
+            statement_id,
+            protocol: "thrift",
+            warehouse_wait_s,
+            submit_to_ready_s,
+            fetch_s: 0.0,
+            fetch_started_at: None,
+            // Thrift doesn't know its chunk count upfront -- see
+            // `StatsReporter::static_num_chunks`'s own doc comment.
+            static_num_chunks: None,
+            reported: false,
+        },
     })
+}
+
+/// `submit_thrift_and_start_fetch`'s return shape -- a named struct instead
+/// of a positional tuple (found in review: the original 7-element tuple
+/// needed `#[allow(clippy::type_complexity)]` and forced every caller to
+/// destructure-then-reassemble it positionally, risking the two same-typed
+/// `f64` timing fields silently swapping if the tuple were ever reordered).
+struct ThriftSubmitResult {
+    statement_id: String,
+    schema_bytes: Option<bytes::Bytes>,
+    rx: mpsc::Receiver<Result<ChunkItem, ApiError>>,
+    operation: thrift::OperationHandle,
+    stats: Arc<QueryStatsAccumulator>,
+    warehouse_wait_s: f64,
+    submit_to_ready_s: f64,
 }
 
 /// The submit/session/poll/fetch-start tail of `execute_lazy_thrift`,
 /// factored out so `execute_ndjson_stream` can drive the exact same Thrift
 /// path instead of unconditionally submitting via SEA. Session handling and
 /// the cleanup-ordering invariant are unchanged by the split -- see
-/// `execute_lazy_thrift`'s own doc comment for both.
+/// `execute_lazy_thrift`'s own doc comment for both. Also returns
+/// everything observability needs: a clone of the `OperationHandle` (for
+/// `CancelHandle::Thrift`, taken *before* `ready` moves into the background
+/// fetch loop below -- once there, it's only reachable on the far side of
+/// that loop's own cleanup, too late for `heartbeat.rs` to ever use it),
+/// the per-query `QueryStatsAccumulator`, and the two timings this function
+/// itself is positioned to measure directly (`ensure_warehouse_running` is
+/// already this function's own first call, unlike SEA's `submit_and_poll`,
+/// which buries it several calls deeper in `client.rs`).
 async fn submit_thrift_and_start_fetch(
     client: Arc<DbClient>,
     statement: &str,
     catalog: Option<&str>,
     schema: Option<&str>,
     parameters: Option<Value>,
-) -> Result<
-    (
-        String,
-        Option<bytes::Bytes>,
-        mpsc::Receiver<Result<ChunkItem, ApiError>>,
-    ),
-    ApiError,
-> {
-    client.ensure_warehouse_running().await?;
+) -> Result<ThriftSubmitResult, ApiError> {
+    let stats = Arc::new(QueryStatsAccumulator::default());
+    let warehouse_t0 = Instant::now();
+    // Explicit match, not a bare `?` -- found in review: a stopped/
+    // unreachable warehouse used to propagate correctly to the caller but
+    // never reached `report_submit_error`, so `on_event` silently never
+    // fired for that query at all, contradicting the "once per query, at
+    // completion, including outcome=error" contract.
+    if let Err(e) = client.ensure_warehouse_running().await {
+        report_submit_error(&client, "thrift", 0.0, &stats);
+        return Err(e);
+    }
+    stats.add_warehouse_wait_s(warehouse_t0.elapsed().as_secs_f64());
+
+    let submit_t0 = Instant::now();
     let pooled = client.thrift_checkout_session(catalog, schema).await;
     let (session, from_pool) = match pooled {
         Some(s) => (s, true),
-        None => (client.thrift_open_session_raw(catalog, schema).await?, false),
+        None => match client.thrift_open_session_raw(catalog, schema).await {
+            Ok(s) => (s, false),
+            Err(e) => {
+                report_submit_error(&client, "thrift", submit_t0.elapsed().as_secs_f64(), &stats);
+                return Err(e);
+            }
+        },
     };
 
-    let ready = submit_and_await_thrift_statement(&client, &session, statement, parameters.as_ref()).await;
+    let ready = submit_and_await_thrift_statement(&client, &session, statement, parameters.as_ref(), &stats).await;
+    let submit_to_ready_s = submit_t0.elapsed().as_secs_f64();
 
     // Exactly one of these two arms ever touches `session` -- a pooled
     // session is checked in right away (safe: that only makes it available
@@ -606,19 +998,42 @@ async fn submit_thrift_and_start_fetch(
             }
         }
     };
-    let ready = ready?;
+    let ready = match ready {
+        Ok(r) => r,
+        Err(e) => {
+            report_submit_error(&client, "thrift", submit_to_ready_s, &stats);
+            return Err(e);
+        }
+    };
 
     let statement_id = hex_encode(&ready.operation.operation_id.guid);
-    // Cheap: `Bytes::clone()` is a refcount bump, not a copy. `ready` itself
-    // is about to move into the loop below; `execute_lazy_thrift` needs this
-    // clone to populate `description`/`schema()` up front.
+    // Cheap: `Bytes::clone()`/`OperationHandle::clone()` are refcount bumps/
+    // small struct copies, not deep copies. `ready` itself is about to move
+    // into the loop below; `execute_lazy_thrift` needs these clones to
+    // populate `description`/`schema()`/`CancelHandle` up front.
     let schema_bytes = ready.schema_bytes.clone();
+    let operation = ready.operation.clone();
 
     let concurrency = client.chunk_fetch_concurrency.max(1);
     let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
-    tokio::spawn(drive_thrift_fetch_loop(client, ready, throwaway_session, tx));
+    tokio::spawn(drive_thrift_fetch_loop(
+        client,
+        ready,
+        throwaway_session,
+        tx,
+        stats.clone(),
+    ));
 
-    Ok((statement_id, schema_bytes, rx))
+    let warehouse_wait_s = stats.warehouse_wait_s();
+    Ok(ThriftSubmitResult {
+        statement_id,
+        schema_bytes,
+        rx,
+        operation,
+        stats,
+        warehouse_wait_s,
+        submit_to_ready_s,
+    })
 }
 
 /// Decodes just the Arrow-IPC *schema message* out of `blob` -- no batches
@@ -672,6 +1087,7 @@ async fn drive_thrift_fetch_loop(
     ready: ThriftStatementReady,
     throwaway_session: Option<thrift::SessionHandle>,
     tx: mpsc::Sender<Result<ChunkItem, ApiError>>,
+    stats: Arc<QueryStatsAccumulator>,
 ) {
     let ThriftStatementReady {
         operation,
@@ -680,7 +1096,16 @@ async fn drive_thrift_fetch_loop(
         initial_rowset,
         already_closed,
     } = ready;
-    run_thrift_fetch_loop(&client, &operation, schema_bytes, lz4_compressed, initial_rowset, &tx).await;
+    run_thrift_fetch_loop(
+        &client,
+        &operation,
+        schema_bytes,
+        lz4_compressed,
+        initial_rowset,
+        &tx,
+        &stats,
+    )
+    .await;
     // Closes the channel *before* the two cleanup RPCs below, not after this
     // whole function returns -- `tx` is otherwise dropped at the end of this
     // scope, which is on the far side of a `CloseOperation` round trip.
@@ -740,8 +1165,9 @@ async fn fetch_thrift_link(
     client: &Arc<DbClient>,
     work: ThriftLinkWork,
     compressed: bool,
+    stats: &Arc<QueryStatsAccumulator>,
 ) -> Result<ChunkItem, ApiError> {
-    let blob = client.fetch_link_bytes_budgeted(&work.file_link, compressed).await?;
+    let blob = client.fetch_link_bytes_budgeted(&work.file_link, compressed, stats).await?;
     Ok(ChunkItem {
         blob,
         row_count: Some(work.row_count),
@@ -789,6 +1215,7 @@ async fn run_thrift_fetch_loop(
     mut lz4_compressed: bool,
     initial_rowset: Option<(thrift::RowSet, bool)>,
     tx: &mpsc::Sender<Result<ChunkItem, ApiError>>,
+    stats: &Arc<QueryStatsAccumulator>,
 ) {
     let concurrency = client.chunk_fetch_concurrency.max(1);
     let (link_tx, link_rx) = mpsc::channel::<ThriftLinkWork>(concurrency);
@@ -816,12 +1243,13 @@ async fn run_thrift_fetch_loop(
         let link_rx = link_rx.clone();
         let out_tx = tx.clone();
         let compressed_flag = compressed_flag.clone();
+        let worker_stats = stats.clone();
         worker_handles.push(tokio::spawn(async move {
             loop {
                 let work = { link_rx.lock().await.recv().await };
                 let Some(work) = work else { return };
                 let compressed = compressed_flag.load(std::sync::atomic::Ordering::Relaxed);
-                let result = fetch_thrift_link(&client, work, compressed).await;
+                let result = fetch_thrift_link(&client, work, compressed, &worker_stats).await;
                 if out_tx.send(result).await.is_err() {
                     return;
                 }
@@ -852,7 +1280,7 @@ async fn run_thrift_fetch_loop(
         let (row_set, has_more) = if let Some(v) = pending.take() {
             v
         } else {
-            match client.thrift_fetch_results_raw(operation).await {
+            match client.thrift_fetch_results_raw(operation, stats).await {
                 Ok(fr) => {
                     if let Some(e) = fr.status.error() {
                         let _ = tx
@@ -906,6 +1334,7 @@ async fn run_thrift_fetch_loop(
                         truncate_to: Some(row_count),
                     };
                     chunk_index += 1;
+                    stats.chunks_seen.fetch_add(1, Ordering::Relaxed);
                     if tx.send(Ok(item)).await.is_err() {
                         break;
                     }
@@ -920,6 +1349,7 @@ async fn run_thrift_fetch_loop(
         for link in row_set.result_links {
             let idx = chunk_index;
             chunk_index += 1;
+            stats.chunks_seen.fetch_add(1, Ordering::Relaxed);
             let work = ThriftLinkWork {
                 chunk_index: idx,
                 row_count: link.row_count,
@@ -1118,14 +1548,20 @@ fn decode_chunk_item(blob: &Bytes, truncate_to: Option<i64>) -> Result<Vec<Recor
 /// Like `execute_lazy`, but first tries `disposition: INLINE` + `format:
 /// JSON_ARRAY` via `DbClient::execute_arrow_statement_prefer_inline` -- for
 /// a small result, this skips the chunk-fetch round trip entirely (see that
-/// function's own doc comment for the full reasoning and the confirmed
-/// real-workspace behavior it's based on). Converts the returned JSON_ARRAY
-/// rows into a `RecordBatch` via `json_convert`; if that conversion hits a
-/// column type it doesn't handle, falls back to a **fresh** `execute_lazy`
-/// call (a distinct statement execution, not a retry -- see
-/// `execute_arrow_statement_prefer_inline`'s own doc comment for why that's
-/// safe). Not the default -- opt-in only, via `Cursor.execute(...,
-/// prefer_inline=True)`.
+/// function's own doc comment for the full reasoning, including its own
+/// **safe-to-double-execute** fallback for a statement that reached a
+/// FAILED state, e.g. the INLINE byte-limit-exceeded case -- nothing
+/// committed server-side, so a fresh submission is a distinct, harmless
+/// execution). Converts the returned JSON_ARRAY rows into a `RecordBatch`
+/// via `json_convert`; if that conversion fails, this does **not** fall
+/// back to a fresh `execute_lazy`/resubmission the way the byte-limit case
+/// does -- found in code review (2026-08-11) that this call site's own
+/// statement already reached SUCCEEDED (unlike the byte-limit case), so any
+/// DML side effects (INSERT/MERGE/UPDATE/DELETE) already happened;
+/// resubmitting the identical SQL here would silently duplicate them for
+/// non-idempotent SQL, with nothing surfaced to the caller. See the
+/// conversion-failure arm below for what this does instead. Not the
+/// default -- opt-in only, via `Cursor.execute(..., prefer_inline=True)`.
 pub async fn execute_lazy_prefer_inline(
     client: Arc<DbClient>,
     statement: &str,
@@ -1133,12 +1569,36 @@ pub async fn execute_lazy_prefer_inline(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
-    let outcome = client
-        .execute_arrow_statement_prefer_inline(statement, catalog, schema, parameters.clone())
-        .await?;
+    let stats = Arc::new(QueryStatsAccumulator::default());
+    // Not `submit_sea_and_report` -- `execute_arrow_statement_prefer_inline`'s
+    // own return shape (`InlineOrExternal`) differs from plain
+    // `execute_arrow_statement`'s, and the JSON-conversion fallback below
+    // needs to keep timing this same `submit_t0` across a *second*
+    // submission rather than starting fresh -- see that fallback's own doc
+    // comment.
+    let submit_t0 = Instant::now();
+    let outcome = match client
+        .execute_arrow_statement_prefer_inline(statement, catalog, schema, parameters.clone(), &stats)
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            report_submit_error(&client, "sea", submit_t0.elapsed().as_secs_f64(), &stats);
+            return Err(e);
+        }
+    };
+    let submit_to_ready_s = submit_t0.elapsed().as_secs_f64();
 
     let (statement_id, rows, columns) = match outcome {
-        InlineOrExternal::External(submitted) => return Ok(result_stream_from_submitted(client, submitted)),
+        InlineOrExternal::External(submitted) => {
+            return Ok(result_stream_from_submitted(
+                client,
+                submitted,
+                stats.clone(),
+                stats.warehouse_wait_s(),
+                submit_to_ready_s,
+            ));
+        }
         InlineOrExternal::Inline {
             statement_id,
             rows,
@@ -1156,7 +1616,7 @@ pub async fn execute_lazy_prefer_inline(
             // never calls `self.reorder.next()` at all for this stream.
             let (_tx, rx) = mpsc::channel(1);
             Ok(ResultStream {
-                statement_id,
+                statement_id: statement_id.clone(),
                 num_chunks: 1,
                 schema,
                 columns,
@@ -1165,9 +1625,85 @@ pub async fn execute_lazy_prefer_inline(
                 pending_rows,
                 exhausted: true,
                 poisoned: false,
+                // An INLINE result is already fully returned and terminal by
+                // the time this statement_id even exists -- there is
+                // nothing left running server-side to cancel. Kept as a
+                // real `CancelHandle` anyway (rather than a special no-op
+                // variant) purely for type-uniformity; firing it here would
+                // just be a harmless no-op against an already-finished
+                // statement, same as the "belt-and-suspenders" reasoning
+                // `cancel_statement`'s own doc comment describes.
+                cancel_handle: CancelHandle::Sea {
+                    statement_id: statement_id.clone(),
+                },
+                stats: stats.clone(),
+                reporter: StatsReporter {
+                    client,
+                    statement_id,
+                    protocol: "sea",
+                    warehouse_wait_s: stats.warehouse_wait_s(),
+                    submit_to_ready_s,
+                    // No separate download phase for an INLINE result --
+                    // the rows are already in hand from the submit/poll
+                    // response itself.
+                    fetch_s: 0.0,
+                    fetch_started_at: None,
+                    static_num_chunks: Some(1),
+                    reported: false,
+                },
             })
         }
-        Err(_) => execute_lazy(client, statement, catalog, schema, parameters).await,
+        // **Does NOT resubmit `statement`** -- found in code review
+        // (2026-08-11) that an earlier version of this arm called
+        // `execute_arrow_statement(statement, ...)` here, on the same
+        // "distinct execution, safe to double-run" reasoning
+        // `execute_arrow_statement_prefer_inline`'s own byte-limit-exceeded
+        // fallback (client.rs) uses -- but that reasoning doesn't transfer:
+        // the byte-limit case only ever fires for a statement that reached
+        // a FAILED state server-side (nothing committed), while this arm
+        // only runs after the statement already reached SUCCEEDED -- rows
+        // genuinely came back, so any DML side effects (INSERT/MERGE/
+        // UPDATE/DELETE) already happened. Blindly resubmitting the
+        // identical SQL here would silently duplicate those side effects
+        // for non-idempotent SQL, with nothing surfaced to the caller --
+        // reproduced directly: `protocol="sea"`, `prefer_inline=True`, an
+        // INSERT whose INLINE JSON result has a column type
+        // `json_convert` can't handle, and the mock statements route was
+        // hit exactly twice instead of once. There is also no way to fetch
+        // *this same* statement's data a different way instead (an INLINE
+        // submission has no `external_links`/manifest chunks to fall back
+        // to -- returning the data inline in the response is the entire
+        // point of INLINE, so there is nothing left to resolve for this
+        // `statement_id`) -- the only safe option is a clear error, not a
+        // silent retry-shaped write. The `on_event` dispatch below is
+        // built inline rather than via `report_submit_error` specifically
+        // so it can report the *real* `statement_id` (which does exist --
+        // the statement genuinely succeeded) instead of that helper's own
+        // `statement_id: String::new()`, meant for a submission that never
+        // produced one at all.
+        Err(e) => {
+            let submit_to_ready_s = submit_t0.elapsed().as_secs_f64();
+            if let Some(sink) = client.on_event() {
+                sink.on_event(QueryStatsData {
+                    statement_id: statement_id.clone(),
+                    protocol: "sea",
+                    warehouse_wait_s: stats.warehouse_wait_s(),
+                    submit_to_ready_s,
+                    fetch_s: 0.0,
+                    num_chunks: stats.chunks_seen.load(Ordering::Relaxed),
+                    bytes_downloaded: stats.bytes_downloaded.load(Ordering::Relaxed),
+                    retry_count: stats.retry_count.load(Ordering::Relaxed),
+                    concurrency_used: client.chunk_fetch_concurrency,
+                    outcome: "error",
+                });
+            }
+            Err(ApiError::permanent(format!(
+                "prefer_inline: statement {statement_id} succeeded and returned an INLINE result, but it could \
+                 not be converted to Arrow ({e}) -- refusing to automatically re-run the query to avoid \
+                 duplicating any write it performed; pass prefer_inline=False (or a column-type-compatible \
+                 projection) if you need this result, or re-submit it yourself if you know it's safe to re-run"
+            )))
+        }
     }
 }
 
@@ -1192,8 +1728,15 @@ pub async fn run_pipeline(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ExecuteResult, ApiError> {
+    // `run_pipeline` is the eager, one-shot path -- not reachable from
+    // Python (`lib.rs` never calls it; only this crate's own test suite
+    // does), so it has no `CancelHandle`/`StatsReporter`/`on_event` wiring
+    // of its own. It still needs *a* `QueryStatsAccumulator` to satisfy
+    // `execute_arrow_statement`/`fetch_chunks_with_backpressure`'s own
+    // signatures -- built and discarded here, never read back.
+    let stats = Arc::new(QueryStatsAccumulator::default());
     let submitted = client
-        .execute_arrow_statement(statement, catalog, schema, parameters)
+        .execute_arrow_statement(statement, catalog, schema, parameters, &stats)
         .await?;
     let num_chunks = submitted.chunk_metas.len();
 
@@ -1201,6 +1744,7 @@ pub async fn run_pipeline(
         submitted.statement_id.clone(),
         submitted.chunk_metas,
         submitted.compressed,
+        stats,
     );
     let mut reorder = ReorderBuffer::new(rx);
 
@@ -1256,16 +1800,19 @@ fn encode_ndjson_lines(batches: &[RecordBatch], non_finite_as_string: bool) -> R
         writer.write_batches(&refs).map_err(|e| ApiError {
             message: format!("NDJSON encode error: {e}"),
             transient: false,
+            kind: ApiErrorKind::Other,
         })?;
         writer.finish().map_err(|e| ApiError {
             message: format!("NDJSON encode error: {e}"),
             transient: false,
+            kind: ApiErrorKind::Other,
         })?;
     }
     let mut lines: Vec<String> = String::from_utf8(buf)
         .map_err(|e| ApiError {
             message: format!("NDJSON encode produced invalid UTF-8: {e}"),
             transient: false,
+            kind: ApiErrorKind::Other,
         })?
         .lines()
         .map(|line| line.to_string())
@@ -1420,6 +1967,11 @@ pub struct NdjsonStream {
     pub num_chunks: usize,
     reorder: ReorderBuffer,
     non_finite_as_string: bool,
+    /// See `ResultStream`'s identically-named fields -- same cancellation/
+    /// observability contract, just backing `stream_ndjson_lines` instead.
+    pub cancel_handle: CancelHandle,
+    pub stats: Arc<QueryStatsAccumulator>,
+    reporter: StatsReporter,
 }
 
 impl NdjsonStream {
@@ -1429,19 +1981,38 @@ impl NdjsonStream {
     /// One network chunk in, one line per row out, matching
     /// `fetch_arrow_chunks_for_statement`'s old per-chunk yield.
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<String>>, ApiError> {
-        match self.reorder.next().await? {
-            Some(item) => {
+        let mut guard = ReportOnDrop::new(&mut self.reporter, self.stats.as_ref());
+        match self.reorder.next().await {
+            Ok(Some(item)) => {
                 let non_finite_as_string = self.non_finite_as_string;
                 let truncate_to = item.truncate_to;
-                let lines = tokio::task::spawn_blocking(move || {
+                let decoded = tokio::task::spawn_blocking(move || {
                     let batches = decode_chunk_item(&item.blob, truncate_to)?;
                     encode_ndjson_lines(&batches, non_finite_as_string)
                 })
                 .await
-                .map_err(join_error)??;
-                Ok(Some(lines))
+                .map_err(join_error);
+                match decoded {
+                    Ok(Ok(lines)) => {
+                        guard.defuse();
+                        guard.reporter.end_fetch();
+                        Ok(Some(lines))
+                    }
+                    Ok(Err(e)) | Err(e) => {
+                        guard.defuse();
+                        guard.fail(e)
+                    }
+                }
             }
-            None => Ok(None),
+            Ok(None) => {
+                guard.defuse();
+                guard.reporter.finish("success", guard.stats);
+                Ok(None)
+            }
+            Err(e) => {
+                guard.defuse();
+                guard.fail(e)
+            }
         }
     }
 }
@@ -1473,28 +2044,71 @@ pub async fn execute_ndjson_stream(
     parameters: Option<Value>,
     non_finite_as_string: bool,
 ) -> Result<NdjsonStream, ApiError> {
-    let (statement_id, num_chunks, rx) = if client.protocol == Protocol::Thrift {
-        // NDJSON output has no `description`/column-schema concept.
-        let (statement_id, _schema_bytes, rx) =
-            submit_thrift_and_start_fetch(client, statement, catalog, schema, parameters).await?;
-        (statement_id, 0, rx)
-    } else {
-        let submitted = client
-            .execute_arrow_statement(statement, catalog, schema, parameters)
-            .await?;
-        let num_chunks = submitted.chunk_metas.len();
-        let rx = client.fetch_chunks_with_backpressure(
-            submitted.statement_id.clone(),
-            submitted.chunk_metas,
-            submitted.compressed,
-        );
-        (submitted.statement_id, num_chunks, rx)
-    };
+    let (statement_id, num_chunks, rx, cancel_handle, stats, warehouse_wait_s, submit_to_ready_s, protocol) =
+        if client.protocol == Protocol::Thrift {
+            // NDJSON output has no `description`/column-schema concept.
+            let ThriftSubmitResult {
+                statement_id,
+                schema_bytes: _schema_bytes,
+                rx,
+                operation,
+                stats,
+                warehouse_wait_s,
+                submit_to_ready_s,
+            } = submit_thrift_and_start_fetch(client.clone(), statement, catalog, schema, parameters).await?;
+            (
+                statement_id,
+                None, // Thrift: unknown upfront, see `StatsReporter::static_num_chunks`
+                rx,
+                CancelHandle::Thrift { operation },
+                stats,
+                warehouse_wait_s,
+                submit_to_ready_s,
+                "thrift",
+            )
+        } else {
+            let stats = Arc::new(QueryStatsAccumulator::default());
+            let (submitted, submit_to_ready_s) =
+                submit_sea_and_report(&client, statement, catalog, schema, parameters, &stats).await?;
+            let warehouse_wait_s = stats.warehouse_wait_s();
+            let num_chunks = submitted.chunk_metas.len();
+            let rx = client.clone().fetch_chunks_with_backpressure(
+                submitted.statement_id.clone(),
+                submitted.chunk_metas,
+                submitted.compressed,
+                stats.clone(),
+            );
+            (
+                submitted.statement_id.clone(),
+                Some(num_chunks),
+                rx,
+                CancelHandle::Sea {
+                    statement_id: submitted.statement_id,
+                },
+                stats,
+                warehouse_wait_s,
+                submit_to_ready_s,
+                "sea",
+            )
+        };
     Ok(NdjsonStream {
-        statement_id,
-        num_chunks,
+        statement_id: statement_id.clone(),
+        num_chunks: num_chunks.unwrap_or(0),
         reorder: ReorderBuffer::new(rx),
         non_finite_as_string,
+        cancel_handle,
+        stats,
+        reporter: StatsReporter {
+            client,
+            statement_id,
+            protocol,
+            warehouse_wait_s,
+            submit_to_ready_s,
+            fetch_s: 0.0,
+            fetch_started_at: None,
+            static_num_chunks: num_chunks,
+            reported: false,
+        },
     })
 }
 
@@ -1599,6 +2213,7 @@ mod tests {
             Err(ApiError {
                 message: "boom".into(),
                 transient: false,
+                kind: ApiErrorKind::Other,
             }),
         ];
         let (tx, rx) = mpsc::channel(sent.len());

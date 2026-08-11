@@ -37,7 +37,10 @@ async def test_delete_volume_file_reraises_non_404_errors(mock_volume_files):
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
 
     # upload_volume_file/delete_volume_file delegate to the Rust core, which
-    # raises a plain RuntimeError (message only), not httpx.HTTPStatusError.
+    # raises arrowbricks.ArrowbricksError (message only, not
+    # httpx.HTTPStatusError) -- still a RuntimeError subclass, so this
+    # pre-existing `except RuntimeError` catch keeps working unchanged; see
+    # test_errors.py for a dedicated test asserting the concrete type.
     with pytest.raises(RuntimeError, match="400"):
         await client.delete_volume_file("/Volumes/cat/schema/vol/forbidden.parquet")
 

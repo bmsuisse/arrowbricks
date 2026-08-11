@@ -19,7 +19,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from ._streaming import HEARTBEAT, await_with_heartbeat, windowed_sql
+from . import _core
+from ._streaming import HEARTBEAT, QueryTimeout, await_with_heartbeat, windowed_sql
 from .client import DatabricksClient
 
 if TYPE_CHECKING:
@@ -263,12 +264,76 @@ class Cursor:
         large result can itself take a while; `execute_streamed`'s own
         heartbeats stop the moment the statement is ready, before any chunk
         has actually been fetched. Yields HEARTBEAT zero or more times, then
-        the final `list[Row]`."""
-        return await_with_heartbeat(self.fetchall(), total_timeout_s=total_timeout_s)
+        the final `list[Row]`.
+
+        Drains any rows already buffered by `fetchone()`/`__anext__` first
+        (synchronously, no heartbeat needed -- they're already in memory),
+        then streams the rest through `fetchall_arrow_streamed` -- see its
+        own docstring for why that's the Rust-level heartbeat, not a plain
+        Python wrapper around `fetchall()` the way this looked before."""
+
+        async def _gen() -> AsyncIterator[Any]:
+            rows: list[Row] = list(self._take_buffered(len(self._row_buffer)))
+            async for item in self.fetchall_arrow_streamed(total_timeout_s=total_timeout_s):
+                if item is HEARTBEAT:
+                    yield HEARTBEAT
+                else:
+                    rows.extend(_table_to_rows(item))
+            yield rows
+
+        return _gen()
 
     def fetchall_arrow_streamed(self, *, total_timeout_s: float | None = None) -> AsyncIterator[Any]:
-        """Arrow-`Table` counterpart to fetchall_streamed -- see its docstring."""
-        return await_with_heartbeat(self.fetchall_arrow(), total_timeout_s=total_timeout_s)
+        """Arrow-`Table` counterpart to fetchall_streamed -- see its docstring
+        for the buffered-row draining `fetchall_streamed` layers on top of
+        this.
+
+        Delegates directly to `._core.ResultSet.fetchall_arrow_streamed` --
+        the Rust-level heartbeat (`heartbeat::HeartbeatWait`) the server-side
+        cancellation feature actually plugs into, rather than wrapping
+        `fetchall_arrow()` in this package's own Python-level
+        `await_with_heartbeat` the way this method (and `fetchall_streamed`)
+        used to. That switch is what lets a `total_timeout_s` timeout *here*
+        also fire a best-effort server-side cancel (Thrift `CancelOperation`/
+        SEA `POST .../cancel`), not just raise `QueryTimeout` locally while
+        the query keeps running on the warehouse -- see AGENTS.md's own
+        design-invariant entry and README.md's "Cancellation" section.
+        `execute_streamed`'s own heartbeat (the submit/poll wait, not a
+        chunk download) has no Rust-level equivalent to switch to and is
+        unaffected by this."""
+
+        async def _gen() -> AsyncIterator[Any]:
+            # Checked lazily, inside the generator, not eagerly when this
+            # method is *called* -- matches the laziness `await_with_heartbeat`
+            # already had (nothing runs until the first `__anext__`), and
+            # `execute_streamed`'s own `_gen()` pattern.
+            self._require_empty_row_buffer("fetchall_arrow_streamed")
+            result = self._require_result()
+            try:
+                async for item in result.fetchall_arrow_streamed(total_timeout_s=total_timeout_s):
+                    if item is _core.HEARTBEAT:
+                        yield HEARTBEAT
+                    else:
+                        if self._schema is None:
+                            self._schema = await result.schema()
+                        yield item
+            except RuntimeError as exc:
+                # `heartbeat::HeartbeatWait`'s own `total_timeout_s` error
+                # (`format!("Query exceeded {secs}s timeout")`, heartbeat.rs)
+                # surfaces here as a plain `RuntimeError`, not this package's
+                # own `QueryTimeout` -- translated so callers relying on
+                # catching `QueryTimeout` (same contract `execute_streamed`/
+                # `fetchall_streamed` already promise) see the same exception
+                # type regardless of which heartbeat implementation is
+                # actually running underneath. Matched by a stable literal
+                # prefix this crate controls end to end (not string-matching
+                # someone else's error), so a real, unrelated `RuntimeError`
+                # from a genuine chunk-fetch failure is never misclassified.
+                if str(exc).startswith("Query exceeded"):
+                    raise QueryTimeout(str(exc)) from exc
+                raise
+
+        return _gen()
 
     def __aiter__(self) -> Cursor:
         return self

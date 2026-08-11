@@ -14,6 +14,8 @@
 //! the wire format is symmetric) -- field IDs below are copied straight out
 //! of `thrift.rs`'s own `read_*` functions, not re-derived.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -22,8 +24,10 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol};
-use arrowbricks_core::pipeline::{execute_lazy_thrift, execute_ndjson_stream};
+use arrowbricks_core::heartbeat::{HeartbeatWait, Tick};
+use arrowbricks_core::pipeline::{cancel_hook, execute_lazy_thrift, execute_ndjson_stream};
 use arrowbricks_core::thrift::{Reader, Writer, operation_state, status_code, ttype};
+use common::wait_for_calls;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -122,6 +126,10 @@ fn build_close_session_resp() -> Vec<u8> {
 
 fn build_close_operation_resp() -> Vec<u8> {
     wrap_reply("CloseOperation", write_status_ok)
+}
+
+fn build_cancel_operation_resp() -> Vec<u8> {
+    wrap_reply("CancelOperation", write_status_ok)
 }
 
 fn write_result_set_metadata(w: &mut Writer, lz4_compressed: bool, arrow_schema: Option<&[u8]>) {
@@ -400,6 +408,25 @@ async fn mount_close_operation_ok(server: &MockServer) {
         .respond_with(ResponseTemplate::new(200).set_body_raw(build_close_operation_resp(), "application/x-thrift"))
         .mount(server)
         .await;
+}
+
+/// Mounts a `CancelOperation` route and hands back a counter of how many
+/// times it was actually hit -- used by the cancellation tests below to
+/// prove the RPC fires (not just that some other mock happens to make the
+/// test pass).
+async fn mount_cancel_operation_ok(server: &MockServer) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_mock = calls.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("CancelOperation"))
+        .respond_with(move |_req: &Request| {
+            calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(build_cancel_operation_resp(), "application/x-thrift")
+        })
+        .mount(server)
+        .await;
+    calls
 }
 
 // ============================================================================
@@ -1456,4 +1483,168 @@ async fn thrift_concurrent_single_link_queries_stay_correct_under_split_contenti
         assert_eq!(rows, 60_000);
         assert_ids_in_order(&batches, 60_000);
     }
+}
+
+// ============================================================================
+// Server-side cancellation (2026-08-11 design doc): `heartbeat::HeartbeatWait`'s
+// two trigger points (`tick()`'s own `total_timeout_s` branch, and `Drop`
+// while still genuinely in flight) each fire `CancelOperation` via
+// `pipeline::cancel_hook` -- exactly the mechanism `lib.rs`'s
+// `PyResultSet::fetchall_arrow_streamed` wires up, but constructed directly
+// here so it's testable with no PyO3/Python involved at all.
+// ============================================================================
+
+/// Sets up a statement whose one cloud-fetch chunk download is deliberately
+/// slow (500ms) -- long enough that either trigger below reliably fires
+/// while the download is still genuinely in flight, not before it starts or
+/// after it's already finished. Forces the sequential `FetchResults` loop
+/// (no `directResults`), matching the real shape these two triggers cover:
+/// both only ever fire during the chunk-download phase, once the statement
+/// itself has already reached a terminal state server-side (see this
+/// design's own note on `CancelOperation` being harmless-if-redundant in
+/// that case).
+async fn mount_slow_single_chunk_statement(server: &MockServer) {
+    mount_open_session_always(server, b"sess-cancel").await;
+    mount_close_operation_ok(server).await;
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-cancel", b"opsecret-cancel", None),
+            "application/x-thrift",
+        ))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_get_operation_status_resp(operation_state::FINISHED, None),
+            "application/x-thrift",
+        ))
+        .mount(server)
+        .await;
+
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("FetchResults"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_fetch_results_resp(&FetchSpec {
+                has_more_rows: false,
+                result_links: vec![(format!("{uri}/_data/slow-chunk"), 5)],
+                ..Default::default()
+            }),
+            "application/x-thrift",
+        ))
+        .mount(server)
+        .await;
+
+    let schema = test_schema();
+    Mock::given(method("GET"))
+        .and(path("/_data/slow-chunk"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(build_full_stream_bytes(&schema, 0, 5), "application/vnd.apache.arrow.stream")
+                .set_delay(std::time::Duration::from_millis(500)),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn thrift_total_timeout_fires_cancel_operation() {
+    let server = MockServer::start().await;
+    mount_slow_single_chunk_statement(&server).await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+
+    let client = thrift_client(&server);
+    let stream = execute_lazy_thrift(client.clone(), "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let cancel_handle = stream.cancel_handle.clone();
+    let stats = stream.stats.clone();
+    let inner = Arc::new(tokio::sync::Mutex::new(stream));
+    let fut = {
+        let inner = inner.clone();
+        async move { inner.lock().await.fetchall_arrow().await }
+    };
+    let mut wait = HeartbeatWait::with_interval(fut, Some(0.05), std::time::Duration::from_millis(20))
+        .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
+
+    let mut last_err = None;
+    for _ in 0..50 {
+        match wait.tick().await {
+            Ok(Some(Tick::Heartbeat)) => continue,
+            Ok(other) => panic!(
+                "must not complete before total_timeout_s fires -- the chunk download is deliberately slow: {other:?}"
+            ),
+            Err(e) => {
+                last_err = Some(e);
+                break;
+            }
+        }
+    }
+    let err = last_err.expect("total_timeout_s must fire within 50 ticks of a 20ms interval against a 50ms deadline");
+    assert!(err.message.contains("0.05"), "error should mention the configured timeout: {}", err.message);
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        1,
+        "CancelOperation must fire exactly once when total_timeout_s elapses"
+    );
+    assert_eq!(
+        stats.pending_outcome(),
+        Some("timeout"),
+        "the total_timeout_s trigger must record outcome=timeout, not cancelled"
+    );
+}
+
+#[tokio::test]
+async fn thrift_dropping_the_heartbeat_wait_mid_fetch_fires_cancel_operation() {
+    let server = MockServer::start().await;
+    mount_slow_single_chunk_statement(&server).await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+
+    let client = thrift_client(&server);
+    let stream = execute_lazy_thrift(client.clone(), "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let cancel_handle = stream.cancel_handle.clone();
+    let stats = stream.stats.clone();
+    let inner = Arc::new(tokio::sync::Mutex::new(stream));
+    let fut = {
+        let inner = inner.clone();
+        async move { inner.lock().await.fetchall_arrow().await }
+    };
+    // No `total_timeout_s` at all -- this drop is not going through `tick()`'s
+    // own timeout branch, matching `task.cancel()`/`asyncio.wait_for` dropping
+    // the *surrounding* coroutine, the second of the two triggers this design
+    // covers.
+    let mut wait: HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)> =
+        HeartbeatWait::with_interval(fut, None, std::time::Duration::from_millis(20))
+            .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
+
+    // One tick to prove the download is genuinely still in flight before
+    // dropping, not already finished for some unrelated reason.
+    match wait.tick().await.unwrap() {
+        Some(Tick::Heartbeat) => {}
+        other => panic!("expected a heartbeat while the 500ms chunk download is still in flight: {other:?}"),
+    }
+
+    drop(wait);
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        1,
+        "CancelOperation must fire exactly once when the wait is dropped mid-fetch"
+    );
+    assert_eq!(
+        stats.pending_outcome(),
+        Some("cancelled"),
+        "a bare drop (not through tick()'s own timeout branch) must record outcome=cancelled, not timeout"
+    );
 }

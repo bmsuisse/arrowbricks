@@ -3,6 +3,7 @@
 //! bytes are handed off raw, decoding happens in `pipeline.rs`.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -193,6 +194,37 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const RETRY_ATTEMPTS: u32 = 6;
 const RETRY_MAX_WAIT_S: f64 = 20.0;
 
+/// Coarse classification of *why* an `ApiError` happened, carried across the
+/// PyO3 boundary (`lib.rs`'s `api_error_to_pyerr`) so a Python caller can
+/// programmatically distinguish "safe to retry" from "don't retry" from "auth
+/// problem" instead of regex-parsing `.message` text -- see AGENTS.md's
+/// "typed error taxonomy" entry (2026-08-11) for the design discussion.
+/// Deliberately small: `transient` (already on `ApiError`) already answers
+/// "retryable", so this only adds the two distinctions that need a
+/// *different* caller response than a plain retry -- `Auth` (refresh the
+/// credential, don't just retry the same one) and `Statement` (the SQL
+/// itself failed/was canceled server-side, retrying identically will fail
+/// identically). Everything else (network blips, generic parse/decode
+/// failures, internal invariant violations) stays `Other` -- `lib.rs` maps
+/// `Other` + `transient` to a `TransientError`, `Other` + `!transient` to the
+/// plain `ArrowbricksError` base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApiErrorKind {
+    #[default]
+    Other,
+    /// HTTP 401/403 -- see `from_status`. Only set there; every other
+    /// construction site (including `from_reqwest`, which has no HTTP status
+    /// to inspect at all) leaves this as the `Other` default.
+    Auth,
+    /// A Databricks statement reached a terminal FAILED/CANCELED state (SEA)
+    /// or an operation's `terminal_error()` fired (Thrift) -- see
+    /// `ApiError::statement_failed`. Not used for a Thrift RPC's own
+    /// transport-level `TStatus` error (e.g. `FetchResults` returning
+    /// `INVALID_HANDLE`), which stays `Other` -- that's a protocol/transport
+    /// problem, not necessarily evidence the *statement itself* failed.
+    Statement,
+}
+
 #[derive(Debug)]
 pub struct ApiError {
     pub message: String,
@@ -201,6 +233,11 @@ pub struct ApiError {
     /// Python original: a genuinely stalled connection should fail fast on
     /// the caller's own timeout, not be retried here.
     pub transient: bool,
+    /// See `ApiErrorKind`'s own doc comment. Defaults to `Other` at every
+    /// construction site that doesn't explicitly classify further (the vast
+    /// majority -- internal parse/decode/invariant errors have no auth or
+    /// statement-failure meaning).
+    pub kind: ApiErrorKind,
 }
 
 impl std::fmt::Display for ApiError {
@@ -215,6 +252,18 @@ impl ApiError {
         Self {
             message: msg.into(),
             transient: false,
+            kind: ApiErrorKind::Other,
+        }
+    }
+
+    /// A Databricks statement/operation reached a terminal FAILED/CANCELED
+    /// state -- see `ApiErrorKind::Statement`'s own doc comment for exactly
+    /// which call sites use this vs. plain `permanent`.
+    pub(crate) fn statement_failed(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            transient: false,
+            kind: ApiErrorKind::Statement,
         }
     }
 
@@ -261,6 +310,7 @@ impl ApiError {
         Self {
             message: e.to_string(),
             transient,
+            kind: ApiErrorKind::Other,
         }
     }
 
@@ -276,9 +326,15 @@ impl ApiError {
     /// risks a second, duplicate execution of arbitrary caller SQL).
     fn from_status(status: StatusCode, body: &str, idempotent: bool) -> Self {
         let transient = matches!(status.as_u16(), 401 | 403 | 408 | 429) || (idempotent && status.is_server_error());
+        let kind = if matches!(status.as_u16(), 401 | 403) {
+            ApiErrorKind::Auth
+        } else {
+            ApiErrorKind::Other
+        };
         Self {
             message: format!("HTTP {status}: {body}"),
             transient,
+            kind,
         }
     }
 }
@@ -292,7 +348,168 @@ pub(crate) fn join_error(e: tokio::task::JoinError) -> ApiError {
     ApiError {
         message: format!("task panicked: {e}"),
         transient: false,
+        kind: ApiErrorKind::Other,
     }
+}
+
+// ---- Cancellation + observability (2026-08-11 design doc) --------------
+
+/// Enough state to fire a best-effort server-side cancel against one
+/// in-flight statement/operation -- carried by `ResultStream`/`NdjsonStream`
+/// (`pipeline.rs`) so `heartbeat.rs`'s two existing timeout/cancellation
+/// detection points (`tick()`'s `total_timeout_s` branch, and
+/// `Drop for HeartbeatWait`/`Drop for HeartbeatStream`) can fire
+/// `DbClient::cancel_statement` without either of those generic structs
+/// needing to know anything protocol-specific themselves.
+#[derive(Clone)]
+pub enum CancelHandle {
+    Sea { statement_id: String },
+    Thrift { operation: thrift::OperationHandle },
+}
+
+/// Per-query counters, accumulated across this crate's own retryable network
+/// calls and cloud-fetch downloads regardless of whether an `on_event`
+/// callback is actually registered to ever read them -- a handful of atomic
+/// increments per request is cheap enough not to bother gating behind
+/// `on_event.is_some()` (unlike the actual callback dispatch itself, which
+/// is skipped entirely when there's nothing to receive it -- see
+/// `DbClient::on_event`/`QueryStats`' own doc comment in `lib.rs`).
+///
+/// `outcome` doubles as the signal `Drop`-based abandonment detection (in
+/// `pipeline.rs`) uses to tell a `total_timeout_s` timeout apart from a bare
+/// `task.cancel()`/`asyncio.wait_for`-drop, both of which sever the future
+/// mid-`.await` with no other way for code running *inside* that future's
+/// own `Drop` impl to tell them apart: whichever of `heartbeat.rs`'s two
+/// trigger points fires writes "timeout" or "cancelled" into this *before*
+/// aborting the task, since that abort is what makes the future's own `Drop`
+/// impl run in the first place -- by the time it runs, it's too late to
+/// signal anything through the (already being torn down) future itself. Set
+/// at most once (`store_outcome_if_unset`) -- the explicit `finish("error")`/
+/// `finish("success")` calls on the normal-return paths race the same slot,
+/// so the first writer wins and every later one is a no-op.
+#[derive(Default, Debug)]
+pub struct QueryStatsAccumulator {
+    pub bytes_downloaded: AtomicU64,
+    pub retry_count: AtomicU32,
+    /// Only meaningfully incremented by the Thrift backend, which -- unlike
+    /// SEA -- doesn't know its chunk count upfront from a manifest; SEA's
+    /// `QueryStats.num_chunks` is taken directly from `chunk_metas.len()`
+    /// instead (see `pipeline.rs`'s `StatsReporter`).
+    pub chunks_seen: AtomicUsize,
+    /// `f64` bits (`f64::to_bits`/`from_bits`) -- accumulated (not simply
+    /// overwritten) via `add_warehouse_wait_s`, so a query that calls
+    /// `ensure_warehouse_running` more than once (SEA's `submit_and_poll`
+    /// runs it exactly once per call, but `execute_arrow_statement_prefer_inline`'s
+    /// own fallback -- and `pipeline.rs`'s separate JSON-conversion fallback
+    /// in `execute_lazy_prefer_inline` -- can mean `submit_and_poll` itself
+    /// runs twice for one logical query) still reports the *total* time
+    /// actually spent inside it, not just the last call's (typically ~0,
+    /// since the warehouse-running cache is warm by the second call).
+    /// Found in code review: an earlier version had `pipeline.rs` time this
+    /// externally, once per call site, *in addition to* `submit_and_poll`'s
+    /// own unconditional internal call -- not only duplicated the same
+    /// boilerplate 4x, but called `ensure_warehouse_running` twice per query
+    /// for no reason, and silently lost the timing (and any `on_event`
+    /// dispatch at all) whenever the external call's own error path didn't
+    /// bother checking it. `submit_and_poll`/`submit_thrift_and_start_fetch`
+    /// are now the *only* callers, each reporting into this field exactly
+    /// once per attempt, so a caller of e.g. `execute_arrow_statement` just
+    /// reads `stats.warehouse_wait_s()` back afterward instead of timing
+    /// anything itself.
+    warehouse_wait_bits: AtomicU64,
+    outcome: AtomicU8,
+}
+
+const OUTCOME_UNSET: u8 = 0;
+const OUTCOME_CANCELLED: u8 = 1;
+const OUTCOME_TIMEOUT: u8 = 2;
+
+impl QueryStatsAccumulator {
+    /// Called from `heartbeat.rs`'s two trigger points, before they abort
+    /// whatever task/future is running this query's fetch -- see this
+    /// struct's own doc comment for why the ordering matters.
+    pub fn store_outcome_if_unset(&self, timeout: bool) {
+        let want = if timeout { OUTCOME_TIMEOUT } else { OUTCOME_CANCELLED };
+        let _ = self
+            .outcome
+            .compare_exchange(OUTCOME_UNSET, want, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// Read by `pipeline.rs`'s `StatsReporter::drop` -- `None` means neither
+    /// trigger ever fired, so the abandonment it's reacting to must be a bare
+    /// cancellation with no `heartbeat.rs` wrapper in play at all (e.g. a
+    /// caller doing `asyncio.wait_for(cursor.fetchall(), ...)` directly,
+    /// with no `total_timeout_s`/`_streamed` variant involved) -- the caller
+    /// defaults that case to `"cancelled"` itself, rather than this method
+    /// guessing.
+    pub fn pending_outcome(&self) -> Option<&'static str> {
+        match self.outcome.load(Ordering::Acquire) {
+            OUTCOME_CANCELLED => Some("cancelled"),
+            OUTCOME_TIMEOUT => Some("timeout"),
+            _ => None,
+        }
+    }
+
+    /// Called exactly once per `ensure_warehouse_running` call this query
+    /// actually makes -- see `warehouse_wait_bits`'s own doc comment for why
+    /// this accumulates instead of overwriting. Not contended in practice
+    /// (`submit_and_poll`/`submit_thrift_and_start_fetch` call this
+    /// strictly sequentially, never concurrently, for one query), but a
+    /// CAS loop is used anyway since `AtomicU64` has no native float-add.
+    pub fn add_warehouse_wait_s(&self, seconds: f64) {
+        let mut current = self.warehouse_wait_bits.load(Ordering::Relaxed);
+        loop {
+            let new = f64::from_bits(current) + seconds;
+            match self
+                .warehouse_wait_bits
+                .compare_exchange_weak(current, new.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn warehouse_wait_s(&self) -> f64 {
+        f64::from_bits(self.warehouse_wait_bits.load(Ordering::Relaxed))
+    }
+}
+
+/// One query's worth of timing/counters, handed to `EventSink::on_event`
+/// exactly once, at completion -- see `lib.rs`'s `QueryStats` (the
+/// PyO3-exposed shape this converts into) for the full field-by-field
+/// rationale.
+#[derive(Debug, Clone)]
+pub struct QueryStatsData {
+    pub statement_id: String,
+    pub protocol: &'static str,
+    pub warehouse_wait_s: f64,
+    pub submit_to_ready_s: f64,
+    pub fetch_s: f64,
+    pub num_chunks: usize,
+    pub bytes_downloaded: u64,
+    pub retry_count: u32,
+    pub concurrency_used: usize,
+    pub outcome: &'static str,
+}
+
+/// Bridges a Python `on_event` callable (sync or async, matching
+/// `token_provider`'s own `PyTokenProvider`/`TokenProvider` pattern in
+/// `lib.rs`) into Rust's `client::EventSink` trait. Kept generic (no PyO3
+/// here) for the same reason `TokenProvider` is -- the PyO3-specific
+/// dispatch lives in `lib.rs`.
+///
+/// **Fire-and-forget by construction, not by convention**: unlike
+/// `TokenProvider::get_token` (awaited inline, so a broken token provider
+/// correctly surfaces to the caller), `on_event` must never affect the
+/// query it describes -- a slow or raising callback must be invisible to
+/// both correctness and latency. `on_event` is therefore a plain, *sync*
+/// method: an implementation spawns the actual (possibly async, possibly
+/// slow, possibly raising) dispatch onto the background runtime and returns
+/// immediately, exactly the same "spawn, don't await" shape as
+/// `DbClient::cancel_statement`'s own fire-and-forget RPC.
+pub trait EventSink: Send + Sync {
+    fn on_event(&self, stats: QueryStatsData);
 }
 
 #[derive(Debug, Clone)]
@@ -421,27 +638,6 @@ pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError
     Ok(Bytes::from(out))
 }
 
-async fn retry_call<F, Fut, T>(mut f: F) -> Result<T, ApiError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, ApiError>>,
-{
-    let mut attempt = 0u32;
-    loop {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                if attempt == RETRY_ATTEMPTS - 1 || !e.transient {
-                    return Err(e);
-                }
-                let wait = 2f64.powi(attempt as i32).min(RETRY_MAX_WAIT_S);
-                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-                attempt += 1;
-            }
-        }
-    }
-}
-
 /// Which wire protocol/backend `execute()` talks to Databricks with -- a
 /// choice on `Client`/`DatabricksClient` (`protocol: "sea" | "thrift"`),
 /// **`Thrift` is the default as of the benchmarking work documented in
@@ -537,6 +733,25 @@ pub struct DbClient {
     /// a 10k-row/1-link query went from a 1299ms median to 672ms; a
     /// 300k-row/19-link query was neutral (8552ms vs 8561ms baseline).
     download_slots: tokio::sync::Semaphore,
+    /// Optional observability callback, attached once at construction --
+    /// same attachment point as `token_provider`. `None` (the default) means
+    /// this feature does nothing at all beyond the cheap, always-on
+    /// `QueryStatsAccumulator` counters every query already carries (see
+    /// that struct's own doc comment for why those aren't gated too).
+    on_event: Option<Arc<dyn EventSink>>,
+    /// Runtime-configurable counterparts to the old compile-time
+    /// `RETRY_ATTEMPTS`/`RETRY_MAX_WAIT_S` constants (still the defaults --
+    /// see `with_token_provider`) -- read by `retry_call`/`retry_call_tracked`
+    /// below instead of the constants directly, so a caller can tune retry
+    /// behavior (e.g. fail fast in a latency-sensitive path, or retry harder
+    /// against a flaky link) without a rebuild. Second instance of the exact
+    /// "Rust constant -> `PyDbClient::new` pyo3 default -> `client.py` kwarg
+    /// default -> `_core.pyi` stub" threading pattern `chunk_fetch_concurrency`
+    /// already uses -- see AGENTS.md's own entry on that one for the footgun
+    /// (a default that's silently unused because a different layer's default
+    /// always wins) this must not repeat.
+    retry_attempts: u32,
+    retry_max_wait_s: f64,
 }
 
 /// Upper bound on how many parallel Range requests one cloud-fetch link is
@@ -782,6 +997,9 @@ impl DbClient {
             protocol: Protocol::Thrift,
             thrift_session_pool: Pool::default(),
             download_slots: tokio::sync::Semaphore::new(DEFAULT_CHUNK_FETCH_CONCURRENCY),
+            on_event: None,
+            retry_attempts: RETRY_ATTEMPTS,
+            retry_max_wait_s: RETRY_MAX_WAIT_S,
         }
     }
 
@@ -795,6 +1013,42 @@ impl DbClient {
     pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = protocol;
         self
+    }
+
+    /// Matches Python's `DatabricksClient(..., retry_attempts=6)` -- how many
+    /// total attempts `retry_call`/`retry_call_tracked` make (the first try
+    /// plus `n - 1` retries) before giving up on a transient failure.
+    /// Clamped to at least 1 (0 would underflow `self.retry_attempts - 1` in
+    /// the retry loop below and, separately, would mean "never even try") --
+    /// `PyDbClient::new` also rejects 0 outright with a `ValueError` before
+    /// this is ever reached, matching how other constructor args are
+    /// validated there, but this clamp is a second, defensive line for any
+    /// direct Rust caller that skips that validation.
+    pub fn with_retry_attempts(mut self, n: u32) -> Self {
+        self.retry_attempts = n.max(1);
+        self
+    }
+
+    /// Matches Python's `DatabricksClient(..., retry_max_wait_s=20.0)` -- the
+    /// ceiling the exponential backoff (`2^attempt` seconds) is capped at.
+    /// Clamped to non-negative (a negative wait is meaningless -- `Duration::
+    /// from_secs_f64` panics on it).
+    pub fn with_retry_max_wait_s(mut self, seconds: f64) -> Self {
+        self.retry_max_wait_s = seconds.max(0.0);
+        self
+    }
+
+    /// Attaches the observability callback -- same attachment point/pattern
+    /// as `with_token_provider`, called once at construction, applying to
+    /// every query run through this client. See `EventSink`'s own doc
+    /// comment for the fire-and-forget dispatch contract this must honor.
+    pub fn with_on_event(mut self, on_event: Arc<dyn EventSink>) -> Self {
+        self.on_event = Some(on_event);
+        self
+    }
+
+    pub(crate) fn on_event(&self) -> Option<&Arc<dyn EventSink>> {
+        self.on_event.as_ref()
     }
 
     /// Matches Python's `DatabricksClient(..., compress_results=True)` --
@@ -853,18 +1107,62 @@ impl DbClient {
         self
     }
 
+    async fn retry_call<F, Fut, T>(&self, f: F) -> Result<T, ApiError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ApiError>>,
+    {
+        self.retry_call_tracked(None, f).await
+    }
+
+    /// Same retry loop as `retry_call`, plus an optional `retry_count`
+    /// counter -- `Some` only for calls that are part of one query's own
+    /// submit/poll/chunk-fetch path (see `QueryStats.retry_count`'s own doc
+    /// comment in `lib.rs`); session pool management, volume file ops, and
+    /// the fire-and-forget cancel/close RPCs all stay on plain `retry_call`
+    /// (`None`), since a retry there isn't attributable to any one query the
+    /// way a statement's own submit/poll/chunk-fetch retries are. Reads
+    /// `self.retry_attempts`/`self.retry_max_wait_s` (constructor-tunable,
+    /// see `with_retry_attempts`/`with_retry_max_wait_s`) rather than the old
+    /// `RETRY_ATTEMPTS`/`RETRY_MAX_WAIT_S` constants directly, so every
+    /// retryable call this client makes honors one client-wide policy.
+    async fn retry_call_tracked<F, Fut, T>(&self, stats: Option<&QueryStatsAccumulator>, mut f: F) -> Result<T, ApiError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ApiError>>,
+    {
+        let mut attempt = 0u32;
+        loop {
+            match f().await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if attempt == self.retry_attempts - 1 || !e.transient {
+                        return Err(e);
+                    }
+                    if let Some(s) = stats {
+                        s.retry_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let wait = 2f64.powi(attempt as i32).min(self.retry_max_wait_s);
+                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     async fn authed_json<T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
         url: &str,
         body: Option<&Value>,
+        stats: Option<&QueryStatsAccumulator>,
     ) -> Result<T, ApiError> {
         // Only a GET is safe to blindly replay on a decode/mid-flight-send
         // failure -- see `ApiError::from_reqwest`'s doc. The only POSTs this
         // crate makes through here are statement submission and
         // warehouse-start, neither of which is safe to risk double-executing.
         let idempotent = method == reqwest::Method::GET;
-        retry_call(|| async {
+        self.retry_call_tracked(stats, || async {
             // Fetched fresh on every attempt, not just once before the retry
             // loop -- matches Python's _bearer_token being called on every
             // _do() invocation, so a retry after a 401 picks up a
@@ -901,8 +1199,13 @@ impl DbClient {
     /// would block this task's tokio worker thread from polling anything
     /// else scheduled on it -- other concurrent chunk fetches, heartbeat
     /// timers -- for however long that takes.
-    pub(crate) async fn fetch_link_bytes(&self, url: &str, compressed: bool) -> Result<Bytes, ApiError> {
-        retry_call(|| async {
+    pub(crate) async fn fetch_link_bytes(
+        &self,
+        url: &str,
+        compressed: bool,
+        stats: &QueryStatsAccumulator,
+    ) -> Result<Bytes, ApiError> {
+        self.retry_call_tracked(Some(stats), || async {
             let resp = self
                 .http
                 .get(url)
@@ -916,6 +1219,12 @@ impl DbClient {
                 return Err(ApiError::from_status(status, &text, true));
             }
             let bytes = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
+            // Counted here, before decompression -- "downloaded" means bytes
+            // actually received off the wire, which is exactly the smaller,
+            // (usually) LZ4-compressed size `compress_results` exists to
+            // shrink -- see `QueryStats.bytes_downloaded`'s own doc comment
+            // in `lib.rs`.
+            stats.bytes_downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             if !compressed {
                 return Ok(bytes);
             }
@@ -934,6 +1243,7 @@ impl DbClient {
         self: &Arc<Self>,
         url: &str,
         compressed: bool,
+        stats: &Arc<QueryStatsAccumulator>,
     ) -> Result<Bytes, ApiError> {
         // One permit per download is mandatory; the worker pool already
         // bounds concurrent links to `chunk_fetch_concurrency`, so this
@@ -956,9 +1266,9 @@ impl DbClient {
         };
         let parts = 1 + extra.as_ref().map(|p| p.num_permits()).unwrap_or(0);
         if parts <= 1 {
-            return self.fetch_link_bytes(url, compressed).await;
+            return self.fetch_link_bytes(url, compressed, stats).await;
         }
-        self.fetch_link_bytes_split(url, compressed, 1 << 20, parts as u64)
+        self.fetch_link_bytes_split(url, compressed, 1 << 20, parts as u64, stats)
             .await
     }
 
@@ -985,11 +1295,12 @@ impl DbClient {
         compressed: bool,
         part_size: u64,
         max_parts: u64,
+        stats: &Arc<QueryStatsAccumulator>,
     ) -> Result<Bytes, ApiError> {
         // First part doubles as the size probe -- same retry_call wrapping
         // every other download in this crate gets, so a transient failure
         // on the probe itself doesn't skip straight to a hard error.
-        let (ranged, total, head) = retry_call(|| async {
+        let (ranged, total, head) = self.retry_call_tracked(Some(stats), || async {
             let resp = self
                 .http
                 .get(url)
@@ -1013,6 +1324,7 @@ impl DbClient {
             Ok((ranged, total, head))
         })
         .await?;
+        stats.bytes_downloaded.fetch_add(head.len() as u64, Ordering::Relaxed);
 
         if ranged && total.is_none() {
             return Err(ApiError::permanent(
@@ -1037,8 +1349,9 @@ impl DbClient {
                 let end = (start + rest_size - 1).min(total - 1);
                 let this = self.clone();
                 let url = url.to_string();
+                let part_stats = stats.clone();
                 handles.push(tokio::spawn(async move {
-                    retry_call(|| async {
+                    let bytes = this.retry_call_tracked(Some(&part_stats), || async {
                         let resp = this
                             .http
                             .get(&url)
@@ -1054,7 +1367,11 @@ impl DbClient {
                         }
                         resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
                     })
-                    .await
+                    .await;
+                    if let Ok(b) = &bytes {
+                        part_stats.bytes_downloaded.fetch_add(b.len() as u64, Ordering::Relaxed);
+                    }
+                    bytes
                 }));
                 start = end + 1;
                 n += 1;
@@ -1122,20 +1439,20 @@ impl DbClient {
         }
 
         let url = format!("{}/api/2.0/sql/warehouses/{}", self.host, self.warehouse_id);
-        let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None).await?;
+        let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None, None).await?;
         if data.state == "RUNNING" {
             *self.warehouse_confirmed_running_at.lock().unwrap() = Some(Instant::now());
             return Ok(());
         }
         if data.state == "STOPPED" {
-            self.authed_json::<IgnoredAny>(reqwest::Method::POST, &format!("{url}/start"), None)
+            self.authed_json::<IgnoredAny>(reqwest::Method::POST, &format!("{url}/start"), None, None)
                 .await?;
         }
 
         let deadline = Instant::now() + self.warehouse_start_timeout;
         while Instant::now() < deadline {
             tokio::time::sleep(POLL_INTERVAL).await;
-            let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None).await?;
+            let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None, None).await?;
             if data.state == "RUNNING" {
                 *self.warehouse_confirmed_running_at.lock().unwrap() = Some(Instant::now());
                 return Ok(());
@@ -1155,7 +1472,7 @@ impl DbClient {
         if let Some(s) = schema {
             body["schema_name"] = json!(s);
         }
-        let data: SessionCreateBody = self.authed_json(reqwest::Method::POST, &url, Some(&body)).await?;
+        let data: SessionCreateBody = self.authed_json(reqwest::Method::POST, &url, Some(&body), None).await?;
         Ok(data.session_id)
     }
 
@@ -1166,7 +1483,9 @@ impl DbClient {
         // by Databricks' own server-side TTL -- not worth surfacing an error
         // for, since this only ever runs during pool cleanup/discard, well
         // after the statement it backed already reached a terminal state.
-        let _: Result<IgnoredAny, ApiError> = self.authed_json(reqwest::Method::DELETE, &url, Some(&body)).await;
+        let _: Result<IgnoredAny, ApiError> = self
+            .authed_json(reqwest::Method::DELETE, &url, Some(&body), None)
+            .await;
     }
 
     /// Hands back a pooled session for (`catalog`, `schema`) if one's idle,
@@ -1230,9 +1549,14 @@ impl DbClient {
     /// skipping or double-fetching rows) must never be retried blindly;
     /// `GetOperationStatus`/`CloseOperation`/`CloseSession`/`CancelOperation`
     /// are safe to retry (read-only or naturally idempotent).
-    async fn thrift_call(&self, body: Bytes, idempotent: bool) -> Result<Bytes, ApiError> {
+    async fn thrift_call(
+        &self,
+        body: Bytes,
+        idempotent: bool,
+        stats: Option<&QueryStatsAccumulator>,
+    ) -> Result<Bytes, ApiError> {
         let url = self.thrift_url();
-        retry_call(|| async {
+        self.retry_call_tracked(stats, || async {
             let token = self.token_provider.get_token().await?;
             let resp = self
                 .http
@@ -1282,7 +1606,7 @@ impl DbClient {
         // created a session server-side; blindly retrying would leak it
         // (harmless correctness-wise, but not "safe to replay" in the
         // sense this flag means elsewhere in this file).
-        let resp_bytes = self.thrift_call(body, false).await?;
+        let resp_bytes = self.thrift_call(body, false, None).await?;
         let resp = thrift::parse_open_session(&resp_bytes).map_err(Self::thrift_parse_error)?;
         if let Some(e) = resp.status.error() {
             return Err(ApiError::permanent(format!("Thrift OpenSession failed: {e}")));
@@ -1295,7 +1619,7 @@ impl DbClient {
         let body = Bytes::from(thrift::build_close_session(session));
         // Best-effort, same as SEA's `delete_session` -- a failed close just
         // leaves the session for Databricks' own server-side TTL to reap.
-        let _ = self.thrift_call(body, true).await;
+        let _ = self.thrift_call(body, true, None).await;
     }
 
     /// Same checkout contract as SEA's `checkout_session` (see
@@ -1347,6 +1671,7 @@ impl DbClient {
         session: &thrift::SessionHandle,
         statement: &str,
         parameters: Option<&Value>,
+        stats: &QueryStatsAccumulator,
     ) -> Result<thrift::ExecuteStatementResp, ApiError> {
         let params_vec = parameters.map(thrift::parameters_from_json).unwrap_or_default();
         let req = thrift::ExecuteStatementReq {
@@ -1360,7 +1685,7 @@ impl DbClient {
         let body = Bytes::from(thrift::build_execute_statement(&req));
         // Not idempotent -- same double-execution risk as SEA's
         // statement-submit POST (arbitrary caller SQL, e.g. INSERT/MERGE).
-        let resp_bytes = self.thrift_call(body, false).await?;
+        let resp_bytes = self.thrift_call(body, false, Some(stats)).await?;
         let resp = thrift::parse_execute_statement(&resp_bytes).map_err(Self::thrift_parse_error)?;
         if let Some(e) = resp.status.error() {
             return Err(ApiError::permanent(format!("Thrift ExecuteStatement failed: {e}")));
@@ -1371,15 +1696,17 @@ impl DbClient {
     pub(crate) async fn thrift_get_operation_status_raw(
         &self,
         op: &thrift::OperationHandle,
+        stats: &QueryStatsAccumulator,
     ) -> Result<thrift::OperationStatusResp, ApiError> {
         let body = Bytes::from(thrift::build_get_operation_status(op));
-        let resp_bytes = self.thrift_call(body, true).await?;
+        let resp_bytes = self.thrift_call(body, true, Some(stats)).await?;
         thrift::parse_get_operation_status(&resp_bytes).map_err(Self::thrift_parse_error)
     }
 
     pub(crate) async fn thrift_fetch_results_raw(
         &self,
         op: &thrift::OperationHandle,
+        stats: &QueryStatsAccumulator,
     ) -> Result<thrift::FetchResultsResp, ApiError> {
         let body = Bytes::from(thrift::build_fetch_results(
             op,
@@ -1388,7 +1715,7 @@ impl DbClient {
         ));
         // Not idempotent -- see `thrift_call`'s own doc comment: this
         // advances a server-side cursor (`orientation: FETCH_NEXT`).
-        let resp_bytes = self.thrift_call(body, false).await?;
+        let resp_bytes = self.thrift_call(body, false, Some(stats)).await?;
         thrift::parse_fetch_results(&resp_bytes).map_err(Self::thrift_parse_error)
     }
 
@@ -1396,7 +1723,58 @@ impl DbClient {
     /// just leaves the operation for Databricks' own server-side cleanup.
     pub(crate) async fn thrift_close_operation_best_effort(&self, op: &thrift::OperationHandle) {
         let body = Bytes::from(thrift::build_close_operation(op));
-        let _ = self.thrift_call(body, true).await;
+        let _ = self.thrift_call(body, true, None).await;
+    }
+
+    /// Fire-and-forget best-effort server-side cancel of one in-flight
+    /// statement/operation -- SEA's `POST .../cancel`, or Thrift's
+    /// `CancelOperation`. Never awaited before a `QueryTimeout`/cancellation
+    /// surfaces to the caller (see `heartbeat.rs`'s own two call sites,
+    /// which spawn this rather than awaiting it inline) -- the result is
+    /// intentionally ignored either way, same "best effort, Databricks'
+    /// own server-side TTL reaps the rest on failure" pattern as
+    /// `delete_session`/`thrift_close_operation_best_effort` above.
+    ///
+    /// Belt-and-suspenders for Thrift specifically: whether `CloseOperation`
+    /// on a still-running operation already implicitly cancels it
+    /// server-side (common in HiveServer2-compatible implementations) is an
+    /// open question this crate's own design doc leaves unresolved either
+    /// way -- calling `CancelOperation` explicitly regardless is harmless if
+    /// redundant, necessary if not.
+    pub(crate) async fn cancel_statement(&self, handle: &CancelHandle) {
+        match handle {
+            CancelHandle::Sea { statement_id } => {
+                let url = format!("{}/api/2.0/sql/statements/{}/cancel", self.host, statement_id);
+                // Own request-building, not `authed_json` -- `authed_json`
+                // hardcodes `idempotent = method == GET`, but replaying a
+                // *cancel* POST is safe (unlike the statement-submit POST
+                // elsewhere in this file): cancelling an already-cancelled/
+                // already-terminal statement is a no-op, not a second
+                // execution of caller SQL.
+                let _ = self.retry_call(|| async {
+                    let token = self.token_provider.get_token().await?;
+                    let resp = self
+                        .http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .timeout(self.http_timeout)
+                        .send()
+                        .await
+                        .map_err(|e| ApiError::from_reqwest(e, true))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let text = resp.text().await.unwrap_or_default();
+                        return Err(ApiError::from_status(status, &text, true));
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            CancelHandle::Thrift { operation } => {
+                let body = Bytes::from(thrift::build_cancel_operation(operation));
+                let _ = self.thrift_call(body, true, None).await;
+            }
+        }
     }
 
     /// Submit + poll an EXTERNAL_LINKS/ARROW_STREAM statement to terminal
@@ -1411,8 +1789,9 @@ impl DbClient {
         catalog: Option<&str>,
         schema: Option<&str>,
         parameters: Option<Value>,
+        stats: &QueryStatsAccumulator,
     ) -> Result<StatementSubmitResult, ApiError> {
-        self.execute_statement(statement, "ARROW_STREAM", catalog, schema, parameters)
+        self.execute_statement(statement, "ARROW_STREAM", catalog, schema, parameters, stats)
             .await
     }
 
@@ -1459,6 +1838,7 @@ impl DbClient {
         catalog: Option<&str>,
         schema: Option<&str>,
         parameters: Option<Value>,
+        stats: &QueryStatsAccumulator,
     ) -> Result<InlineOrExternal, ApiError> {
         let mut body = json!({
             "warehouse_id": self.warehouse_id,
@@ -1472,12 +1852,17 @@ impl DbClient {
             body["parameters"] = p;
         }
 
-        let outcome = self.submit_and_poll(body, catalog, schema).await;
+        let outcome = self.submit_and_poll(body, catalog, schema, stats).await;
         let data = match outcome {
             Ok(d) => d,
             Err(e) if e.message.contains("Inline byte limit exceeded") => {
+                // Same `stats` accumulator, not a fresh one -- this fallback
+                // is invisible to the caller (one `execute()` call in, one
+                // result out), so its own submit/poll/retry activity counts
+                // toward the same `QueryStats` event as the INLINE attempt
+                // that preceded it, not a second, separate one.
                 return self
-                    .execute_arrow_statement(statement, catalog, schema, parameters)
+                    .execute_arrow_statement(statement, catalog, schema, parameters, stats)
                     .await
                     .map(InlineOrExternal::External);
             }
@@ -1495,13 +1880,22 @@ impl DbClient {
             }),
             // No data_array despite SUCCEEDED -- shouldn't happen given a
             // non-error status, but this crate never guesses at a missing
-            // field; a fresh EXTERNAL_LINKS submission is exactly as safe as
-            // the byte-limit fallback above (a distinct statement, not a
-            // retry of this one).
-            None => self
-                .execute_arrow_statement(statement, catalog, schema, parameters)
-                .await
-                .map(InlineOrExternal::External),
+            // field. **Does not** fall back to a fresh EXTERNAL_LINKS
+            // submission the way the byte-limit-exceeded case above does --
+            // found in code review (2026-08-11, alongside the identical bug
+            // in `pipeline.rs`'s own JSON-conversion-failure fallback): the
+            // byte-limit case is safe to resubmit because that statement
+            // reached a FAILED state (nothing committed server-side); this
+            // one only runs after SUCCEEDED, meaning any DML side effects
+            // already happened, so blindly resubmitting the identical SQL
+            // would risk silently duplicating them for non-idempotent SQL.
+            // A clean error is the safe choice here regardless of how
+            // unlikely this branch is to ever actually fire.
+            None => Err(ApiError::permanent(format!(
+                "statement {} succeeded with disposition=INLINE but the response had no data_array -- refusing \
+                 to automatically re-run the query to avoid duplicating any write it performed",
+                data.statement_id
+            ))),
         }
     }
 
@@ -1522,8 +1916,17 @@ impl DbClient {
         mut body: Value,
         catalog: Option<&str>,
         schema: Option<&str>,
+        stats: &QueryStatsAccumulator,
     ) -> Result<StatementResponseBody, ApiError> {
+        // Timed and recorded here -- the *only* place this call happens for
+        // SEA -- so a caller (e.g. `pipeline.rs`'s `execute_lazy`) reads
+        // `stats.warehouse_wait_s()` back afterward instead of also timing
+        // its own, second, now-cache-warm call to the same method. See
+        // `QueryStatsAccumulator::warehouse_wait_bits`'s own doc comment for
+        // the real double-call bug this replaced.
+        let warehouse_t0 = Instant::now();
         self.ensure_warehouse_running().await?;
+        stats.add_warehouse_wait_s(warehouse_t0.elapsed().as_secs_f64());
         let session_id = self.checkout_session(catalog, schema).await;
         match &session_id {
             Some(id) => body["session_id"] = json!(id),
@@ -1537,16 +1940,22 @@ impl DbClient {
             }
         }
 
-        let result = self.submit_and_poll_inner(body).await;
+        let result = self.submit_and_poll_inner(body, stats).await;
         if let Some(id) = session_id {
             self.checkin_session(catalog, schema, id, result.is_ok());
         }
         result
     }
 
-    async fn submit_and_poll_inner(&self, body: Value) -> Result<StatementResponseBody, ApiError> {
+    async fn submit_and_poll_inner(
+        &self,
+        body: Value,
+        stats: &QueryStatsAccumulator,
+    ) -> Result<StatementResponseBody, ApiError> {
         let url = format!("{}/api/2.0/sql/statements", self.host);
-        let mut data: StatementResponseBody = self.authed_json(reqwest::Method::POST, &url, Some(&body)).await?;
+        let mut data: StatementResponseBody = self
+            .authed_json(reqwest::Method::POST, &url, Some(&body), Some(stats))
+            .await?;
 
         while !matches!(
             data.status.state.as_str(),
@@ -1554,7 +1963,9 @@ impl DbClient {
         ) {
             tokio::time::sleep(POLL_INTERVAL).await;
             let poll_url = format!("{}/api/2.0/sql/statements/{}", self.host, data.statement_id);
-            data = self.authed_json(reqwest::Method::GET, &poll_url, None).await?;
+            data = self
+                .authed_json(reqwest::Method::GET, &poll_url, None, Some(stats))
+                .await?;
         }
 
         match data.status.state.as_str() {
@@ -1563,13 +1974,13 @@ impl DbClient {
                     error_code: None,
                     message: None,
                 });
-                Err(ApiError::permanent(format!(
+                Err(ApiError::statement_failed(format!(
                     "Databricks statement failed [{}]: {}",
                     err.error_code.as_deref().unwrap_or(""),
                     err.message.as_deref().unwrap_or(""),
                 )))
             }
-            "CANCELED" => Err(ApiError::permanent("Databricks statement was canceled")),
+            "CANCELED" => Err(ApiError::statement_failed("Databricks statement was canceled")),
             _ => Ok(data),
         }
     }
@@ -1581,6 +1992,7 @@ impl DbClient {
         catalog: Option<&str>,
         schema: Option<&str>,
         parameters: Option<Value>,
+        stats: &QueryStatsAccumulator,
     ) -> Result<StatementSubmitResult, ApiError> {
         let mut body = json!({
             "warehouse_id": self.warehouse_id,
@@ -1604,7 +2016,7 @@ impl DbClient {
             body["parameters"] = p;
         }
 
-        let data = self.submit_and_poll(body, catalog, schema).await?;
+        let data = self.submit_and_poll(body, catalog, schema, stats).await?;
         let manifest = data.manifest.unwrap_or_default();
         let compressed = manifest.result_compression.as_deref() == Some("LZ4_FRAME");
         // `Vec` per index, not a plain map entry -- see `ChunkMeta::pre_resolved_links`'s
@@ -1644,22 +2056,30 @@ impl DbClient {
         statement_id: &str,
         chunk_index: i64,
         compressed: bool,
+        stats: &QueryStatsAccumulator,
     ) -> Result<Vec<Bytes>, ApiError> {
         let url = format!(
             "{}/api/2.0/sql/statements/{}/result/chunks/{}",
             self.host, statement_id, chunk_index
         );
-        let data: ChunkLinksBody = self.authed_json(reqwest::Method::GET, &url, None).await?;
+        let data: ChunkLinksBody = self
+            .authed_json(reqwest::Method::GET, &url, None, Some(stats))
+            .await?;
         let links: Vec<String> = data.external_links.into_iter().map(|l| l.external_link).collect();
-        self.fetch_pre_resolved_links(&links, compressed).await
+        self.fetch_pre_resolved_links(&links, compressed, stats).await
     }
 
     /// Same shape as `fetch_chunk_index`, but for links the statement submit/
     /// poll response already embedded -- no resolution GET needed first.
-    async fn fetch_pre_resolved_links(&self, links: &[String], compressed: bool) -> Result<Vec<Bytes>, ApiError> {
+    async fn fetch_pre_resolved_links(
+        &self,
+        links: &[String],
+        compressed: bool,
+        stats: &QueryStatsAccumulator,
+    ) -> Result<Vec<Bytes>, ApiError> {
         let mut blobs = Vec::with_capacity(links.len());
         for link in links {
-            blobs.push(self.fetch_link_bytes(link, compressed).await?);
+            blobs.push(self.fetch_link_bytes(link, compressed, stats).await?);
         }
         Ok(blobs)
     }
@@ -1679,6 +2099,7 @@ impl DbClient {
         statement_id: String,
         chunk_metas: Vec<ChunkMeta>,
         compressed: bool,
+        stats: Arc<QueryStatsAccumulator>,
     ) -> mpsc::Receiver<Result<ChunkItem, ApiError>> {
         let concurrency = self.chunk_fetch_concurrency.max(1);
         let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
@@ -1691,17 +2112,18 @@ impl DbClient {
                 let queue = queue.clone();
                 let worker_tx = tx.clone();
                 let statement_id = statement_id.clone();
+                let stats = stats.clone();
                 handles.push(tokio::spawn(async move {
                     loop {
                         let meta = { queue.lock().unwrap().pop_front() };
                         let Some(meta) = meta else { return Ok(()) };
                         let fetched = if meta.pre_resolved_links.is_empty() {
                             client
-                                .fetch_chunk_index(&statement_id, meta.chunk_index, compressed)
+                                .fetch_chunk_index(&statement_id, meta.chunk_index, compressed, &stats)
                                 .await
                         } else {
                             client
-                                .fetch_pre_resolved_links(&meta.pre_resolved_links, compressed)
+                                .fetch_pre_resolved_links(&meta.pre_resolved_links, compressed, &stats)
                                 .await
                         };
                         match fetched {
@@ -1747,7 +2169,7 @@ impl DbClient {
     /// cheap refcount clone, not a real copy.
     pub async fn upload_volume_file(&self, volume_path: &str, data: Bytes) -> Result<(), ApiError> {
         let url = format!("{}/api/2.0/fs/files{}", self.host, volume_path);
-        retry_call(|| async {
+        self.retry_call(|| async {
             let token = self.token_provider.get_token().await?;
             let resp = self
                 .http
@@ -1777,7 +2199,7 @@ impl DbClient {
     /// idempotent staging cleanup.
     pub async fn delete_volume_file(&self, volume_path: &str) -> Result<(), ApiError> {
         let url = format!("{}/api/2.0/fs/files{}", self.host, volume_path);
-        retry_call(|| async {
+        self.retry_call(|| async {
             let token = self.token_provider.get_token().await?;
             let resp = self
                 .http
@@ -1918,6 +2340,7 @@ mod tests {
             Err(ApiError {
                 message: msg.to_string(),
                 transient: false,
+                kind: ApiErrorKind::Other,
             })
         })
     }
@@ -2003,10 +2426,62 @@ mod tests {
         });
 
         let client = DbClient::new(&format!("http://{addr}"), "wh-test", "fake-token");
+        let stats = QueryStatsAccumulator::default();
         let bytes = client
-            .fetch_link_bytes(&format!("http://{addr}/data"), false)
+            .fetch_link_bytes(&format!("http://{addr}/data"), false, &stats)
             .await
             .expect("must retry past the truncated first attempt and succeed on the second");
         assert_eq!(&bytes[..], b"hello");
+        assert_eq!(
+            stats.retry_count.load(Ordering::Relaxed),
+            1,
+            "the one retry after the truncated first attempt must be counted"
+        );
+        assert_eq!(bytes.len() as u64, stats.bytes_downloaded.load(Ordering::Relaxed));
+    }
+}
+
+/// Property-based fuzzing for `decompress_lz4_frame` -- the other real,
+/// previously-shipped bug class this crate's hand-rolled/third-party-library-
+/// adjacent parsing code has already produced (the multi-frame truncation
+/// bug documented on this function's own call site in `execute_statement`'s
+/// doc comment, and `decompress_lz4_frame_survives_a_zero_content_frame_in_the_middle`
+/// above -- both found by real-workspace testing, not fuzzing). Separate
+/// `#[cfg(test)]` module from `mod tests` above for the same reason
+/// `thrift.rs`/`json_convert.rs`'s own `mod proptests` are split out.
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// Arbitrary/malformed/truncated/empty bytes reinterpreted as an LZ4
+        /// Frame: must never panic (most inputs are simply not a valid LZ4
+        /// Frame at all and should return `Err`; a few short/empty inputs
+        /// are legal-but-trivial frames and should return `Ok` with little
+        /// or no content -- either outcome is fine, only a panic is a bug).
+        #[test]
+        fn decompress_lz4_frame_never_panics_on_arbitrary_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = decompress_lz4_frame(&Bytes::from(bytes));
+        }
+
+        /// A *truncated* real frame -- compress real data, then chop the
+        /// tail off at an arbitrary point -- targeting the multi-frame loop
+        /// specifically (a cut mid-frame, mid-block, or exactly on a frame
+        /// boundary), which arbitrary random bytes essentially never
+        /// produce (LZ4 Frame's magic number alone is 4 specific bytes).
+        #[test]
+        fn decompress_lz4_frame_never_panics_on_a_truncated_real_frame(
+            payload in proptest::collection::vec(any::<u8>(), 0..2048),
+            cut_at_fraction in 0.0f64..=1.0,
+        ) {
+            use std::io::Write;
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            encoder.write_all(&payload).unwrap();
+            let full = encoder.finish().unwrap();
+            let cut = ((full.len() as f64) * cut_at_fraction) as usize;
+            let _ = decompress_lz4_frame(&Bytes::from(full[..cut].to_vec()));
+        }
     }
 }

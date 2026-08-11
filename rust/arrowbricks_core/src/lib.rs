@@ -17,7 +17,10 @@ use pyo3_arrow::input::AnyRecordBatch;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
-use client::{ApiError, DbClient, Protocol, TokenFuture, TokenProvider};
+use client::{
+    ApiError, ApiErrorKind, CancelHandle, DbClient, EventSink, Protocol, QueryStatsAccumulator, QueryStatsData,
+    TokenFuture, TokenProvider,
+};
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
 use pipeline::{NdjsonStream, ResultStream};
 
@@ -68,10 +71,127 @@ fn read_ipc_stream(data: &[u8]) -> PyResult<PyTable> {
     PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
+/// Wraps a `PyErr` raised by the caller's own `token_provider` callable (its
+/// call itself, awaiting its coroutine, or extracting a non-`str` return
+/// value) into an `ApiError`. This function's *only* caller is
+/// `PyTokenProvider::get_token` -- every `PyErr` reaching it happened while
+/// this crate was specifically trying to obtain a bearer token, so `kind:
+/// ApiErrorKind::Auth` is justified by that calling context alone, not by
+/// inspecting the exception's own type (there's no reliable way to tell
+/// "the token provider raised an auth-specific error" from "it raised some
+/// other exception" from the exception object itself -- a caller's
+/// `token_provider` can raise anything). Found in code review: this used to
+/// be unconditionally `ApiErrorKind::Other`, so a `token_provider` that
+/// itself fails with an auth error (e.g. a refreshed OAuth token comes back
+/// unauthorized) never surfaced as `AuthError` -- exactly the case
+/// README.md's `except AuthError: refresh_credentials()` pattern most wants
+/// to catch. `transient: false` (unchanged): a `token_provider` failure is
+/// not retried by `retry_call_tracked` the way a transient HTTP status is --
+/// if the caller's own callable is broken, retrying immediately without
+/// giving it a chance to fix itself isn't obviously safe either, so this
+/// isn't the fix's concern.
 fn py_err_to_api_error(e: PyErr) -> ApiError {
     ApiError {
         message: e.to_string(),
         transient: false,
+        kind: ApiErrorKind::Auth,
+    }
+}
+
+// ---- Typed error taxonomy (2026-08-11 design doc) -------------------------
+//
+// Every `ApiError` crossing this FFI boundary used to collapse to a plain
+// `PyRuntimeError::new_err(e.message)` at ~15 call sites below -- a caller
+// couldn't programmatically distinguish "safe to retry" from "don't retry"
+// from "auth problem" without regex-parsing `str(exc)`. `ApiError` already
+// carried `transient: bool` (and, as of the same change that added this
+// hierarchy, `kind: ApiErrorKind`) internally; this section wires both
+// across the boundary as real, catchable Python exception *types* instead --
+// see `api_error_to_pyerr` below, used at every one of those call sites.
+//
+// `create_exception!` (not a hand-rolled `#[pyclass]`) is the standard PyO3
+// pattern for a new Python exception type -- it registers a real CPython
+// exception class with the given base, so `isinstance`/`except` work exactly
+// like any built-in exception, and (unlike defining these as plain Python
+// classes in `_errors.py` and reaching for them via `py.import(...)` from
+// Rust on every error) needs no per-error Python-level module lookup.
+//
+// Deliberately kept small and flat: a single `ArrowbricksError` base
+// (subclassing `PyRuntimeError`, not `PyException` -- see its own doc
+// comment for why backward compatibility matters here), then exactly three
+// subclasses split by what actually changes a caller's response:
+// `TransientError` (backoff and retry -- every internal retry in
+// `retry_call_tracked` was already exhausted by the time this reaches
+// Python), `AuthError` (401/403 survived every internal retry too, each of
+// which re-fetched a token -- the credential itself is bad, not the
+// request), and `StatementError` (the SQL statement failed/was canceled
+// server-side -- retrying the identical statement fails identically, this
+// is not a transport problem at all). Everything else (parse/decode/
+// internal-invariant errors, and any permanent non-auth/non-statement HTTP
+// status) stays the plain `ArrowbricksError` base.
+//
+// `QueryTimeout` (`_streaming.py`) is NOT one of these -- it's raised from
+// Python, not across this boundary (see `cursor.py`'s own `RuntimeError` ->
+// `QueryTimeout` translation, matched on `heartbeat.rs`'s stable
+// `"Query exceeded {secs}s timeout"` message prefix), and stays that way.
+// It was changed to additionally subclass `ArrowbricksError` (Python side)
+// for a consistent single catch-all (`except ArrowbricksError` now catches
+// every exception this package raises itself, timeout included) -- see
+// `_streaming.py`'s own doc comment on that choice.
+pyo3::create_exception!(
+    _core,
+    ArrowbricksError,
+    pyo3::exceptions::PyRuntimeError,
+    "Base class for every exception arrowbricks raises itself (as opposed to \
+     some other library's exception bubbling up unchanged). Subclasses \
+     RuntimeError, not Exception, so an `except RuntimeError` written before \
+     this hierarchy existed keeps working unchanged -- see README.md's \
+     \"Errors\" section."
+);
+pyo3::create_exception!(
+    _core,
+    TransientError,
+    ArrowbricksError,
+    "A retryable failure (network blip, connection reset, or a 5xx from \
+     Databricks) that survived every internal retry (`retry_attempts`, \
+     exponential backoff) before ever reaching Python. Backing off further \
+     and trying again later is the right response -- retrying immediately \
+     just repeats what already failed."
+);
+pyo3::create_exception!(
+    _core,
+    AuthError,
+    ArrowbricksError,
+    "The request was rejected as unauthorized/forbidden (HTTP 401/403), \
+     even after every internal retry re-fetched a token from \
+     `token_provider`. Treat the credential itself as bad/expired, not a \
+     transient blip -- retrying with the same token will fail identically."
+);
+pyo3::create_exception!(
+    _core,
+    StatementError,
+    ArrowbricksError,
+    "The SQL statement itself failed or was canceled server-side (a \
+     Databricks FAILED/CANCELED statement state, or a Thrift operation's \
+     terminal error) -- bad SQL, a permissions error on the underlying \
+     table, or a warehouse-side query failure. Retrying the identical \
+     statement will fail identically; this is not a transport problem."
+);
+
+/// Maps an `ApiError` crossing the PyO3 boundary to the right exception
+/// *type* (see the section doc comment above), not just a message -- used at
+/// every `ApiError` -> `PyErr` conversion in this file instead of a bare
+/// `PyRuntimeError::new_err(e.message)`. `kind` takes priority over
+/// `transient`: a 401/403 is `transient: true` too (internally retryable --
+/// each retry re-fetches a token), but once every retry is exhausted and
+/// this function actually runs, `AuthError` is the more useful signal to a
+/// caller than a generic "retryable" one.
+fn api_error_to_pyerr(e: ApiError) -> PyErr {
+    match e.kind {
+        ApiErrorKind::Auth => AuthError::new_err(e.message),
+        ApiErrorKind::Statement => StatementError::new_err(e.message),
+        ApiErrorKind::Other if e.transient => TransientError::new_err(e.message),
+        ApiErrorKind::Other => ArrowbricksError::new_err(e.message),
     }
 }
 
@@ -205,6 +325,162 @@ impl TokenProvider for PyTokenProvider {
     }
 }
 
+/// One query's timing/counters, handed to an `on_event` callback exactly
+/// once, at completion -- see `README.md`'s own `on_event` section for the
+/// user-facing description of each field, and `client::QueryStatsData` (the
+/// plain, PyO3-agnostic struct this wraps) for how it's assembled.
+/// `#[pyo3(get)]` fields on a real class, not a plain dict -- matching
+/// `ResultSet`'s own shape above, the existing convention this crate uses
+/// for structured return values crossing the Rust/Python boundary.
+#[pyclass(name = "QueryStats")]
+struct PyQueryStats {
+    #[pyo3(get)]
+    statement_id: String,
+    #[pyo3(get)]
+    protocol: &'static str,
+    #[pyo3(get)]
+    warehouse_wait_s: f64,
+    #[pyo3(get)]
+    submit_to_ready_s: f64,
+    #[pyo3(get)]
+    fetch_s: f64,
+    #[pyo3(get)]
+    num_chunks: usize,
+    #[pyo3(get)]
+    bytes_downloaded: u64,
+    #[pyo3(get)]
+    retry_count: u32,
+    #[pyo3(get)]
+    concurrency_used: usize,
+    #[pyo3(get)]
+    outcome: &'static str,
+}
+
+impl From<QueryStatsData> for PyQueryStats {
+    fn from(d: QueryStatsData) -> Self {
+        Self {
+            statement_id: d.statement_id,
+            protocol: d.protocol,
+            warehouse_wait_s: d.warehouse_wait_s,
+            submit_to_ready_s: d.submit_to_ready_s,
+            fetch_s: d.fetch_s,
+            num_chunks: d.num_chunks,
+            bytes_downloaded: d.bytes_downloaded,
+            retry_count: d.retry_count,
+            concurrency_used: d.concurrency_used,
+            outcome: d.outcome,
+        }
+    }
+}
+
+#[pymethods]
+impl PyQueryStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "QueryStats(statement_id={:?}, protocol={:?}, warehouse_wait_s={:.3}, submit_to_ready_s={:.3}, \
+             fetch_s={:.3}, num_chunks={}, bytes_downloaded={}, retry_count={}, concurrency_used={}, outcome={:?})",
+            self.statement_id,
+            self.protocol,
+            self.warehouse_wait_s,
+            self.submit_to_ready_s,
+            self.fetch_s,
+            self.num_chunks,
+            self.bytes_downloaded,
+            self.retry_count,
+            self.concurrency_used,
+            self.outcome,
+        )
+    }
+}
+
+/// Bridges a Python `on_event` callable (sync or async, matching
+/// `Callable[[QueryStats], None | Awaitable[None]]`) into Rust's
+/// `client::EventSink` trait -- mirrors `PyTokenProvider`'s own sync/async
+/// detection and `TaskLocals`-caching approach almost exactly, with one
+/// deliberate difference driven by `EventSink`'s own fire-and-forget
+/// contract: `on_event` here is a plain, *synchronous* method. It captures
+/// whatever `TaskLocals` the *calling* context has right now (cheap, no
+/// `.await`), then spawns the actual dispatch (which may itself need to
+/// await an async callback) onto the background runtime and returns
+/// immediately -- a slow or raising `on_event` must never block or fail the
+/// query that already has its result.
+///
+/// **Known limitation, not fully closable without deeper changes:** an
+/// *async* `on_event` fired from `pipeline.rs`'s `Drop`-triggered
+/// abandonment path (the `total_timeout_s`/cancellation case -- see
+/// `PoisonOnDrop`/`ReportOnDrop`'s own doc comments) runs inside a task on
+/// `pyo3_async_runtimes`'s background runtime that was never scoped to any
+/// asyncio event loop, so capturing `TaskLocals` *at that exact moment*
+/// always fails -- same root cause as `PyTokenProvider`'s own doc comment
+/// describes for chunk-fetch worker tasks. This falls back to whatever was
+/// cached by an *earlier*, successful capture (e.g. a prior query on the
+/// same client that reported success/error from a real event-loop context),
+/// which works once a client has dispatched at least one such event, but
+/// means a *sync* `on_event` (recommended -- it never needs a loop at all)
+/// is the only fully reliable choice for observing a client's very first
+/// query if that query is also the one that gets cancelled/timed out.
+struct PyEventSink {
+    callable: Py<PyAny>,
+    locals: Mutex<Option<TaskLocals>>,
+}
+
+impl PyEventSink {
+    async fn dispatch(callable: Py<PyAny>, locals: Option<TaskLocals>, stats: QueryStatsData) {
+        // Every failure mode here (bad callable, callback raises, callback
+        // returns something unawaitable-but-truthy, etc.) is swallowed --
+        // see this struct's own doc comment. No logging crate is a
+        // dependency of this workspace (see Cargo.toml), so there's nowhere
+        // to record this beyond a `debug_assertions`-only trace, not worth
+        // adding a dependency for.
+        let result: PyResult<()> = async {
+            let (called, is_awaitable): (Py<PyAny>, bool) = Python::attach(|py| {
+                let py_stats = Py::new(py, PyQueryStats::from(stats))?;
+                let bound = callable.bind(py).call1((py_stats,))?;
+                let is_awaitable = bound.hasattr("__await__")?;
+                Ok::<_, PyErr>((bound.unbind(), is_awaitable))
+            })?;
+            if is_awaitable {
+                let awaited = async move {
+                    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(called.bind(py).clone()))?;
+                    fut.await
+                };
+                match locals {
+                    Some(l) => pyo3_async_runtimes::tokio::scope(l, awaited).await?,
+                    None => awaited.await?,
+                };
+            }
+            Ok(())
+        }
+        .await;
+        #[cfg(debug_assertions)]
+        if let Err(e) = &result {
+            eprintln!("arrowbricks: on_event callback raised, ignored (fire-and-forget): {e}");
+        }
+        let _ = result;
+    }
+}
+
+impl EventSink for PyEventSink {
+    fn on_event(&self, stats: QueryStatsData) {
+        let (callable, locals) = {
+            let mut guard = self.locals.lock().unwrap();
+            Python::attach(|py| {
+                let callable = self.callable.clone_ref(py);
+                if let Ok(captured) = pyo3_async_runtimes::tokio::get_current_locals(py) {
+                    *guard = Some(captured);
+                }
+                (callable, guard.clone())
+            })
+        };
+        // Fire-and-forget: intentionally not awaited, and not bound via
+        // `let _ = ...` either (that specific pattern trips clippy's
+        // `let_underscore_future`, which reasonably worries it's a
+        // forgotten `.await` -- a bare statement makes the "detached on
+        // purpose" intent unambiguous).
+        pyo3_async_runtimes::tokio::get_runtime().spawn(Self::dispatch(callable, locals, stats));
+    }
+}
+
 /// One Databricks SQL warehouse endpoint -- a persistent `reqwest::Client`
 /// (connection pool) reused across every `execute` call, since repeated
 /// TCP+TLS handshakes against the same host are pure waste.
@@ -232,6 +508,15 @@ impl PyDbClient {
         warehouse_confirmed_running_ttl_s=30.0,
         compress_results=true,
         protocol="thrift".to_string(),
+        on_event=None,
+        // Same literal-defaults-in-four-places pattern as
+        // `chunk_fetch_concurrency` above (see AGENTS.md's own entry on that
+        // one's footgun, and `client.rs`'s `DbClient` doc comment on
+        // `retry_attempts`/`retry_max_wait_s`) -- these two literals must
+        // match `client.rs`'s `RETRY_ATTEMPTS`/`RETRY_MAX_WAIT_S` consts,
+        // `client.py`'s kwarg defaults, and `_core.pyi`'s stub.
+        retry_attempts=6,
+        retry_max_wait_s=20.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -246,6 +531,18 @@ impl PyDbClient {
         warehouse_confirmed_running_ttl_s: f64,
         compress_results: bool,
         protocol: String,
+        on_event: Option<Py<PyAny>>,
+        // Signed, not `u32` -- found in code review: a `u32` parameter makes
+        // PyO3's own argument conversion reject a negative Python int (e.g.
+        // `retry_attempts=-1`) with `OverflowError` *before* this
+        // constructor body -- and its own `ValueError` below -- ever runs,
+        // contradicting the `ValueError`-for-bad-retry-config contract
+        // documented in `client.py`/README.md/CHANGELOG.md. `i64` accepts
+        // any value a caller could plausibly pass (including negative) and
+        // lets the explicit check below turn it into the documented,
+        // catchable `ValueError` instead.
+        retry_attempts: i64,
+        retry_max_wait_s: f64,
     ) -> PyResult<Self> {
         let protocol = Protocol::parse(&protocol).map_err(PyValueError::new_err)?;
         // `Duration::from_secs_f64` panics on negative/NaN/infinite input --
@@ -262,6 +559,7 @@ impl PyDbClient {
             ("http_timeout", http_timeout),
             ("warehouse_start_timeout", warehouse_start_timeout),
             ("warehouse_confirmed_running_ttl_s", warehouse_confirmed_running_ttl_s),
+            ("retry_max_wait_s", retry_max_wait_s),
         ] {
             if !seconds.is_finite() || seconds < 0.0 {
                 return Err(PyValueError::new_err(format!(
@@ -269,6 +567,24 @@ impl PyDbClient {
                 )));
             }
         }
+        // `retry_attempts - 1` in `DbClient::retry_call_tracked`'s loop would
+        // underflow at 0 -- and 0 (or negative) attempts would mean "never
+        // even try the request," not a sensible retry policy either way.
+        // `< 1`, not `== 0`, since `retry_attempts` is signed (see its own
+        // doc comment above) and must reject negative values too.
+        if retry_attempts < 1 {
+            return Err(PyValueError::new_err(format!(
+                "retry_attempts must be at least 1, got {retry_attempts}"
+            )));
+        }
+        // `try_from` (not a bare `as u32` cast) -- `retry_attempts` is proven
+        // `>= 1` above, but not yet bounded above; a bare `as` cast would
+        // silently wrap a pathological value like `u32::MAX as i64 + 1` into
+        // some small, unrelated `u32` instead of erroring, the same "wrong
+        // exception type" class of surprise this whole fix exists to close.
+        let retry_attempts = u32::try_from(retry_attempts).map_err(|_| {
+            PyValueError::new_err(format!("retry_attempts is too large: {retry_attempts}"))
+        })?;
         let db_client = match (token, token_provider) {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(
@@ -285,18 +601,24 @@ impl PyDbClient {
             }
             (None, None) => return Err(PyValueError::new_err("Client needs either `token` or `token_provider`")),
         };
-        Ok(Self {
-            inner: Arc::new(
-                db_client
-                    .with_concurrency(chunk_fetch_concurrency)
-                    .with_http_timeout(http_timeout)
-                    .with_wait_timeout(wait_timeout)
-                    .with_warehouse_start_timeout(warehouse_start_timeout)
-                    .with_warehouse_confirmed_running_ttl(warehouse_confirmed_running_ttl_s)
-                    .with_compress_results(compress_results)
-                    .with_protocol(protocol),
-            ),
-        })
+        let mut db_client = db_client
+            .with_concurrency(chunk_fetch_concurrency)
+            .with_http_timeout(http_timeout)
+            .with_wait_timeout(wait_timeout)
+            .with_warehouse_start_timeout(warehouse_start_timeout)
+            .with_warehouse_confirmed_running_ttl(warehouse_confirmed_running_ttl_s)
+            .with_compress_results(compress_results)
+            .with_protocol(protocol)
+            .with_retry_attempts(retry_attempts)
+            .with_retry_max_wait_s(retry_max_wait_s);
+        if let Some(callable) = on_event {
+            let sink: Arc<dyn EventSink> = Arc::new(PyEventSink {
+                callable,
+                locals: Mutex::new(None),
+            });
+            db_client = db_client.with_on_event(sink);
+        }
+        Ok(Self { inner: Arc::new(db_client) })
     }
 
     /// Submits the statement and starts background chunk fetching, without
@@ -328,6 +650,7 @@ impl PyDbClient {
         prefer_inline: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
+        let client_for_result = client.clone();
         let parameters = parameters_to_value(py, parameters)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = if client.protocol == Protocol::Thrift {
@@ -345,11 +668,14 @@ impl PyDbClient {
             } else {
                 pipeline::execute_lazy(client, &statement, catalog.as_deref(), schema.as_deref(), parameters).await
             }
-            .map_err(|e| PyRuntimeError::new_err(e.message))?;
+            .map_err(api_error_to_pyerr)?;
             Ok(PyResultSet {
                 statement_id: stream.statement_id.clone(),
                 num_chunks: stream.num_chunks,
                 columns: column_pairs(&stream.columns),
+                cancel_handle: stream.cancel_handle.clone(),
+                stats: stream.stats.clone(),
+                client: client_for_result,
                 inner: Arc::new(AsyncMutex::new(stream)),
             })
         })
@@ -370,7 +696,7 @@ impl PyDbClient {
             client
                 .upload_volume_file(&volume_path, data)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))
+                .map_err(api_error_to_pyerr)
         })
     }
 
@@ -383,7 +709,7 @@ impl PyDbClient {
             client
                 .delete_volume_file(&volume_path)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))
+                .map_err(api_error_to_pyerr)
         })
     }
 
@@ -455,6 +781,15 @@ struct PyResultSet {
     /// used for `Cursor.description`-style compatibility.
     #[pyo3(get)]
     columns: Vec<(String, Option<String>)>,
+    /// Copied out at construction time (same reason `statement_id`/
+    /// `num_chunks`/`columns` are, rather than reached through `inner`'s
+    /// `AsyncMutex`): `fetchall_arrow_streamed` needs these to build its
+    /// `HeartbeatWait::with_cancel` hook synchronously, without locking a
+    /// mutex that's about to be locked again by that same call's own
+    /// `fetchall_arrow()`.
+    cancel_handle: CancelHandle,
+    stats: Arc<QueryStatsAccumulator>,
+    client: Arc<DbClient>,
     inner: Arc<AsyncMutex<ResultStream>>,
 }
 
@@ -480,7 +815,7 @@ impl PyResultSet {
             let (batches, schema) = stream
                 .fetchmany_arrow(n)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+                .map_err(api_error_to_pyerr)?;
             batches_to_pytable(batches, schema)
         })
     }
@@ -493,7 +828,7 @@ impl PyResultSet {
             let (batches, schema) = stream
                 .fetchall_arrow()
                 .await
-                .map_err(|e| PyRuntimeError::new_err(e.message))?;
+                .map_err(api_error_to_pyerr)?;
             batches_to_pytable(batches, schema)
         })
     }
@@ -507,8 +842,13 @@ impl PyResultSet {
     fn fetchall_arrow_streamed(&self, total_timeout_s: Option<f64>) -> PyFetchallArrowStreamedIter {
         let inner = self.inner.clone();
         let fut = async move { inner.lock().await.fetchall_arrow().await };
+        let wait = HeartbeatWait::new(fut, total_timeout_s).with_cancel(pipeline::cancel_hook(
+            self.client.clone(),
+            self.cancel_handle.clone(),
+            self.stats.clone(),
+        ));
         PyFetchallArrowStreamedIter {
-            wait: Arc::new(AsyncMutex::new(Some(HeartbeatWait::new(fut, total_timeout_s)))),
+            wait: Arc::new(AsyncMutex::new(Some(wait))),
         }
     }
 
@@ -567,7 +907,7 @@ impl PyFetchallArrowStreamedIter {
                 Ok(None) => Err(PyStopAsyncIteration::new_err(())),
                 Err(e) => {
                     *guard = None;
-                    Err(PyRuntimeError::new_err(e.message))
+                    Err(api_error_to_pyerr(e))
                 }
             }
         })
@@ -633,6 +973,7 @@ impl PyNdjsonStreamIter {
                         else {
                             unreachable!()
                         };
+                        let client_for_cancel = client.clone();
                         let stream = pipeline::execute_ndjson_stream(
                             client,
                             &statement,
@@ -642,10 +983,15 @@ impl PyNdjsonStreamIter {
                             non_finite_as_string,
                         )
                         .await
-                        .map_err(|e| PyRuntimeError::new_err(e.message))?;
+                        .map_err(api_error_to_pyerr)?;
+                        let heartbeat = HeartbeatStream::new(total_timeout_s).with_cancel(pipeline::cancel_hook(
+                            client_for_cancel,
+                            stream.cancel_handle.clone(),
+                            stream.stats.clone(),
+                        ));
                         *guard = PyNdjsonStreamState::Running {
                             stream: Arc::new(AsyncMutex::new(stream)),
-                            heartbeat: HeartbeatStream::new(total_timeout_s),
+                            heartbeat,
                         };
                     }
                     PyNdjsonStreamState::Running { stream, heartbeat } => {
@@ -666,7 +1012,7 @@ impl PyNdjsonStreamIter {
                             }
                             Err(e) => {
                                 *guard = PyNdjsonStreamState::Done;
-                                Err(PyRuntimeError::new_err(e.message))
+                                Err(api_error_to_pyerr(e))
                             }
                         };
                     }
@@ -689,6 +1035,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHeartbeat>()?;
     m.add_class::<PyFetchallArrowStreamedIter>()?;
     m.add_class::<PyNdjsonStreamIter>()?;
+    m.add_class::<PyQueryStats>()?;
     m.add("HEARTBEAT", heartbeat_singleton(m.py())?)?;
+    m.add("ArrowbricksError", m.py().get_type::<ArrowbricksError>())?;
+    m.add("TransientError", m.py().get_type::<TransientError>())?;
+    m.add("AuthError", m.py().get_type::<AuthError>())?;
+    m.add("StatementError", m.py().get_type::<StatementError>())?;
     Ok(())
 }

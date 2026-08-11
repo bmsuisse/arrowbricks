@@ -250,7 +250,39 @@ impl<'a> Reader<'a> {
     /// each one. This is Thrift's own designed-in forward-compatibility
     /// mechanism (every field is self-describing on the wire, type + id),
     /// not a workaround.
+    ///
+    /// Delegates to `skip_bounded` with a fresh depth counter; every
+    /// *recursive* call inside `skip_bounded` threads that counter through
+    /// instead of calling back into this method, so nesting depth is
+    /// tracked across the whole recursive descent, not reset at each level
+    /// -- see `MAX_SKIP_DEPTH`'s own doc comment for why that bound exists.
     pub fn skip(&mut self, ftype: i8) -> TResult<()> {
+        self.skip_bounded(ftype, 0)
+    }
+
+    /// Real depth ceiling for `skip`'s own recursion (STRUCT-of-STRUCT,
+    /// LIST/SET/MAP-of-composite) -- found by proptest
+    /// (`skip_never_stack_overflows_on_deeply_nested_structs`): before this
+    /// existed, a small (~12KB), well-formed-*looking* buffer of a few
+    /// thousand nested STRUCT field headers crashed the whole process with a
+    /// stack overflow. That's strictly worse than a panic -- Rust's stack
+    /// overflow is a hard process abort, not something `catch_unwind` at the
+    /// PyO3 boundary can turn into a catchable Python exception -- so a
+    /// corrupted or malicious Thrift response could take down an entire
+    /// long-running server process, not just fail one query. No real struct
+    /// this crate parses nests anywhere close to this deep (a handful of
+    /// levels at most -- see `thrift.rs`'s own struct definitions), so this
+    /// is generous headroom, not a real behavioral constraint.
+    const MAX_SKIP_DEPTH: u32 = 64;
+
+    fn skip_bounded(&mut self, ftype: i8, depth: u32) -> TResult<()> {
+        if depth >= Self::MAX_SKIP_DEPTH {
+            return Err(ThriftError(format!(
+                "thrift message nested too deeply (> {} levels) while skipping an unrecognized field -- refusing \
+                 to recurse further",
+                Self::MAX_SKIP_DEPTH
+            )));
+        }
         match ftype {
             ttype::BOOL | ttype::BYTE => {
                 self.read_i8()?;
@@ -275,19 +307,19 @@ impl<'a> Reader<'a> {
                 if ft == ttype::STOP {
                     break;
                 }
-                self.skip(ft)?;
+                self.skip_bounded(ft, depth + 1)?;
             },
             ttype::LIST | ttype::SET => {
                 let (et, size) = self.read_list_begin()?;
                 for _ in 0..size {
-                    self.skip(et)?;
+                    self.skip_bounded(et, depth + 1)?;
                 }
             }
             ttype::MAP => {
                 let (kt, vt, size) = self.read_map_begin()?;
                 for _ in 0..size {
-                    self.skip(kt)?;
-                    self.skip(vt)?;
+                    self.skip_bounded(kt, depth + 1)?;
+                    self.skip_bounded(vt, depth + 1)?;
                 }
             }
             other => return Err(ThriftError(format!("cannot skip unknown thrift type tag {other}"))),
@@ -1265,5 +1297,187 @@ mod tests {
         let mut r = Reader::new(&bytes);
         let resp = OperationStatusResp::read(&mut r).unwrap();
         assert_eq!(resp.display_message.as_deref(), Some("real display message"));
+    }
+
+    /// Regression test for a real stack-overflow bug found by
+    /// `proptests::skip_never_stack_overflows_on_deeply_nested_structs`
+    /// (below): a few thousand nested `STRUCT` field headers -- a small,
+    /// well-formed-*looking* buffer -- crashed the whole process with a hard
+    /// stack overflow before `Reader::MAX_SKIP_DEPTH` existed, since
+    /// `skip()`'s STRUCT/LIST/SET/MAP branches recursed with no depth bound
+    /// at all. Confirms both sides of the fix: comfortably-nested input (a
+    /// handful of levels, matching any real struct this crate parses) still
+    /// skips cleanly -- the bound doesn't reject legitimate input -- and
+    /// input nested past `MAX_SKIP_DEPTH` gets a clean `Err`, not a crash.
+    #[test]
+    fn skip_rejects_nesting_past_max_skip_depth_but_allows_shallow_nesting() {
+        fn nested_struct_bytes(depth: usize) -> Vec<u8> {
+            let mut w = Writer::new();
+            for _ in 0..depth {
+                w.write_field_begin(ttype::STRUCT, 1);
+            }
+            for _ in 0..depth {
+                w.write_field_stop();
+            }
+            w.into_bytes()
+        }
+
+        // Well under the cap, and STOP-terminated at every level (unlike the
+        // proptest's deliberately-unterminated buffers) -- must skip cleanly.
+        let shallow = nested_struct_bytes(5);
+        let mut r = Reader::new(&shallow);
+        let (ft, _id) = r.read_field_begin().unwrap();
+        assert!(r.skip(ft).is_ok(), "a handful of nesting levels must still skip successfully");
+
+        // Comfortably past the cap -- must error, not recurse further.
+        let deep = nested_struct_bytes(500);
+        let mut r = Reader::new(&deep);
+        let (ft, _id) = r.read_field_begin().unwrap();
+        let err = r.skip(ft).unwrap_err();
+        assert!(
+            err.0.contains("nested too deeply"),
+            "expected the depth-limit error, got: {}",
+            err.0
+        );
+    }
+}
+
+/// Property-based fuzzing for this module's hand-rolled `TBinaryProtocol`
+/// reader/writer -- exactly the class of code that has already produced a
+/// real, previously-shipped bug in this crate (the field-1281-vs-12 fix
+/// above, found by cross-checking against a real Thrift codegen file, not by
+/// fuzzing) and the class AGENTS.md flags as worth systematic fuzzing rather
+/// than relying on manual/real-workspace testing alone. A separate
+/// `#[cfg(test)]` module (not folded into `mod tests` above) purely so the
+/// `proptest!` macro's own generated items don't mix with the hand-written
+/// unit tests above; nested inside `thrift.rs` itself (not a top-level
+/// `tests/` file) so it can reach this module's private `fn`s
+/// (`OperationHandle::read`/`write`) the same way `mod tests` already does.
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        /// Every `parse_*` entry point (`OpenSession`/`ExecuteStatement`/
+        /// `GetOperationStatus`/`FetchResults`/`CloseOperation`/
+        /// `CancelOperation`/`CloseSession`) fed arbitrary bytes: must never
+        /// panic, and must return `Err` for garbage rather than hanging or
+        /// crossing the PyO3 boundary as a raw panic. Covers the whole
+        /// parsing surface in one property -- message framing
+        /// (`read_message_begin`), field dispatch, and the recursive
+        /// `skip()` used for every field a given response doesn't care about
+        /// -- since every `parse_*` function shares that same machinery
+        /// underneath (`parse_reply`).
+        #[test]
+        fn parse_functions_never_panic_on_arbitrary_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = parse_open_session(&bytes);
+            let _ = parse_execute_statement(&bytes);
+            let _ = parse_get_operation_status(&bytes);
+            let _ = parse_fetch_results(&bytes);
+            let _ = parse_close_operation(&bytes);
+            let _ = parse_cancel_operation(&bytes);
+            let _ = parse_close_session(&bytes);
+        }
+
+        /// Targeted (not random-byte) adversarial case: `skip()` recurses
+        /// into a nested `STRUCT` field's own `skip()` call, and random
+        /// bytes essentially never produce many genuine levels of that in a
+        /// row (a nesting level needs the exact 3-byte field header
+        /// `[ttype::STRUCT, id_hi, id_lo]`, out of 256^3 possibilities).
+        /// This constructs `n` levels directly -- `n` up to a few thousand,
+        /// deep enough to be a real stack-depth stress test -- to check
+        /// `skip()`'s recursion doesn't stack-overflow on a small, valid-
+        /// looking input. (Structurally, each recursion level consumes 3
+        /// bytes it can never re-read, so depth is inherently bounded by
+        /// `n`, not unbounded -- this property exists to confirm that bound
+        /// is actually safe at realistic depths, not to look for an
+        /// unbounded blow-up.)
+        #[test]
+        fn skip_never_stack_overflows_on_deeply_nested_structs(n in 0usize..4000) {
+            let mut w = Writer::new();
+            for _ in 0..n {
+                w.write_field_begin(ttype::STRUCT, 1);
+            }
+            // No STOP markers at all -- for n <= MAX_SKIP_DEPTH, `take()`
+            // hits end-of-buffer partway back up the recursion and returns
+            // `Err` that way; for n > MAX_SKIP_DEPTH, `skip_bounded`'s own
+            // depth check returns `Err` first. Either way this must return,
+            // not overflow the stack -- a real, reproduced bug found by
+            // exactly this property before `MAX_SKIP_DEPTH` existed (a few
+            // thousand levels crashed the whole process with a hard-abort
+            // stack overflow, not a catchable panic). See MAX_SKIP_DEPTH's
+            // own doc comment.
+            let bytes = w.into_bytes();
+            let mut r = Reader::new(&bytes);
+            let (ft, _id) = r.read_field_begin().unwrap();
+            prop_assert!(r.skip(ft).is_err());
+        }
+
+        /// `Reader`'s own byte-consuming primitives, exercised directly
+        /// (rather than through a `parse_*` wrapper) with arbitrary bytes --
+        /// `read_message_begin` once, then a generic field-header/`skip()`
+        /// loop mirroring every `<Struct>::read` method's own shape (the
+        /// thing `skip()` exists to make generic in the first place). Must
+        /// never panic or infinite-loop; every recursive `skip()` call is
+        /// structurally bounded by the buffer's own remaining length (each
+        /// recursion consumes at least one byte via `Reader::take` before
+        /// going any deeper, and `take` bounds-checks before ever slicing),
+        /// so this doubles as a check that a deliberately-truncated buffer
+        /// can't grow the call stack unboundedly for a small input.
+        #[test]
+        fn reader_field_loop_never_panics_on_arbitrary_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let mut r = Reader::new(&bytes);
+            let _ = r.read_message_begin();
+            loop {
+                match r.read_field_begin() {
+                    Ok((ft, _id)) if ft == ttype::STOP => break,
+                    Ok((ft, _id)) => {
+                        if r.skip(ft).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        /// Round-trip property: an arbitrary `OperationHandle` (the struct
+        /// `build_cancel_operation`/`build_get_operation_status`/
+        /// `build_close_operation`/`build_fetch_results` all serialize via
+        /// its `write`) survives `write` then `read` unchanged. This is the
+        /// one place `OperationHandle::write` is ever exercised against
+        /// `OperationHandle::read` directly -- every other test either only
+        /// writes (a request bound for a real/mock server) or only reads (a
+        /// response `parse_*` produced), so a systematic field-order/id
+        /// mismatch between the two wouldn't otherwise be caught by anything
+        /// short of a real workspace or mock-server round trip.
+        #[test]
+        fn operation_handle_round_trips_through_write_then_read(
+            guid in proptest::collection::vec(any::<u8>(), 0..64),
+            secret in proptest::collection::vec(any::<u8>(), 0..64),
+            operation_type in any::<i32>(),
+            has_result_set in any::<bool>(),
+            modified_row_count in proptest::option::of(any::<f64>().prop_filter("finite", |v| v.is_finite())),
+        ) {
+            let handle = OperationHandle {
+                operation_id: HandleId { guid: Bytes::from(guid), secret: Bytes::from(secret) },
+                operation_type,
+                has_result_set,
+                modified_row_count,
+            };
+            let mut w = Writer::new();
+            handle.write(&mut w);
+            let bytes = w.into_bytes();
+
+            let mut r = Reader::new(&bytes);
+            let round_tripped = OperationHandle::read(&mut r).unwrap();
+            prop_assert_eq!(round_tripped.operation_id.guid, handle.operation_id.guid);
+            prop_assert_eq!(round_tripped.operation_id.secret, handle.operation_id.secret);
+            prop_assert_eq!(round_tripped.operation_type, handle.operation_type);
+            prop_assert_eq!(round_tripped.has_result_set, handle.has_result_set);
+            prop_assert_eq!(round_tripped.modified_row_count, handle.modified_row_count);
+        }
     }
 }

@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 
 def write_ipc_stream(stream: Any, buf: BinaryIO) -> None: ...  # stream: anything implementing __arrow_c_stream__
 def read_ipc_stream(data: bytes) -> Any: ...  # Arrow table (__arrow_c_stream__)
@@ -8,6 +8,39 @@ class _Heartbeat:
     def __repr__(self) -> str: ...
 
 HEARTBEAT: _Heartbeat
+
+class ArrowbricksError(RuntimeError):
+    """Base class for every exception arrowbricks raises itself. Subclasses
+    RuntimeError, not Exception, so an `except RuntimeError` written before
+    this hierarchy existed keeps working unchanged -- see README.md's
+    "Errors" section."""
+
+class TransientError(ArrowbricksError):
+    """A retryable failure (network blip, connection reset, or a 5xx) that
+    survived every internal retry (`retry_attempts`) before reaching Python."""
+
+class AuthError(ArrowbricksError):
+    """HTTP 401/403, even after every internal retry re-fetched a token."""
+
+class StatementError(ArrowbricksError):
+    """The SQL statement itself failed or was canceled server-side."""
+
+class QueryStats:
+    """One query's timing/counters, handed to `on_event` exactly once, at
+    completion -- see `README.md`'s "Observability" section for the
+    field-by-field description."""
+
+    statement_id: str
+    protocol: Literal["thrift", "sea"]
+    warehouse_wait_s: float
+    submit_to_ready_s: float
+    fetch_s: float
+    num_chunks: int
+    bytes_downloaded: int
+    retry_count: int
+    concurrency_used: int
+    outcome: Literal["success", "cancelled", "timeout", "error"]
+    def __repr__(self) -> str: ...
 
 class ResultSet:
     statement_id: str
@@ -43,6 +76,9 @@ class Client:
         warehouse_confirmed_running_ttl_s: float = 30.0,
         compress_results: bool = True,
         protocol: str = "thrift",
+        on_event: Callable[[QueryStats], None | Awaitable[None]] | None = None,
+        retry_attempts: int = 6,
+        retry_max_wait_s: float = 20.0,
     ) -> None: ...
     async def execute(
         self,

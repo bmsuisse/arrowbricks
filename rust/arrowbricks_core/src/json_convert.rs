@@ -27,12 +27,13 @@ use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde_json::Value as JsonValue;
 
-use crate::client::{ApiError, ColumnDescription};
+use crate::client::{ApiError, ApiErrorKind, ColumnDescription};
 
 fn conv_err(column: &str, value: &str, type_name: &str, detail: impl std::fmt::Display) -> ApiError {
     ApiError {
         message: format!("column `{column}` (type {type_name}): could not parse {value:?}: {detail}"),
         transient: false,
+        kind: ApiErrorKind::Other,
     }
 }
 
@@ -47,6 +48,7 @@ pub fn json_array_to_record_batch(
         let type_name = col.type_name.as_deref().ok_or_else(|| ApiError {
             message: format!("column `{}` has no type_name in the manifest", col.name),
             transient: false,
+            kind: ApiErrorKind::Other,
         })?;
         let values = rows.iter().map(|row| row.get(col_idx).cloned().flatten());
         let (data_type, array) = build_column(
@@ -65,6 +67,7 @@ pub fn json_array_to_record_batch(
     RecordBatch::try_new(schema, arrays).map_err(|e| ApiError {
         message: format!("failed to assemble RecordBatch from JSON_ARRAY data: {e}"),
         transient: false,
+        kind: ApiErrorKind::Other,
     })
 }
 
@@ -152,6 +155,7 @@ fn build_column(
                 return Err(ApiError {
                     message: format!("column `{name}`: DECIMAL type missing type_precision/type_scale in manifest"),
                     transient: false,
+                    kind: ApiErrorKind::Other,
                 });
             };
             let mut out = Vec::new();
@@ -166,6 +170,7 @@ fn build_column(
                 .map_err(|e| ApiError {
                     message: format!("column `{name}`: invalid DECIMAL(precision={precision}, scale={scale}): {e}"),
                     transient: false,
+                    kind: ApiErrorKind::Other,
                 })?;
             Ok((DataType::Decimal128(precision, scale), Arc::new(array)))
         }
@@ -256,10 +261,12 @@ fn build_column(
             let type_text = type_text.ok_or_else(|| ApiError {
                 message: format!("column `{name}`: STRUCT type missing type_text in manifest"),
                 transient: false,
+                kind: ApiErrorKind::Other,
             })?;
             let field_defs = parse_struct_fields(type_text).map_err(|e| ApiError {
                 message: format!("column `{name}`: could not parse STRUCT type_text {type_text:?}: {e}"),
                 transient: false,
+                kind: ApiErrorKind::Other,
             })?;
 
             // One parsed JSON object per row (`None` = the whole struct is
@@ -332,6 +339,7 @@ fn build_column(
         other => Err(ApiError {
             message: format!("column `{name}`: type {other} isn't supported by the INLINE/JSON_ARRAY fast path"),
             transient: false,
+            kind: ApiErrorKind::Other,
         }),
     }
 }
@@ -734,5 +742,120 @@ mod tests {
         let fields = parse_struct_fields("STRUCT<a: DECIMAL(10,4) NOT NULL, b: STRING>").unwrap();
         assert_eq!(fields[0], ("a".to_string(), "DECIMAL".to_string(), Some(10), Some(4)));
         assert_eq!(fields[1], ("b".to_string(), "STRING".to_string(), None, None));
+    }
+}
+
+/// Property-based fuzzing for this module's hand-tokenized STRUCT
+/// `type_text` parser (`parse_struct_fields`/`parse_one_field`, which track
+/// `<`/`(` nesting depth manually -- see this module's own top-of-file doc
+/// comment and AGENTS.md's entry on why this exact class of code has already
+/// produced real bugs elsewhere in this crate), plus the two small
+/// hand-rolled parsers it leans on (`parse_decimal_to_i128`, `base64_decode`)
+/// and `build_column` itself. Nested `#[cfg(test)]` module, same reasoning
+/// as `thrift.rs`'s own `mod proptests` (keeps `proptest!`'s generated items
+/// separate from the hand-written unit tests above, while still reaching
+/// this module's private `fn`s).
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Biases generated strings toward the characters `parse_struct_fields`/
+    /// `parse_one_field` actually branch on (`<`, `>`, `(`, `)`, `,`, `:`,
+    /// whitespace, digits, ASCII letters) -- a plain `any::<String>()` would
+    /// almost never produce these by chance, so the depth-tracking/splitting
+    /// logic itself would barely get exercised. The second, lower-weight
+    /// branch is unrestricted (any Unicode scalar, one regex `.` per
+    /// repetition) specifically to keep byte-offset-vs-char-boundary
+    /// slicing honest -- `parse_struct_fields` slices `inner[start..i]` at
+    /// byte offsets it computes itself, so a generated string with
+    /// multi-byte characters is exactly what would catch a boundary bug.
+    fn adversarial_struct_text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => "[<>(),: a-zA-Z0-9]{0,64}",
+            1 => ".{0,64}",
+        ]
+    }
+
+    proptest! {
+        /// Fed totally arbitrary strings (not even shaped like `STRUCT<...>`)
+        /// -- must never panic, must return `Err` gracefully.
+        #[test]
+        fn parse_struct_fields_never_panics_on_arbitrary_strings(s in ".*") {
+            let _ = parse_struct_fields(&s);
+        }
+
+        /// Fed `STRUCT<...>`-shaped strings whose *inside* is adversarial --
+        /// unbalanced brackets, deeply/unevenly nested `<`/`(`, empty
+        /// fields, stray commas/colons -- specifically to exercise the
+        /// depth-tracking top-level-comma splitter, not just the
+        /// prefix/suffix check. Must never panic or hang; `Ok`/`Err` are
+        /// both acceptable outcomes, only a panic/hang is a bug.
+        #[test]
+        fn parse_struct_fields_never_panics_on_adversarial_nesting(inner in adversarial_struct_text()) {
+            let text = format!("STRUCT<{inner}>");
+            let _ = parse_struct_fields(&text);
+        }
+
+        /// `parse_one_field` (one comma-separated segment of a STRUCT's
+        /// `type_text`) fed arbitrary strings directly, bypassing
+        /// `parse_struct_fields`'s own splitting -- covers the `DECIMAL(p,s)`
+        /// branch's own nested parsing (`strip_prefix`/`strip_suffix`/
+        /// `split_once`/integer `parse`) with malformed input it wouldn't
+        /// otherwise see if every input came pre-split by a comma.
+        #[test]
+        fn parse_one_field_never_panics_on_arbitrary_strings(s in adversarial_struct_text()) {
+            let _ = parse_one_field(&s);
+        }
+
+        /// `base64_decode` -- a small, dependency-free hand-rolled decoder
+        /// (see its own doc comment) -- fed arbitrary bytes reinterpreted as
+        /// a string (so it can include invalid-alphabet characters,
+        /// unpadded/short trailing chunks, and non-ASCII bytes).
+        #[test]
+        fn base64_decode_never_panics_on_arbitrary_strings(s in ".*") {
+            let _ = base64_decode(&s);
+        }
+
+        /// `parse_decimal_to_i128` fed arbitrary strings and an arbitrary
+        /// scale (including negative, which the function clamps itself) --
+        /// must never panic (e.g. on integer overflow from a huge digit
+        /// string, or on a scale large enough to blow up the zero-padding
+        /// width).
+        #[test]
+        fn parse_decimal_to_i128_never_panics_on_arbitrary_input(s in "[-+0-9.eE]{0,40}", scale in any::<i8>()) {
+            let _ = parse_decimal_to_i128(&s, scale);
+        }
+
+        /// `build_column` (and, one level up, `json_array_to_record_batch`)
+        /// fed an arbitrary `type_name` (a mix of the real, supported
+        /// vocabulary and pure garbage) and arbitrary optional value
+        /// strings -- must never panic regardless of whether the type is
+        /// recognized or the values are well-formed for it.
+        #[test]
+        fn build_column_never_panics_on_arbitrary_type_and_values(
+            type_name in prop_oneof![
+                Just("BYTE".to_string()), Just("SHORT".to_string()), Just("INT".to_string()),
+                Just("LONG".to_string()), Just("FLOAT".to_string()), Just("DOUBLE".to_string()),
+                Just("DECIMAL".to_string()), Just("BOOLEAN".to_string()), Just("STRING".to_string()),
+                Just("DATE".to_string()), Just("TIMESTAMP".to_string()), Just("TIMESTAMP_NTZ".to_string()),
+                Just("BINARY".to_string()), Just("STRUCT".to_string()), ".*",
+            ],
+            precision in proptest::option::of(any::<u8>()),
+            scale in proptest::option::of(any::<i8>()),
+            type_text in proptest::option::of(adversarial_struct_text()),
+            values in proptest::collection::vec(proptest::option::of("[-+0-9.:TZa-zA-Z=/]{0,32}"), 0..8),
+        ) {
+            let type_text_owned = type_text.map(|inner| format!("STRUCT<{inner}>"));
+            let _ = build_column(
+                "col",
+                &type_name,
+                precision,
+                scale,
+                type_text_owned.as_deref(),
+                values.into_iter(),
+            );
+        }
     }
 }

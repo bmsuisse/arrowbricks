@@ -36,8 +36,22 @@ __all__ = [
 _HEARTBEAT_INTERVAL_S = 15.0
 
 
-class QueryTimeout(RuntimeError):
-    """Raised when a query exceeds its `total_timeout_s`."""
+class QueryTimeout(_core.ArrowbricksError):
+    """Raised when a query exceeds its `total_timeout_s`.
+
+    Unlike `TransientError`/`AuthError`/`StatementError` (see `_core`'s own
+    exception hierarchy, `create_exception!`-defined on the Rust side),
+    `QueryTimeout` is raised from Python, not across the PyO3 boundary --
+    `cursor.py`'s `fetchall_streamed`/`fetchall_arrow_streamed` translate the
+    Rust-level `HeartbeatStream`/`HeartbeatWait` timeout (a plain
+    `ArrowbricksError` there, matched on its stable `"Query exceeded {s}s
+    timeout"` message prefix) into this instead, and `await_with_heartbeat`
+    below raises it directly for the `execute_streamed` submit/poll phase.
+    It now subclasses `ArrowbricksError` (previously just `RuntimeError`) so
+    `except ArrowbricksError` is a genuine catch-all for every exception this
+    package raises itself, timeout included -- `ArrowbricksError` still
+    subclasses `RuntimeError`, so an `except RuntimeError` written before
+    this change keeps working unchanged either way."""
 
 
 class _Heartbeat:

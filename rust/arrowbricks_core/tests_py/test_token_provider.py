@@ -251,13 +251,21 @@ def test_client_rejects_both_token_and_token_provider():
         )
 
 
-@pytest.mark.parametrize("kwarg", ["http_timeout", "warehouse_start_timeout", "warehouse_confirmed_running_ttl_s"])
+@pytest.mark.parametrize(
+    "kwarg",
+    ["http_timeout", "warehouse_start_timeout", "warehouse_confirmed_running_ttl_s", "retry_max_wait_s"],
+)
 @pytest.mark.parametrize("bad_value", [-1.0, float("nan"), float("inf")])
 def test_client_rejects_invalid_duration_kwargs_with_value_error(kwarg: str, bad_value: float):
-    """Regression test: these three kwargs feed Rust's Duration::from_secs_f64,
-    which panics on negative/NaN/infinite input -- a panic crossing the PyO3
-    boundary surfaces as an opaque PanicException instead of a catchable
-    ValueError. Found via adversarial testing, not a real workload."""
+    """Regression test: the first three of these kwargs feed Rust's
+    Duration::from_secs_f64, which panics on negative/NaN/infinite input -- a
+    panic crossing the PyO3 boundary surfaces as an opaque PanicException
+    instead of a catchable ValueError. Found via adversarial testing, not a
+    real workload. `retry_max_wait_s` doesn't feed `Duration::from_secs_f64`
+    directly (it's a plain f64 used in `2f64.powi(attempt).min(...)`), but
+    shares the same validation loop in `PyDbClient::new` -- included here so
+    a future refactor that narrows that loop's scope can't silently drop it
+    without this test catching the regression."""
     with pytest.raises(ValueError, match="finite, non-negative"):
         arrowbricks_core.Client(
             host="https://example.com",
