@@ -443,38 +443,14 @@ fn parse_decimal_to_i128(s: &str, scale: i8) -> Result<i128, String> {
     Ok(if negative { -magnitude } else { magnitude })
 }
 
-/// Minimal, dependency-free base64 decoder (standard alphabet, `=` padding)
-/// -- this crate deliberately has no `base64` dependency for one field; the
-/// alphabet is small and stable enough to not be worth adding one.
+/// Standard-alphabet, `=`-padded base64 -- Databricks' BINARY column
+/// encoding. `base64` is already linked into the .so unconditionally
+/// (arrow-cast's own dependency, see Cargo.toml), so this costs nothing.
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let s = s.trim_end_matches('=');
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    for chunk in bytes.chunks(4) {
-        let mut buf = [0u8; 4];
-        for (i, &b) in chunk.iter().enumerate() {
-            buf[i] = val(b).ok_or_else(|| format!("invalid base64 byte {b:?}"))?;
-        }
-        let n = chunk.len();
-        out.push((buf[0] << 2) | (buf[1] >> 4));
-        if n > 2 {
-            out.push((buf[1] << 4) | (buf[2] >> 2));
-        }
-        if n > 3 {
-            out.push((buf[2] << 6) | buf[3]);
-        }
-    }
-    Ok(out)
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -809,10 +785,10 @@ mod proptests {
             let _ = parse_one_field(&s);
         }
 
-        /// `base64_decode` -- a small, dependency-free hand-rolled decoder
-        /// (see its own doc comment) -- fed arbitrary bytes reinterpreted as
-        /// a string (so it can include invalid-alphabet characters,
-        /// unpadded/short trailing chunks, and non-ASCII bytes).
+        /// `base64_decode` (a thin `base64` crate wrapper, see its own doc
+        /// comment) fed arbitrary bytes reinterpreted as a string (so it can
+        /// include invalid-alphabet characters, unpadded/short trailing
+        /// chunks, and non-ASCII bytes) -- must never panic.
         #[test]
         fn base64_decode_never_panics_on_arbitrary_strings(s in ".*") {
             let _ = base64_decode(&s);

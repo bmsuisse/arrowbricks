@@ -14,6 +14,12 @@ crate-type = ["cdylib", "rlib"]
 arrow = { version = "59.1.0", default-features = false, features = ["ipc"] }
 arrow-json = "59.1.0"
 bytes = "1.12.1"
+# Already an unconditional transitive dependency of arrow-cast (pulled in by
+# pyo3-arrow) at this exact version -- declared directly here too so
+# json_convert.rs can decode BINARY columns without hand-rolling base64. No
+# new code ships that wasn't already linked in (feature unification, same
+# reasoning as chrono/rustls below).
+base64 = "0.23"
 # Already an unconditional transitive dependency of pyo3-arrow (see its own
 # comment below) -- declared directly here too so json_convert.rs can parse
 # DATE/TIMESTAMP/TIMESTAMP_NTZ strings without hand-rolling calendar
