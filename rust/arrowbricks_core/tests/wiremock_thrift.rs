@@ -1546,7 +1546,10 @@ async fn mount_slow_single_chunk_statement(server: &MockServer) {
         .and(path("/_data/slow-chunk"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_raw(build_full_stream_bytes(&schema, 0, 5), "application/vnd.apache.arrow.stream")
+                .set_body_raw(
+                    build_full_stream_bytes(&schema, 0, 5),
+                    "application/vnd.apache.arrow.stream",
+                )
                 .set_delay(std::time::Duration::from_millis(500)),
         )
         .mount(server)
@@ -1587,7 +1590,11 @@ async fn thrift_total_timeout_fires_cancel_operation() {
         }
     }
     let err = last_err.expect("total_timeout_s must fire within 50 ticks of a 20ms interval against a 50ms deadline");
-    assert!(err.message.contains("0.05"), "error should mention the configured timeout: {}", err.message);
+    assert!(
+        err.message.contains("0.05"),
+        "error should mention the configured timeout: {}",
+        err.message
+    );
 
     wait_for_calls(&cancel_calls, 1).await;
     assert_eq!(
@@ -1623,9 +1630,12 @@ async fn thrift_dropping_the_heartbeat_wait_mid_fetch_fires_cancel_operation() {
     // own timeout branch, matching `task.cancel()`/`asyncio.wait_for` dropping
     // the *surrounding* coroutine, the second of the two triggers this design
     // covers.
-    let mut wait: HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)> =
-        HeartbeatWait::with_interval(fut, None, std::time::Duration::from_millis(20))
-            .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
+    let mut wait: HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)> = HeartbeatWait::with_interval(
+        fut,
+        None,
+        std::time::Duration::from_millis(20),
+    )
+    .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
 
     // One tick to prove the download is genuinely still in flight before
     // dropping, not already finished for some unrelated reason.

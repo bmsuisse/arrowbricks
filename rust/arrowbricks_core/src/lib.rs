@@ -582,9 +582,8 @@ impl PyDbClient {
         // silently wrap a pathological value like `u32::MAX as i64 + 1` into
         // some small, unrelated `u32` instead of erroring, the same "wrong
         // exception type" class of surprise this whole fix exists to close.
-        let retry_attempts = u32::try_from(retry_attempts).map_err(|_| {
-            PyValueError::new_err(format!("retry_attempts is too large: {retry_attempts}"))
-        })?;
+        let retry_attempts = u32::try_from(retry_attempts)
+            .map_err(|_| PyValueError::new_err(format!("retry_attempts is too large: {retry_attempts}")))?;
         let db_client = match (token, token_provider) {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(
@@ -618,7 +617,9 @@ impl PyDbClient {
             });
             db_client = db_client.with_on_event(sink);
         }
-        Ok(Self { inner: Arc::new(db_client) })
+        Ok(Self {
+            inner: Arc::new(db_client),
+        })
     }
 
     /// Submits the statement and starts background chunk fetching, without
@@ -812,10 +813,7 @@ impl PyResultSet {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut stream = inner.lock().await;
-            let (batches, schema) = stream
-                .fetchmany_arrow(n)
-                .await
-                .map_err(api_error_to_pyerr)?;
+            let (batches, schema) = stream.fetchmany_arrow(n).await.map_err(api_error_to_pyerr)?;
             batches_to_pytable(batches, schema)
         })
     }
@@ -825,10 +823,7 @@ impl PyResultSet {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut stream = inner.lock().await;
-            let (batches, schema) = stream
-                .fetchall_arrow()
-                .await
-                .map_err(api_error_to_pyerr)?;
+            let (batches, schema) = stream.fetchall_arrow().await.map_err(api_error_to_pyerr)?;
             batches_to_pytable(batches, schema)
         })
     }

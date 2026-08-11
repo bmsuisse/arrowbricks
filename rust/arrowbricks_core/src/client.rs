@@ -460,10 +460,12 @@ impl QueryStatsAccumulator {
         let mut current = self.warehouse_wait_bits.load(Ordering::Relaxed);
         loop {
             let new = f64::from_bits(current) + seconds;
-            match self
-                .warehouse_wait_bits
-                .compare_exchange_weak(current, new.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
-            {
+            match self.warehouse_wait_bits.compare_exchange_weak(
+                current,
+                new.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => return,
                 Err(actual) => current = actual,
             }
@@ -1126,7 +1128,11 @@ impl DbClient {
     /// see `with_retry_attempts`/`with_retry_max_wait_s`) rather than the old
     /// `RETRY_ATTEMPTS`/`RETRY_MAX_WAIT_S` constants directly, so every
     /// retryable call this client makes honors one client-wide policy.
-    async fn retry_call_tracked<F, Fut, T>(&self, stats: Option<&QueryStatsAccumulator>, mut f: F) -> Result<T, ApiError>
+    async fn retry_call_tracked<F, Fut, T>(
+        &self,
+        stats: Option<&QueryStatsAccumulator>,
+        mut f: F,
+    ) -> Result<T, ApiError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, ApiError>>,
@@ -1300,30 +1306,31 @@ impl DbClient {
         // First part doubles as the size probe -- same retry_call wrapping
         // every other download in this crate gets, so a transient failure
         // on the probe itself doesn't skip straight to a hard error.
-        let (ranged, total, head) = self.retry_call_tracked(Some(stats), || async {
-            let resp = self
-                .http
-                .get(url)
-                .header("Range", format!("bytes=0-{}", part_size - 1))
-                .timeout(self.http_timeout)
-                .send()
-                .await
-                .map_err(|e| ApiError::from_reqwest(e, true))?;
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(ApiError::from_status(status, &text, true));
-            }
-            let ranged = status == reqwest::StatusCode::PARTIAL_CONTENT;
-            let total: Option<u64> = resp
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit('/').next().and_then(|t| t.parse().ok()));
-            let head = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
-            Ok((ranged, total, head))
-        })
-        .await?;
+        let (ranged, total, head) = self
+            .retry_call_tracked(Some(stats), || async {
+                let resp = self
+                    .http
+                    .get(url)
+                    .header("Range", format!("bytes=0-{}", part_size - 1))
+                    .timeout(self.http_timeout)
+                    .send()
+                    .await
+                    .map_err(|e| ApiError::from_reqwest(e, true))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(ApiError::from_status(status, &text, true));
+                }
+                let ranged = status == reqwest::StatusCode::PARTIAL_CONTENT;
+                let total: Option<u64> = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.rsplit('/').next().and_then(|t| t.parse().ok()));
+                let head = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
+                Ok((ranged, total, head))
+            })
+            .await?;
         stats.bytes_downloaded.fetch_add(head.len() as u64, Ordering::Relaxed);
 
         if ranged && total.is_none() {
@@ -1351,23 +1358,24 @@ impl DbClient {
                 let url = url.to_string();
                 let part_stats = stats.clone();
                 handles.push(tokio::spawn(async move {
-                    let bytes = this.retry_call_tracked(Some(&part_stats), || async {
-                        let resp = this
-                            .http
-                            .get(&url)
-                            .header("Range", format!("bytes={start}-{end}"))
-                            .timeout(this.http_timeout)
-                            .send()
-                            .await
-                            .map_err(|e| ApiError::from_reqwest(e, true))?;
-                        let status = resp.status();
-                        if !status.is_success() {
-                            let text = resp.text().await.unwrap_or_default();
-                            return Err(ApiError::from_status(status, &text, true));
-                        }
-                        resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
-                    })
-                    .await;
+                    let bytes = this
+                        .retry_call_tracked(Some(&part_stats), || async {
+                            let resp = this
+                                .http
+                                .get(&url)
+                                .header("Range", format!("bytes={start}-{end}"))
+                                .timeout(this.http_timeout)
+                                .send()
+                                .await
+                                .map_err(|e| ApiError::from_reqwest(e, true))?;
+                            let status = resp.status();
+                            if !status.is_success() {
+                                let text = resp.text().await.unwrap_or_default();
+                                return Err(ApiError::from_status(status, &text, true));
+                            }
+                            resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
+                        })
+                        .await;
                     if let Ok(b) = &bytes {
                         part_stats.bytes_downloaded.fetch_add(b.len() as u64, Ordering::Relaxed);
                     }
@@ -1483,9 +1491,7 @@ impl DbClient {
         // by Databricks' own server-side TTL -- not worth surfacing an error
         // for, since this only ever runs during pool cleanup/discard, well
         // after the statement it backed already reached a terminal state.
-        let _: Result<IgnoredAny, ApiError> = self
-            .authed_json(reqwest::Method::DELETE, &url, Some(&body), None)
-            .await;
+        let _: Result<IgnoredAny, ApiError> = self.authed_json(reqwest::Method::DELETE, &url, Some(&body), None).await;
     }
 
     /// Hands back a pooled session for (`catalog`, `schema`) if one's idle,
@@ -1751,24 +1757,25 @@ impl DbClient {
                 // elsewhere in this file): cancelling an already-cancelled/
                 // already-terminal statement is a no-op, not a second
                 // execution of caller SQL.
-                let _ = self.retry_call(|| async {
-                    let token = self.token_provider.get_token().await?;
-                    let resp = self
-                        .http
-                        .post(&url)
-                        .bearer_auth(&token)
-                        .timeout(self.http_timeout)
-                        .send()
-                        .await
-                        .map_err(|e| ApiError::from_reqwest(e, true))?;
-                    let status = resp.status();
-                    if !status.is_success() {
-                        let text = resp.text().await.unwrap_or_default();
-                        return Err(ApiError::from_status(status, &text, true));
-                    }
-                    Ok(())
-                })
-                .await;
+                let _ = self
+                    .retry_call(|| async {
+                        let token = self.token_provider.get_token().await?;
+                        let resp = self
+                            .http
+                            .post(&url)
+                            .bearer_auth(&token)
+                            .timeout(self.http_timeout)
+                            .send()
+                            .await
+                            .map_err(|e| ApiError::from_reqwest(e, true))?;
+                        let status = resp.status();
+                        if !status.is_success() {
+                            let text = resp.text().await.unwrap_or_default();
+                            return Err(ApiError::from_status(status, &text, true));
+                        }
+                        Ok(())
+                    })
+                    .await;
             }
             CancelHandle::Thrift { operation } => {
                 let body = Bytes::from(thrift::build_cancel_operation(operation));
@@ -2062,9 +2069,7 @@ impl DbClient {
             "{}/api/2.0/sql/statements/{}/result/chunks/{}",
             self.host, statement_id, chunk_index
         );
-        let data: ChunkLinksBody = self
-            .authed_json(reqwest::Method::GET, &url, None, Some(stats))
-            .await?;
+        let data: ChunkLinksBody = self.authed_json(reqwest::Method::GET, &url, None, Some(stats)).await?;
         let links: Vec<String> = data.external_links.into_iter().map(|l| l.external_link).collect();
         self.fetch_pre_resolved_links(&links, compressed, stats).await
     }

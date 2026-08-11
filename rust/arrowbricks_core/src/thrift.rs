@@ -1327,7 +1327,10 @@ mod tests {
         let shallow = nested_struct_bytes(5);
         let mut r = Reader::new(&shallow);
         let (ft, _id) = r.read_field_begin().unwrap();
-        assert!(r.skip(ft).is_ok(), "a handful of nesting levels must still skip successfully");
+        assert!(
+            r.skip(ft).is_ok(),
+            "a handful of nesting levels must still skip successfully"
+        );
 
         // Comfortably past the cap -- must error, not recurse further.
         let deep = nested_struct_bytes(500);

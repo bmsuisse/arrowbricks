@@ -573,7 +573,12 @@ impl ResultStream {
 /// who cancels a `Cursor.execute()`/`stream_query_json` call mid-submit
 /// today gets no `on_event` at all for that attempt, same as before this
 /// feature existed.
-fn report_submit_error(client: &Arc<DbClient>, protocol: &'static str, submit_to_ready_s: f64, stats: &QueryStatsAccumulator) {
+fn report_submit_error(
+    client: &Arc<DbClient>,
+    protocol: &'static str,
+    submit_to_ready_s: f64,
+    stats: &QueryStatsAccumulator,
+) {
     let Some(sink) = client.on_event() else {
         return;
     };
@@ -1167,7 +1172,9 @@ async fn fetch_thrift_link(
     compressed: bool,
     stats: &Arc<QueryStatsAccumulator>,
 ) -> Result<ChunkItem, ApiError> {
-    let blob = client.fetch_link_bytes_budgeted(&work.file_link, compressed, stats).await?;
+    let blob = client
+        .fetch_link_bytes_budgeted(&work.file_link, compressed, stats)
+        .await?;
     Ok(ChunkItem {
         blob,
         row_count: Some(work.row_count),

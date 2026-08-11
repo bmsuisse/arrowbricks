@@ -1550,7 +1550,11 @@ async fn sea_total_timeout_fires_cancel_statement() {
         }
     }
     let err = last_err.expect("total_timeout_s must fire within 50 ticks of a 20ms interval against a 50ms deadline");
-    assert!(err.message.contains("0.05"), "error should mention the configured timeout: {}", err.message);
+    assert!(
+        err.message.contains("0.05"),
+        "error should mention the configured timeout: {}",
+        err.message
+    );
 
     wait_for_calls(&cancel_calls, 1).await;
     assert_eq!(
@@ -1585,9 +1589,12 @@ async fn sea_dropping_the_heartbeat_wait_mid_fetch_fires_cancel_statement() {
     // No `total_timeout_s` at all -- matches `task.cancel()`/`asyncio.wait_for`
     // dropping the *surrounding* coroutine, the second of the two triggers
     // this design covers.
-    let mut wait: HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)> =
-        HeartbeatWait::with_interval(fut, None, std::time::Duration::from_millis(20))
-            .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
+    let mut wait: HeartbeatWait<(Vec<RecordBatch>, Option<SchemaRef>)> = HeartbeatWait::with_interval(
+        fut,
+        None,
+        std::time::Duration::from_millis(20),
+    )
+    .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()));
 
     match wait.tick().await.unwrap() {
         Some(Tick::Heartbeat) => {}
