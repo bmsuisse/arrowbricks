@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.1.1
+
+- **Refactor**: hand-rolled base64 decoder in `json_convert.rs` replaced with
+  the `base64` crate. Zero `.so` growth -- `base64` (matching version) is
+  already linked in unconditionally via `arrow-cast`, so this trades ~28
+  lines of hand-rolled decode logic (and its own dedicated proptest) for a
+  direct dependency on a crate already present in the compiled binary.
+- **Cleanup**: `HeartbeatWait`/`HeartbeatStream`'s `Drop` impls and their
+  `tick()` timeout-check logic were byte-for-byte duplicated between the two
+  types. Extracted into two shared free functions
+  (`check_deadline_or_wait`/`abort_on_drop` in `heartbeat.rs`) that both
+  types now call -- one place to read/fix the abort-then-await-the-join
+  reasoning instead of two copies that could silently drift apart. No
+  behavior change; same tests cover both types before and after.
+
 ## 3.1.0
 
 - **Fix (data safety)**: `prefer_inline=True` no longer silently re-runs a

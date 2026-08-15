@@ -38,6 +38,86 @@ pub enum Tick<T> {
 /// contract as the cancel RPC/REST call itself.
 type CancelHook = Box<dyn FnOnce(bool) + Send>;
 
+/// Shared by `HeartbeatWait::tick`/`HeartbeatStream::tick`: checks whether
+/// `deadline` has already passed and, if so, fires `on_cancel(true)` --
+/// *before* `abort()`, since anything it needs to signal (e.g.
+/// `QueryStatsAccumulator::store_outcome_if_unset`) must be visible before
+/// the wrapped future's own `Drop` impls actually run -- then aborts the
+/// task and awaits the handle before returning the timeout `ApiError`.
+///
+/// That await matters: `abort()` only *requests* cancellation -- the task
+/// (running on pyo3-async-runtimes' own persistent background runtime,
+/// independent of whatever's calling `tick()`) keeps running until its next
+/// await point, where tokio actually drops it. Awaiting the handle here
+/// blocks until that drop has genuinely happened before this error ever
+/// reaches the caller -- found by testing a real timeout against a live
+/// warehouse from a short-lived script: without this, the caller can see
+/// `QueryTimeout`, decide the program is done, and exit while the orphaned
+/// task is still mid-drop; if that drop needs to touch a Python object
+/// (e.g. dropping a `token_provider` callback reference) after the
+/// interpreter has started finalizing, it panics with "The Python
+/// interpreter is not initialized". A long-running server never hits this
+/// (the interpreter stays alive), but nothing should depend on that.
+///
+/// Not yet past the deadline (or no deadline at all): returns the duration
+/// to wait for the next heartbeat/completion instead.
+async fn check_deadline_or_wait<T>(
+    handle_slot: &mut Option<JoinHandle<T>>,
+    deadline: Option<Instant>,
+    total_timeout_s: Option<f64>,
+    heartbeat_interval: Duration,
+    on_cancel: &mut Option<CancelHook>,
+) -> Result<Duration, ApiError> {
+    let Some(deadline) = deadline else {
+        return Ok(heartbeat_interval);
+    };
+    let now = Instant::now();
+    if now < deadline {
+        return Ok(heartbeat_interval.min(deadline - now));
+    }
+    if let Some(on_cancel) = on_cancel.take() {
+        on_cancel(true);
+    }
+    let handle = handle_slot
+        .as_mut()
+        .expect("tick() only calls this while a handle is still present");
+    handle.abort();
+    let _ = handle.await;
+    *handle_slot = None;
+    let secs = total_timeout_s.unwrap_or(0.0);
+    Err(ApiError {
+        message: format!("Query exceeded {secs}s timeout"),
+        transient: false,
+        kind: ApiErrorKind::Other,
+    })
+}
+
+/// Shared `Drop` logic for `HeartbeatWait`/`HeartbeatStream`: best-effort, if
+/// dropped with a task still in flight for any reason *other* than
+/// `tick()`'s own `total_timeout_s` path above (which already awaits the
+/// abort before returning) -- Python-side cancellation (`asyncio.wait_for`,
+/// `task.cancel()`) being the real one, found the same way as that fix, by
+/// testing against a live warehouse -- at least *requests* cancellation
+/// immediately. `JoinHandle::drop` alone does not abort the task: tokio
+/// explicitly leaves a dropped-but-unaborted task running fully detached to
+/// completion, so without this, an early drop for any reason would leave the
+/// task running with nothing left to observe or join it, at all, ever.
+/// `Drop::drop` can't `.await`, so this can't guarantee the task has
+/// actually finished by the time this returns -- only `tick()`'s own timeout
+/// path gives that stronger guarantee -- it only shrinks how long an
+/// orphaned task keeps running (and how long it can panic touching Python
+/// state after the interpreter starts finalizing) afterward.
+fn abort_on_drop<T>(handle_slot: &mut Option<JoinHandle<T>>, on_cancel: &mut Option<CancelHook>) {
+    if let Some(handle) = handle_slot.take() {
+        // Same ordering reasoning as `check_deadline_or_wait`: fired before
+        // `abort()`.
+        if let Some(on_cancel) = on_cancel.take() {
+            on_cancel(false);
+        }
+        handle.abort();
+    }
+}
+
 pub struct HeartbeatWait<T> {
     handle: Option<JoinHandle<Result<T, ApiError>>>,
     deadline: Option<Instant>,
@@ -101,54 +181,23 @@ impl<T: Send + 'static> HeartbeatWait<T> {
     /// StopAsyncIteration), `Err` on the wrapped future's own error or a
     /// `total_timeout_s` overrun.
     pub async fn tick(&mut self) -> Result<Option<Tick<T>>, ApiError> {
-        let Some(handle) = self.handle.as_mut() else {
+        if self.handle.is_none() {
             return Ok(None);
-        };
+        }
 
-        let wait_for = match self.deadline {
-            Some(deadline) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    // Fired *before* `abort()` -- once the task is aborted
-                    // and joined, this struct's own `on_cancel` (and
-                    // anything it captured, e.g. `ResultStream`'s shared
-                    // `QueryStatsAccumulator`) may already be unreachable
-                    // from outside; see `with_cancel`'s own doc comment.
-                    if let Some(on_cancel) = self.on_cancel.take() {
-                        on_cancel(true);
-                    }
-                    handle.abort();
-                    // `abort()` only *requests* cancellation -- the task
-                    // (running on pyo3-async-runtimes' own persistent
-                    // background runtime, independent of whatever's calling
-                    // `tick()`) keeps running until its next await point,
-                    // where tokio actually drops it. Awaiting the handle
-                    // here blocks until that drop has genuinely happened
-                    // before this error ever reaches the caller -- found by
-                    // testing a real timeout against a live warehouse from a
-                    // short-lived script: without this, the caller can see
-                    // QueryTimeout, decide the program is done, and exit
-                    // while the orphaned task is still mid-drop; if that
-                    // drop needs to touch a Python object (e.g. dropping a
-                    // token_provider callback reference) after the
-                    // interpreter has started finalizing, it panics with
-                    // "The Python interpreter is not initialized". A
-                    // long-running server never hits this (the interpreter
-                    // stays alive), but nothing should depend on that.
-                    let _ = handle.await;
-                    self.handle = None;
-                    let secs = self.total_timeout_s.unwrap_or(0.0);
-                    return Err(ApiError {
-                        message: format!("Query exceeded {secs}s timeout"),
-                        transient: false,
-                        kind: ApiErrorKind::Other,
-                    });
-                }
-                self.heartbeat_interval.min(deadline - now)
-            }
-            None => self.heartbeat_interval,
-        };
+        let wait_for = check_deadline_or_wait(
+            &mut self.handle,
+            self.deadline,
+            self.total_timeout_s,
+            self.heartbeat_interval,
+            &mut self.on_cancel,
+        )
+        .await?;
 
+        let handle = self
+            .handle
+            .as_mut()
+            .expect("check_deadline_or_wait returned Ok only when the handle is still present");
         tokio::select! {
             res = handle => {
                 self.handle = None;
@@ -163,33 +212,9 @@ impl<T: Send + 'static> HeartbeatWait<T> {
 }
 
 impl<T> Drop for HeartbeatWait<T> {
-    /// Best-effort: if this is dropped with a task still in flight for any
-    /// reason *other* than `tick()`'s own `total_timeout_s` path (which
-    /// already awaits the abort before returning -- see its comment) --
-    /// Python-side cancellation (`asyncio.wait_for`, `task.cancel()`) being
-    /// the real one, found the same way as that fix, by testing against a
-    /// live warehouse -- at least *requests* cancellation immediately.
-    /// `JoinHandle::drop` alone does not abort the task: tokio explicitly
-    /// leaves a dropped-but-unaborted task running fully detached to
-    /// completion, so without this, an early drop for any reason would leave
-    /// the task running with nothing left to observe or join it, at all,
-    /// ever. `Drop::drop` can't `.await`, so this can't guarantee the task
-    /// has actually finished by the time this returns -- only `tick()`'s own
-    /// timeout path gives that stronger guarantee -- it only shrinks how
-    /// long an orphaned task keeps running (and how long it can panic
-    /// touching Python state after the interpreter starts finalizing)
-    /// afterward.
+    /// See `abort_on_drop`'s own doc comment.
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            // Same ordering reasoning as `tick()`'s own timeout branch:
-            // fired before `abort()`, so anything it needs to signal (e.g.
-            // `QueryStatsAccumulator::store_outcome_if_unset`) is visible
-            // before the wrapped future's own `Drop` impls actually run.
-            if let Some(on_cancel) = self.on_cancel.take() {
-                on_cancel(false);
-            }
-            handle.abort();
-        }
+        abort_on_drop(&mut self.handle, &mut self.on_cancel);
     }
 }
 
@@ -251,34 +276,20 @@ impl<T: Send + 'static> HeartbeatStream<T> {
         if self.current.is_none() {
             self.current = Some(pyo3_async_runtimes::tokio::get_runtime().spawn(spawn_next()));
         }
-        let handle = self.current.as_mut().expect("just set above if it was None");
 
-        let wait_for = match self.deadline {
-            Some(deadline) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    // See `HeartbeatWait::tick`'s identical comment on why
-                    // this fires before `abort()`.
-                    if let Some(on_cancel) = self.on_cancel.take() {
-                        on_cancel(true);
-                    }
-                    handle.abort();
-                    // See HeartbeatWait::tick's identical comment on why this
-                    // await matters.
-                    let _ = handle.await;
-                    self.current = None;
-                    let secs = self.total_timeout_s.unwrap_or(0.0);
-                    return Err(ApiError {
-                        message: format!("Query exceeded {secs}s timeout"),
-                        transient: false,
-                        kind: ApiErrorKind::Other,
-                    });
-                }
-                self.heartbeat_interval.min(deadline - now)
-            }
-            None => self.heartbeat_interval,
-        };
+        let wait_for = check_deadline_or_wait(
+            &mut self.current,
+            self.deadline,
+            self.total_timeout_s,
+            self.heartbeat_interval,
+            &mut self.on_cancel,
+        )
+        .await?;
 
+        let handle = self
+            .current
+            .as_mut()
+            .expect("check_deadline_or_wait returned Ok only when the handle is still present");
         tokio::select! {
             res = handle => {
                 self.current = None;
@@ -293,15 +304,9 @@ impl<T: Send + 'static> HeartbeatStream<T> {
 }
 
 impl<T> Drop for HeartbeatStream<T> {
-    /// Same as `HeartbeatWait`'s `Drop`, for the chunk-download phase -- see
-    /// its own doc comment.
+    /// See `abort_on_drop`'s own doc comment.
     fn drop(&mut self) {
-        if let Some(handle) = self.current.take() {
-            if let Some(on_cancel) = self.on_cancel.take() {
-                on_cancel(false);
-            }
-            handle.abort();
-        }
+        abort_on_drop(&mut self.current, &mut self.on_cancel);
     }
 }
 
