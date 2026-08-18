@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.1.2
+
+- **Refactor**: `client.rs` (2,492 lines) and `pipeline.rs` (2,652 lines) split
+  into cohesive submodules, each under 900 lines -- `client/{error,model,
+  download,sea,thrift_rpc,volume}.rs` and `pipeline/{reorder,stats,sea,
+  thrift_exec,ndjson}.rs`, with slim root files re-exporting everything via
+  `pub use` so every existing `crate::client::X`/`crate::pipeline::X` path is
+  unchanged. Pure code organization -- no behavior change, no public API
+  change, same test suite passes unchanged. A code-review pass caught and
+  fixed a handful of doc comments whose "above"/"below"/"this file"
+  locality pointers went stale across the split (including one on
+  `cancel_statement` documenting a real non-idempotent-SQL-retry safety
+  invariant) and a duplicated test helper -- all corrected to point at the
+  right file.
+
 ## 3.1.1
 
 - **Refactor**: hand-rolled base64 decoder in `json_convert.rs` replaced with
