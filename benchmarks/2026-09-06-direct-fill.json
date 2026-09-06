@@ -7,12 +7,12 @@
   "verification": "All six pairs matched complete IPC results in memory; result checksums omitted. Both workers used the same table snapshot.",
   "summary": {
     "baseline": {
-      "median_total_s": 11.14952581236139,
-      "median_peak_rss_mib": 1007.9375
+      "median_total_s": 11.1495,
+      "median_peak_rss_mib": 1007.94
     },
     "candidate": {
-      "median_total_s": 12.583874229108915,
-      "median_peak_rss_mib": 1010.796875
+      "median_total_s": 12.5839,
+      "median_peak_rss_mib": 1010.8
     }
   },
   "artifacts": {
@@ -30,89 +30,90 @@
       "round": 1,
       "version": "baseline",
       "rows": 500000,
-      "total_s": 11.980196999851614,
-      "execute_s": 0.5030072079971433,
-      "fetch_s": 11.477189791854471,
+      "total_s": 11.9802,
+      "execute_s": 0.503007,
+      "fetch_s": 11.4772,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 999.9375
+      "peak_rss_mib": 999.938
     },
     {
       "round": 1,
       "version": "candidate",
       "rows": 500000,
-      "total_s": 11.986286874860525,
-      "execute_s": 0.5683406246826053,
-      "fetch_s": 11.41794625017792,
+      "total_s": 11.9863,
+      "execute_s": 0.568341,
+      "fetch_s": 11.4179,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1010.796875
+      "peak_rss_mib": 1010.8
     },
     {
       "round": 2,
       "version": "candidate",
       "rows": 500000,
-      "total_s": 9.865978416055441,
-      "execute_s": 0.4803034160286188,
-      "fetch_s": 9.385675000026822,
+      "total_s": 9.86598,
+      "execute_s": 0.480303,
+      "fetch_s": 9.38568,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1010.796875
+      "peak_rss_mib": 1010.8
     },
     {
       "round": 2,
       "version": "baseline",
       "rows": 500000,
-      "total_s": 10.949294124729931,
-      "execute_s": 0.5547032500617206,
-      "fetch_s": 10.39459087466821,
+      "total_s": 10.9493,
+      "execute_s": 0.554703,
+      "fetch_s": 10.3946,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1007.9375
+      "peak_rss_mib": 1007.94
     },
     {
       "round": 3,
       "version": "baseline",
       "rows": 500000,
-      "total_s": 11.349757499992847,
-      "execute_s": 0.501976250205189,
-      "fetch_s": 10.847781249787658,
+      "total_s": 11.3498,
+      "execute_s": 0.501976,
+      "fetch_s": 10.8478,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1007.9375
+      "peak_rss_mib": 1007.94
     },
     {
       "round": 3,
       "version": "candidate",
       "rows": 500000,
-      "total_s": 15.768097834195942,
-      "execute_s": 0.5199830001220107,
-      "fetch_s": 15.248114834073931,
+      "total_s": 15.7681,
+      "execute_s": 0.519983,
+      "fetch_s": 15.2481,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1010.796875
+      "peak_rss_mib": 1010.8
     },
     {
       "round": 4,
       "version": "candidate",
       "rows": 500000,
-      "total_s": 13.181461583357304,
-      "execute_s": 0.5235473331995308,
-      "fetch_s": 12.657914250157773,
+      "total_s": 13.1815,
+      "execute_s": 0.523547,
+      "fetch_s": 12.6579,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1010.796875
+      "peak_rss_mib": 1010.8
     },
     {
       "round": 4,
       "version": "baseline",
       "rows": 500000,
-      "total_s": 10.667221125215292,
-      "execute_s": 0.5398292914032936,
-      "fetch_s": 10.127391833811998,
+      "total_s": 10.6672,
+      "execute_s": 0.539829,
+      "fetch_s": 10.1274,
       "chunks": 35,
       "bytes_downloaded": 310614409,
-      "peak_rss_mib": 1007.9375
+      "peak_rss_mib": 1007.94
     }
-  ]
+  ],
+  "measurement_precision": "Floating-point measurements rounded to six significant digits; per-run samples retained."
 }
