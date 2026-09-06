@@ -8,12 +8,69 @@ from. Together these are what let ReplayableArrowChunk work without arro3-io
 a read-side replacement at first, breaking ReplayableArrowChunk in 1.0.0;
 these tests exist so that regression can't recur silently)."""
 
+import gc
 import io
+import sys
 
 import arro3.core as core
 import arro3.io as aio
+import pytest
 
 from arrowbricks import _core as arrowbricks_core
+
+
+def test_replayed_tables_share_the_immutable_input_and_outlive_it():
+    table = core.Table.from_pydict({"label": core.Array(["alpha", "beta", None], type=core.DataType.string())})
+    buf = io.BytesIO()
+    arrowbricks_core.write_ipc_stream(table, buf)
+    data = buf.getvalue()
+    refs = sys.getrefcount(data)
+    first = arrowbricks_core.read_ipc_stream(data)
+    second = arrowbricks_core.read_ipc_stream(data)
+    assert sys.getrefcount(data) >= refs + 2, "each replay must retain the input instead of copying its columns"
+    del data, buf
+    gc.collect()
+    assert core.Table.from_arrow(first)["label"].to_pylist() == ["alpha", "beta", None]
+    assert core.Table.from_arrow(second)["label"].to_pylist() == ["alpha", "beta", None]
+
+
+def test_read_ipc_stream_preserves_a_schema_without_batches():
+    schema = core.Schema([core.Field("id", core.DataType.int64())])
+    table = core.Table.from_batches([], schema=schema)
+    buf = io.BytesIO()
+    arrowbricks_core.write_ipc_stream(table, buf)
+    parsed = core.Table.from_arrow(arrowbricks_core.read_ipc_stream(buf.getvalue()))
+    assert parsed.num_rows == 0
+    assert parsed.schema == schema
+
+
+def test_read_ipc_stream_reads_all_batches_after_the_input_is_released():
+    schema = core.Schema([core.Field("id", core.DataType.int64())])
+    batches = [
+        core.RecordBatch.from_pydict({"id": core.Array(values, type=core.DataType.int64())})
+        for values in ([1, 2], [3, 4])
+    ]
+    table = core.Table.from_batches(batches, schema=schema)
+    buf = io.BytesIO()
+    arrowbricks_core.write_ipc_stream(table, buf)
+    parsed = arrowbricks_core.read_ipc_stream(buf.getvalue())
+    del buf, table, batches
+    gc.collect()
+    assert core.Table.from_arrow(parsed)["id"].to_pylist() == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("data", [b"", b"not IPC"])
+def test_read_ipc_stream_rejects_invalid_input(data):
+    with pytest.raises(RuntimeError):
+        arrowbricks_core.read_ipc_stream(data)
+
+
+def test_read_ipc_stream_rejects_trailing_bytes():
+    table = core.Table.from_pydict({"id": core.Array([1], type=core.DataType.int64())})
+    buf = io.BytesIO()
+    arrowbricks_core.write_ipc_stream(table, buf)
+    with pytest.raises(RuntimeError):
+        arrowbricks_core.read_ipc_stream(buf.getvalue() + b"trailing garbage")
 
 
 def test_write_ipc_stream_round_trips_an_arro3_table():

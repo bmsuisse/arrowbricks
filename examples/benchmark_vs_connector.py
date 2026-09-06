@@ -52,8 +52,9 @@ DEFAULT_SQL = "SELECT id, id * 2 AS doubled, CAST(id AS STRING) AS label FROM ra
 # `ru_maxrss` is bytes on macOS/BSD but kilobytes on Linux -- normalize to KB.
 RSS_KB = """
 import resource, sys
-_r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-_RSS_KB = _r // 1024 if sys.platform == "darwin" else _r
+def peak_rss_kb():
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return value // 1024 if sys.platform == "darwin" else value
 """
 
 ARROWBRICKS_CHILD = (
@@ -77,7 +78,7 @@ async def main():
             table = await cur.fetchall_arrow()
             times.append(time.perf_counter() - t0)
             assert table.num_rows > 0
-    print(json.dumps({"times": times[1:], "peak_rss_kb": _RSS_KB}))
+    print(json.dumps({"times": times[1:], "peak_rss_kb": peak_rss_kb()}))
 
 asyncio.run(main())
 """
@@ -111,7 +112,7 @@ try:
         cur.close()
 finally:
     conn.close()
-print(json.dumps({"times": times[1:], "peak_rss_kb": _RSS_KB}))
+print(json.dumps({"times": times[1:], "peak_rss_kb": peak_rss_kb()}))
 """
 )
 

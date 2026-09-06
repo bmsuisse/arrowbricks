@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use arrow::buffer::Buffer as ArrowBuffer;
-use arrow::datatypes::SchemaRef;
-use arrow::ipc::reader::StreamDecoder;
+use arrow_buffer::Buffer as ArrowBuffer;
+use arrow_ipc::reader::StreamDecoder;
+use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -50,7 +50,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 struct ThriftStatementReady {
     operation: thrift::OperationHandle,
     schema_bytes: Option<bytes::Bytes>,
-    lz4_compressed: bool,
+    compression: Option<bool>,
     initial_rowset: Option<(thrift::RowSet, bool)>,
     already_closed: bool,
 }
@@ -71,11 +71,9 @@ async fn submit_and_await_thrift_statement(
         .ok_or_else(|| ApiError::permanent("Thrift ExecuteStatement succeeded with no operationHandle".to_string()))?;
 
     let mut schema_bytes: Option<bytes::Bytes> = None;
-    // Fallback guess before any `TGetResultSetMetadataResp` has actually
-    // confirmed compression -- overwritten the moment one arrives, same
-    // "trust the response's stated value over what we asked for" pattern as
-    // `client/sea.rs`'s own `execute_statement`.
-    let mut lz4_compressed = client.compress_results();
+    // Preserve whether metadata actually confirmed compression, so direct
+    // links can start downloading before the next FetchResults response.
+    let mut compression = None;
     let mut initial_rowset: Option<(thrift::RowSet, bool)> = None;
     let mut already_finished = false;
     let mut already_closed = false;
@@ -84,7 +82,7 @@ async fn submit_and_await_thrift_statement(
         already_closed = direct.already_closed;
         if let Some(meta) = &direct.result_set_metadata {
             schema_bytes = meta.arrow_schema.clone();
-            lz4_compressed = meta.lz4_compressed;
+            compression = Some(meta.lz4_compressed);
         }
         if let Some(op_status) = &direct.operation_status {
             if let Some(e) = op_status.terminal_error() {
@@ -100,7 +98,7 @@ async fn submit_and_await_thrift_statement(
                 if schema_bytes.is_none() {
                     schema_bytes = meta.arrow_schema.clone();
                 }
-                lz4_compressed = meta.lz4_compressed;
+                compression = Some(meta.lz4_compressed);
             }
             let has_more = fr.has_more_rows;
             if let Some(rs) = fr.results {
@@ -125,7 +123,7 @@ async fn submit_and_await_thrift_statement(
     Ok(ThriftStatementReady {
         operation,
         schema_bytes,
-        lz4_compressed,
+        compression,
         initial_rowset,
         already_closed,
     })
@@ -425,7 +423,7 @@ async fn drive_thrift_fetch_loop(
     let ThriftStatementReady {
         operation,
         schema_bytes,
-        lz4_compressed,
+        compression,
         initial_rowset,
         already_closed,
     } = ready;
@@ -433,7 +431,7 @@ async fn drive_thrift_fetch_loop(
         &client,
         &operation,
         schema_bytes,
-        lz4_compressed,
+        compression,
         initial_rowset,
         &tx,
         &stats,
@@ -451,7 +449,7 @@ async fn drive_thrift_fetch_loop(
     // for the full duration of `thrift_close_operation_best_effort`'s
     // network round trip after the last chunk had already been downloaded,
     // decompressed and decoded. Traced against a real warehouse
-    // (`dim_article`, `LIMIT 10000`, one reused connection, warm runs): the
+    // (`benchmark_table`, `LIMIT 10000`, one reused connection, warm runs): the
     // time `fetch_at_least` spent in that last `recv()` matched the
     // `CloseOperation` RPC's own duration to within 0.1ms on every single
     // run (116-183ms, 8/8 runs), and an interleaved A/B over 16 warm runs
@@ -480,6 +478,7 @@ struct ThriftLinkWork {
     chunk_index: i64,
     row_count: i64,
     file_link: String,
+    split_limit: usize,
 }
 
 /// Downloads one `resultLinks` entry -- decode and truncation both happen
@@ -501,7 +500,7 @@ async fn fetch_thrift_link(
     stats: &Arc<QueryStatsAccumulator>,
 ) -> Result<ChunkItem, ApiError> {
     let blob = client
-        .fetch_link_bytes_budgeted(&work.file_link, compressed, stats)
+        .fetch_link_bytes_budgeted(&work.file_link, compressed, work.split_limit, stats)
         .await?;
     Ok(ChunkItem {
         blob,
@@ -523,7 +522,7 @@ async fn fetch_thrift_link(
 /// next batch's links, capping effective download concurrency at "however
 /// many links one `FetchResults` response happens to contain" instead of
 /// `chunk_fetch_concurrency` -- confirmed against a real workspace
-/// (`dim_article`, `LIMIT 500000`, 4 warm runs each): SEA (which knows its
+/// (`benchmark_table`, `LIMIT 500000`, 4 warm runs each): SEA (which knows its
 /// whole chunk manifest upfront and fans out `chunk_fetch_concurrency`
 /// downloads across the *entire* result immediately, see
 /// `client/sea.rs`'s `fetch_chunks_with_backpressure`) averaged 11.8s; this
@@ -547,11 +546,13 @@ async fn run_thrift_fetch_loop(
     client: &Arc<DbClient>,
     operation: &thrift::OperationHandle,
     mut schema_bytes: Option<bytes::Bytes>,
-    mut lz4_compressed: bool,
+    compression: Option<bool>,
     initial_rowset: Option<(thrift::RowSet, bool)>,
     tx: &mpsc::Sender<Result<ChunkItem, ApiError>>,
     stats: &Arc<QueryStatsAccumulator>,
 ) {
+    let mut metadata_confirmed = compression.is_some();
+    let mut lz4_compressed = compression.unwrap_or_else(|| client.compress_results());
     let concurrency = client.chunk_fetch_concurrency.max(1);
     let (link_tx, link_rx) = mpsc::channel::<ThriftLinkWork>(concurrency);
     let link_rx = Arc::new(tokio::sync::Mutex::new(link_rx));
@@ -609,7 +610,8 @@ async fn run_thrift_fetch_loop(
     // whole statement (legal, if unusual), the buffer is flushed at loop end
     // using the request's own `canDecompressLZ4Result` value, same fallback
     // `lz4_compressed` already starts from.
-    let mut metadata_confirmed = false;
+    // Direct results may already have confirmed it during submission. In
+    // that case downloads can overlap the very first FetchResults RPC too.
     let mut pending_until_confirmed: Vec<ThriftLinkWork> = Vec::new();
     loop {
         let (row_set, has_more) = if let Some(v) = pending.take() {
@@ -660,7 +662,7 @@ async fn run_thrift_fetch_loop(
                         // subject to the identical server-side row
                         // generation and can just as easily overshoot their
                         // own declared `rowCount`. Confirmed missing, not
-                        // hypothetical: `SELECT id, name FROM dim_article
+                        // hypothetical: `SELECT id, name FROM benchmark_table
                         // WHERE is_one_off = true LIMIT 5000` came back
                         // with 5037 rows end to end via this inline path
                         // before this fix, while the identical query via
@@ -681,6 +683,10 @@ async fn run_thrift_fetch_loop(
             }
         }
 
+        // Share the budget across all links already known in this batch.
+        // Otherwise the first workers can claim eight slots each while
+        // the remaining files wait without even starting a request.
+        let split_limit = (concurrency / row_set.result_links.len().max(1)).max(1);
         for link in row_set.result_links {
             let idx = chunk_index;
             chunk_index += 1;
@@ -689,6 +695,7 @@ async fn run_thrift_fetch_loop(
                 chunk_index: idx,
                 row_count: link.row_count,
                 file_link: link.file_link,
+                split_limit,
             };
             if metadata_confirmed {
                 // Backpressure, not an error path: a full buffer just means

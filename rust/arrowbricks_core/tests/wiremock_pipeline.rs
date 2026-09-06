@@ -9,10 +9,10 @@ mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
+use arrow_array::{Int64Array, StringArray};
+use arrow_ipc::writer::StreamWriter;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol, QueryStatsAccumulator};
 use arrowbricks_core::heartbeat::{HeartbeatWait, Tick};
 use arrowbricks_core::pipeline::{cancel_hook, execute_lazy, execute_lazy_prefer_inline, run_pipeline};

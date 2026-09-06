@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
+use arrow_array::{Float64Array, Int64Array};
+use arrow_schema::{DataType, Field, Schema};
 
 /// A two-column (`id: Int64`, `value: Float64`) batch -- used by
 /// `reorder`'s `decode_chunk_item` truncation tests and `ndjson`'s

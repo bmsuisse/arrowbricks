@@ -17,13 +17,14 @@
 
 use std::sync::Arc;
 
-use arrow::array::{
+use arrow_array::RecordBatch;
+use arrow_array::types::Date32Type;
+use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, StringArray, StructArray, TimestampMicrosecondArray,
 };
-use arrow::buffer::NullBuffer;
-use arrow::datatypes::{DataType, Date32Type, Field, Fields, Schema, TimeUnit};
-use arrow::record_batch::RecordBatch;
+use arrow_buffer::NullBuffer;
+use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde_json::Value as JsonValue;
 
@@ -524,7 +525,7 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 13);
 
-        use arrow::array::Array;
+        use arrow_array::Array;
         assert_eq!(
             batch.column(0).as_any().downcast_ref::<Int8Array>().unwrap().value(0),
             1
@@ -635,7 +636,7 @@ mod tests {
         )]];
 
         let batch = json_array_to_record_batch(&rows, &columns).unwrap();
-        use arrow::array::Array;
+        use arrow_array::Array;
         let s = batch.column(0).as_any().downcast_ref::<StructArray>().unwrap();
         assert_eq!(
             s.column_by_name("a")
@@ -691,7 +692,7 @@ mod tests {
             vec![None], // the whole struct is NULL for this row
         ];
         let batch = json_array_to_record_batch(&rows, &columns).unwrap();
-        use arrow::array::Array;
+        use arrow_array::Array;
         let s = batch.column(0).as_any().downcast_ref::<StructArray>().unwrap();
         assert!(
             s.column_by_name("a").unwrap().is_null(0),

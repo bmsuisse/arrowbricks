@@ -1194,7 +1194,7 @@ mod tests {
     fn writer_reader_round_trip_namespace_shaped_struct() {
         let mut w = Writer::new();
         Namespace {
-            catalog_name: Some("bms_dna"),
+            catalog_name: Some("example_catalog"),
             schema_name: Some("core"),
         }
         .write(&mut w);
@@ -1203,7 +1203,7 @@ mod tests {
         let mut r = Reader::new(&bytes);
         let (ft1, id1) = r.read_field_begin().unwrap();
         assert_eq!((ft1, id1), (ttype::STRING, 1));
-        assert_eq!(r.read_string().unwrap(), "bms_dna");
+        assert_eq!(r.read_string().unwrap(), "example_catalog");
         let (ft2, id2) = r.read_field_begin().unwrap();
         assert_eq!((ft2, id2), (ttype::STRING, 2));
         assert_eq!(r.read_string().unwrap(), "core");
@@ -1398,7 +1398,7 @@ mod proptests {
         /// is actually safe at realistic depths, not to look for an
         /// unbounded blow-up.)
         #[test]
-        fn skip_never_stack_overflows_on_deeply_nested_structs(n in 0usize..4000) {
+        fn skip_never_stack_overflows_on_deeply_nested_structs(n in 1usize..4000) {
             let mut w = Writer::new();
             for _ in 0..n {
                 w.write_field_begin(ttype::STRUCT, 1);

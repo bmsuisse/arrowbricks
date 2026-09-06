@@ -8,9 +8,10 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use arrow::buffer::Buffer as ArrowBuffer;
-use arrow::ipc::reader::StreamDecoder;
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
+use arrow_buffer::Buffer as ArrowBuffer;
+use arrow_ipc::reader::StreamDecoder;
+use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
@@ -81,7 +82,7 @@ impl ReorderBuffer {
 }
 
 /// Decodes a chunk's raw Arrow-IPC stream bytes into batches. Uses
-/// `StreamDecoder`'s push-based interface fed by an `arrow::buffer::Buffer`
+/// `StreamDecoder`'s push-based interface fed by an `arrow_buffer::Buffer`
 /// built directly from `blob` (`Buffer::from(bytes::Bytes)`, confirmed
 /// zero-copy in arrow-buffer's own source -- `bytes.rs`'s
 /// `impl From<bytes::Bytes> for Bytes` stores the original `bytes::Bytes` via
@@ -114,6 +115,13 @@ impl ReorderBuffer {
 /// old `StreamReader`-based version failed loudly on this input instead
 /// ("Expected schema message, found empty stream"); this restores that.
 fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
+    decode_ipc_stream(blob).map(|(batches, _)| batches)
+}
+
+/// Also used by cached Python IPC replays, retaining the input allocation
+/// through each decoded array. Returning the schema separately preserves
+/// schema-only streams that contain no record batches.
+pub(crate) fn decode_ipc_stream(blob: &Bytes) -> Result<(Vec<RecordBatch>, SchemaRef), ApiError> {
     if blob.is_empty() {
         return Err(ApiError {
             message: "empty Arrow IPC chunk: expected at least a schema message".to_string(),
@@ -142,7 +150,10 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
         transient: false,
         kind: ApiErrorKind::Other,
     })?;
-    Ok(batches)
+    let schema = decoder
+        .schema()
+        .ok_or_else(|| ApiError::permanent("Arrow IPC stream has no schema"))?;
+    Ok((batches, schema))
 }
 
 /// Decodes one chunk's blob and, only if `truncate_to` is `Some(n)` and the
@@ -153,7 +164,7 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
 /// double-decode design.
 ///
 /// The truncation itself is a real, confirmed-against-a-live-workspace
-/// requirement, not a hypothetical: `SELECT * FROM dim_article LIMIT
+/// requirement, not a hypothetical: `SELECT * FROM benchmark_table LIMIT
 /// 500000` came back with 502879 rows end to end (2879 extra) via the
 /// Thrift cloud-fetch path before this existed, while the *same* query via
 /// SEA's `EXTERNAL_LINKS` chunking came back with exactly 500000. This
@@ -214,8 +225,9 @@ pub(crate) fn decode_chunk_item(blob: &Bytes, truncate_to: Option<i64>) -> Resul
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Array, AsArray};
-    use arrow::datatypes::DataType;
+    use arrow_array::Array;
+    use arrow_array::cast::AsArray;
+    use arrow_schema::DataType;
 
     use super::*;
     use crate::pipeline::test_support::make_batch;
@@ -308,7 +320,7 @@ mod tests {
     }
 
     fn write_stream(batches: &[RecordBatch]) -> Bytes {
-        use arrow::ipc::writer::StreamWriter;
+        use arrow_ipc::writer::StreamWriter;
         let mut buf = Vec::new();
         {
             let mut writer = StreamWriter::try_new(&mut buf, &batches[0].schema()).unwrap();
@@ -342,7 +354,7 @@ mod tests {
             .iter()
             .flat_map(|b| {
                 b.column(0)
-                    .as_primitive::<arrow::datatypes::Int64Type>()
+                    .as_primitive::<arrow_array::types::Int64Type>()
                     .values()
                     .to_vec()
             })
@@ -377,7 +389,7 @@ mod tests {
             .iter()
             .flat_map(|b| {
                 b.column(0)
-                    .as_primitive::<arrow::datatypes::Int64Type>()
+                    .as_primitive::<arrow_array::types::Int64Type>()
                     .values()
                     .to_vec()
             })
@@ -402,7 +414,7 @@ mod tests {
                 .iter()
                 .flat_map(|b| {
                     b.column(0)
-                        .as_primitive::<arrow::datatypes::Int64Type>()
+                        .as_primitive::<arrow_array::types::Int64Type>()
                         .values()
                         .to_vec()
                 })
@@ -459,8 +471,8 @@ mod tests {
     /// batches, not error.
     #[test]
     fn decode_chunk_accepts_a_schema_only_stream_with_zero_batches() {
-        use arrow::datatypes::{Field, Schema};
-        use arrow::ipc::writer::StreamWriter;
+        use arrow_ipc::writer::StreamWriter;
+        use arrow_schema::{Field, Schema};
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let mut buf = Vec::new();
@@ -505,8 +517,9 @@ mod tests {
     /// `decode_chunk`, not just an empty or single-message stream.
     #[test]
     fn decode_chunk_round_trips_a_dictionary_encoded_column() {
-        use arrow::array::{DictionaryArray, Int32Array, StringArray};
-        use arrow::datatypes::{Field, Int32Type, Schema};
+        use arrow_array::types::Int32Type;
+        use arrow_array::{DictionaryArray, Int32Array, StringArray};
+        use arrow_schema::{Field, Schema};
 
         let keys = Int32Array::from(vec![0, 1, 0, 2]);
         let values = StringArray::from(vec!["a", "b", "c"]);
@@ -550,9 +563,9 @@ mod tests {
     #[test]
     #[ignore]
     fn decode_chunk_speed_vs_stream_reader() {
-        use arrow::array::{Float64Array, Int64Array, StringArray};
-        use arrow::datatypes::{Field, Schema};
-        use arrow::ipc::writer::StreamWriter;
+        use arrow_array::{Float64Array, Int64Array, StringArray};
+        use arrow_ipc::writer::StreamWriter;
+        use arrow_schema::{Field, Schema};
         use std::io::Cursor as IoCursor;
         use std::time::Instant;
 
@@ -598,7 +611,7 @@ mod tests {
         // column's data into freshly allocated buffers on every decode.
         let old_start = Instant::now();
         for _ in 0..ITERS {
-            let reader = arrow::ipc::reader::StreamReader::try_new(IoCursor::new(&blob[..]), None).unwrap();
+            let reader = arrow_ipc::reader::StreamReader::try_new(IoCursor::new(&blob[..]), None).unwrap();
             let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().unwrap();
             assert_eq!(batches[0].num_rows(), ROWS);
         }

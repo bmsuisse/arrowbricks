@@ -121,28 +121,24 @@ impl DbClient {
 
     /// Downloads one cloud-fetch link, splitting it across parallel HTTP
     /// Range requests when the shared `download_slots` budget has room to
-    /// spare -- see that field's own doc comment for the measured win and
-    /// why the large-result case is safe.
+    /// spare. `split_limit` reserves a fair share for the other links in
+    /// the same discovered batch; available permits alone do not tell us
+    /// how many workers have yet to start requesting their own slots.
     pub(crate) async fn fetch_link_bytes_budgeted(
         self: &Arc<Self>,
         url: &str,
         compressed: bool,
+        split_limit: usize,
         stats: &Arc<QueryStatsAccumulator>,
     ) -> Result<Bytes, ApiError> {
-        // One permit per download is mandatory; the worker pool already
-        // bounds concurrent links to `chunk_fetch_concurrency`, so this
-        // never blocks in practice -- it just makes the budget accounting
-        // exact. `acquire()`'s `Err` case (the semaphore closed) can't
-        // happen -- nothing in this crate ever calls `.close()` on
-        // `download_slots` -- but propagating it as a real error instead of
-        // an `.expect()` costs nothing and avoids a panic if that ever
-        // changes.
+        // One permit per file is mandatory. This can wait because other
+        // files' extra Range requests consume the same shared budget.
         let _base = self
             .download_slots
             .acquire()
             .await
             .map_err(|e| ApiError::permanent(format!("download_slots semaphore closed unexpectedly: {e}")))?;
-        let want = (MAX_SPLIT_PARTS - 1).min(self.download_slots.available_permits());
+        let want = (MAX_SPLIT_PARTS.min(split_limit.max(1)) - 1).min(self.download_slots.available_permits());
         let extra = if want > 0 {
             self.download_slots.try_acquire_many(want as u32).ok()
         } else {
@@ -156,8 +152,8 @@ impl DbClient {
             .await
     }
 
-    /// Downloads one cloud-fetch link as concurrent HTTP Range requests of
-    /// `part_size` bytes each, concatenated in order. The real object size
+    /// Downloads a `part_size` probe and spreads the remainder across
+    /// bounded parallel Range requests, concatenated in order. The real object size
     /// is learned from the first range response's `Content-Range` header --
     /// the Thrift link's own `bytesNum` is the *uncompressed* row-set size,
     /// not the file's size on blob storage, and using it produces HTTP 416.
@@ -181,10 +177,11 @@ impl DbClient {
         max_parts: u64,
         stats: &Arc<QueryStatsAccumulator>,
     ) -> Result<Bytes, ApiError> {
-        // First part doubles as the size probe -- same retry_call wrapping
-        // every other download in this crate gets, so a transient failure
-        // on the probe itself doesn't skip straight to a hard error.
-        let (ranged, total, head) = self
+        // Retry the probe as one request (headers and body). Start tail
+        // downloads as soon as its headers reveal the file size, so reading
+        // the first MiB overlaps the rest. JoinSet aborts those requests if
+        // the probe fails and retries, or the surrounding fetch is cancelled.
+        let (total, head, mut downloads) = self
             .retry_call_tracked(Some(stats), || async {
                 let resp = self
                     .http
@@ -205,96 +202,84 @@ impl DbClient {
                     .get(reqwest::header::CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.rsplit('/').next().and_then(|t| t.parse().ok()));
-                let head = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
-                Ok((ranged, total, head))
+                if ranged && total.is_none() {
+                    return Err(ApiError::permanent(
+                        "cloud-fetch link answered a Range request with 206 Partial Content but an \
+                         unparseable Content-Range header -- refusing to silently return a truncated file",
+                    ));
+                }
+
+                let mut downloads = tokio::task::JoinSet::new();
+                if let Some(total) = ranged.then_some(total).flatten() {
+                    let remaining = total.saturating_sub(part_size);
+                    let n_rest = remaining.div_ceil(part_size).min(max_parts.saturating_sub(1));
+                    let rest_size = if n_rest == 0 { 0 } else { remaining.div_ceil(n_rest) };
+                    let mut start = part_size;
+                    for index in 0..n_rest {
+                        if start >= total {
+                            break;
+                        }
+                        let end = (start + rest_size - 1).min(total - 1);
+                        let this = self.clone();
+                        let url = url.to_string();
+                        let part_stats = stats.clone();
+                        downloads.spawn(async move {
+                            let bytes = this
+                                .retry_call_tracked(Some(&part_stats), || async {
+                                    let resp = this
+                                        .http
+                                        .get(&url)
+                                        .header("Range", format!("bytes={start}-{end}"))
+                                        .timeout(this.http_timeout)
+                                        .send()
+                                        .await
+                                        .map_err(|e| ApiError::from_reqwest(e, true))?;
+                                    let status = resp.status();
+                                    if !status.is_success() {
+                                        let text = resp.text().await.unwrap_or_default();
+                                        return Err(ApiError::from_status(status, &text, true));
+                                    }
+                                    resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
+                                })
+                                .await;
+                            if let Ok(b) = &bytes {
+                                part_stats.bytes_downloaded.fetch_add(b.len() as u64, Ordering::Relaxed);
+                            }
+                            (index, bytes)
+                        });
+                        start = end + 1;
+                    }
+                }
+                let head = match resp.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        // Finish cancelling the old parts before retrying
+                        // the probe under the same download-slot budget.
+                        downloads.shutdown().await;
+                        return Err(ApiError::from_reqwest(error, true));
+                    }
+                };
+                Ok((total, head, downloads))
             })
             .await?;
         stats.bytes_downloaded.fetch_add(head.len() as u64, Ordering::Relaxed);
 
-        if ranged && total.is_none() {
-            return Err(ApiError::permanent(
-                "cloud-fetch link answered a Range request with 206 Partial Content but an \
-                 unparseable Content-Range header -- refusing to silently return a truncated \
-                 file"
-                    .to_string(),
-            ));
-        }
-
-        let mut handles = Vec::new();
-        if let Some(total) = ranged.then_some(total).flatten() {
-            // Spread everything after the probe part evenly over at most
-            // max_parts-1 further requests, so no single tail request
-            // dominates the wall clock.
-            let remaining = total.saturating_sub(part_size);
-            let n_rest = remaining.div_ceil(part_size).min(max_parts.saturating_sub(1));
-            let rest_size = if n_rest == 0 { 0 } else { remaining.div_ceil(n_rest) };
-            let mut start = part_size;
-            let mut n = 1u64;
-            while start < total && n <= n_rest {
-                let end = (start + rest_size - 1).min(total - 1);
-                let this = self.clone();
-                let url = url.to_string();
-                let part_stats = stats.clone();
-                handles.push(tokio::spawn(async move {
-                    let bytes = this
-                        .retry_call_tracked(Some(&part_stats), || async {
-                            let resp = this
-                                .http
-                                .get(&url)
-                                .header("Range", format!("bytes={start}-{end}"))
-                                .timeout(this.http_timeout)
-                                .send()
-                                .await
-                                .map_err(|e| ApiError::from_reqwest(e, true))?;
-                            let status = resp.status();
-                            if !status.is_success() {
-                                let text = resp.text().await.unwrap_or_default();
-                                return Err(ApiError::from_status(status, &text, true));
-                            }
-                            resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
-                        })
-                        .await;
-                    if let Ok(b) = &bytes {
-                        part_stats.bytes_downloaded.fetch_add(b.len() as u64, Ordering::Relaxed);
-                    }
-                    bytes
-                }));
-                start = end + 1;
-                n += 1;
+        let bytes = if downloads.is_empty() {
+            head
+        } else {
+            let mut parts = Vec::with_capacity(downloads.len());
+            while let Some(result) = downloads.join_next().await {
+                let (index, bytes) = result.map_err(join_error)?;
+                parts.push((index, bytes?));
             }
-        }
-
-        let mut out = bytes::BytesMut::with_capacity(total.unwrap_or(head.len() as u64) as usize);
-        out.extend_from_slice(&head);
-        // Parts must concatenate in order, so this can't use `JoinSet`
-        // (which yields in completion order) without tracking indices --
-        // simpler to keep the `Vec` and explicitly `.abort()` every
-        // not-yet-awaited sibling the moment one part fails, rather than
-        // silently leaving them running (a bare `?` here would return
-        // early and just drop the rest, which does NOT cancel them --
-        // `JoinHandle::drop` detaches, it doesn't abort -- leaving up to
-        // `MAX_SPLIT_PARTS - 1` sibling Range downloads, each with their
-        // own `retry_call` backoff, still in flight for a link the caller
-        // has already given up on).
-        let mut iter = handles.into_iter();
-        while let Some(h) = iter.next() {
-            match h.await {
-                Ok(Ok(part)) => out.extend_from_slice(&part),
-                Ok(Err(e)) => {
-                    for remaining in iter {
-                        remaining.abort();
-                    }
-                    return Err(e);
-                }
-                Err(join_err) => {
-                    for remaining in iter {
-                        remaining.abort();
-                    }
-                    return Err(join_error(join_err));
-                }
+            parts.sort_unstable_by_key(|(index, _)| *index);
+            let mut out = bytes::BytesMut::with_capacity(total.unwrap_or(head.len() as u64) as usize);
+            out.extend_from_slice(&head);
+            for (_, part) in parts {
+                out.extend_from_slice(&part);
             }
-        }
-        let bytes = out.freeze();
+            out.freeze()
+        };
         if let Some(t) = total
             && bytes.len() as u64 != t
         {
@@ -315,6 +300,71 @@ impl DbClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn split_download_starts_tail_requests_before_the_probe_body_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        for fail_first_probe in [false, true] {
+            let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let server_probes = probes.clone();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let tail_started = Arc::new(tokio::sync::Notify::new());
+            tokio::spawn(async move {
+                for _ in 0..if fail_first_probe { 6 } else { 3 } {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let tail_started = tail_started.clone();
+                    let probes = server_probes.clone();
+                    tokio::spawn(async move {
+                        let mut request = Vec::new();
+                        while !request.ends_with(b"\r\n\r\n") {
+                            request.push(socket.read_u8().await.unwrap());
+                        }
+                        let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                        let range = request.lines().find(|s| s.starts_with("range:")).unwrap();
+                        let (start, end) = range.split_once("bytes=").unwrap().1.split_once('-').unwrap();
+                        let start: usize = start.parse().unwrap();
+                        let end: usize = end.parse().unwrap();
+                        let headers = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/12\r\nConnection: close\r\n\r\n",
+                            end - start + 1,
+                        );
+                        socket.write_all(headers.as_bytes()).await.unwrap();
+                        if start == 0 {
+                            let first = probes.fetch_add(1, Ordering::Relaxed) == 0;
+                            tail_started.notified().await;
+                            if fail_first_probe && first {
+                                socket.write_all(b"a").await.unwrap();
+                                return; // truncated body: the whole probe must retry
+                            }
+                        } else {
+                            tail_started.notify_one();
+                        }
+                        let _ = socket.write_all(&b"abcdefghijkl"[start..=end]).await;
+                    });
+                }
+            });
+            let client = Arc::new(
+                DbClient::new(&format!("http://{address}"), "wh", "token")
+                    .with_retry_attempts(2)
+                    .with_retry_max_wait_s(0.0),
+            );
+            let stats = Arc::new(QueryStatsAccumulator::default());
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.fetch_link_bytes_split(&format!("http://{address}/blob"), false, 4, 3, &stats),
+            )
+            .await
+            .expect("tail requests must start from the probe headers, without waiting for its body")
+            .unwrap();
+            assert_eq!(&bytes[..], b"abcdefghijkl");
+            assert_eq!(probes.load(Ordering::Relaxed), if fail_first_probe { 2 } else { 1 });
+            assert_eq!(stats.retry_count.load(Ordering::Relaxed), u32::from(fail_first_probe));
+            assert!(stats.bytes_downloaded.load(Ordering::Relaxed) >= 12);
+        }
+    }
 
     /// Regression test for a real bug found by testing against an actual
     /// Databricks workspace (not just synthetic single-frame test data): a

@@ -32,6 +32,12 @@ This builds a mixed Python/Rust project: the compiled extension lands at
 `mypy`/`pyright`/`ty` type-checking -- a compiled PyO3 extension has no type
 info of its own without them.
 
+Development/test builds retain source line information for backtraces but
+omit full debug type data to reduce the Cargo cache. For full debugger
+variable inspection, run with `CARGO_PROFILE_DEV_DEBUG=2`. Incremental
+compilation stays enabled. Release builds optimize the Python/Arrow bridge
+for size while keeping the IPC decoder at its existing optimization level.
+
 ## Quickstart
 
 Importable directly (bypassing the `arrowbricks` Python wrapper) as

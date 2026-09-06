@@ -1,5 +1,36 @@
 # Changelog
 
+## 3.1.3 — 2026-09-06
+
+- Anonymized internal catalog/table references in benchmark reports,
+  source comments, test fixtures, and contributor notes.
+
+- Cloud-fetch Range downloads start the remaining requests as soon as the
+  first response's headers reveal the file size, overlapping its body
+  transfer. The split budget is shared across links in each discovered
+  batch, preventing the first files from claiming the slots their peers
+  need. Failed probe attempts cancel and join their tail requests before
+  retrying; dropped downloads cancel outstanding range tasks.
+- Cached IPC replay (`ReplayableArrowChunk` / `_core.read_ipc_stream`) now
+  shares immutable Python bytes with decoded Arrow arrays instead of copying
+  every column on every read. The input stays alive until its last consumer
+  releases it. Misaligned fixed-width buffers still use Arrow's safe copy
+  fallback. Empty/corrupt streams and trailing bytes after EOS are rejected;
+  schema-only empty results remain supported.
+- Thrift downloads start immediately when direct-result metadata already
+  confirms compression, overlapping subsequent `FetchResults` calls.
+  A complete single-response cloud-fetch file avoids an extra buffer copy.
+- Removed the Arrow umbrella dependency and three unused compute crates.
+  Development builds keep backtrace line numbers without full debug type
+  data; the Python/Arrow bridge uses size optimization separately from the
+  IPC decoder.
+- Corrected the benchmark's peak-RSS measurement, which previously sampled
+  before imports and queries. Added reproducible cached-replay and
+  interleaved, two-version warehouse benchmarks.
+- Fixed a flaky parser property-test fixture that generated zero nested
+  fields and then unwrapped a nonexistent first field; the nesting test
+  now generates at least one field. The parser itself is unchanged.
+
 ## 3.1.2
 
 - **Refactor**: `client.rs` (2,492 lines) and `pipeline.rs` (2,652 lines) split

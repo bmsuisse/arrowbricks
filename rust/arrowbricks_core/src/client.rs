@@ -416,7 +416,7 @@ impl DbClient {
             // aws-lc-rs to ring, on the theory that either transport change
             // could have moved the optimum: a first pass reported 96 as
             // ~13-16% faster than 64 on both this table and a second,
-            // larger one (fact_sales_order_invoiced, 20M rows/295 cols) --
+            // larger one (large_benchmark_table, 20M rows/295 cols) --
             // **found on review to be a false positive**. The benchmark
             // script called `connect()`/`arrowbricks.connect()` without
             // ever passing `chunk_fetch_concurrency=` explicitly, so every
@@ -431,7 +431,7 @@ impl DbClient {
             // run-to-run noise, not a code effect. Caught by re-running a
             // controlled, interleaved A/B (`chunk_fetch_concurrency=`
             // passed explicitly each time, no rebuild needed) on
-            // `dim_article`: 64/96/64/96 measured 125.60s/129.92s/137.50s/
+            // `benchmark_table`: 64/96/64/96 measured 125.60s/129.92s/137.50s/
             // 134.30s -- no consistent winner, well within run-to-run
             // noise. Reverted to 64. If re-attempting this again, always
             // pass `chunk_fetch_concurrency=` explicitly in the benchmark

@@ -26,6 +26,8 @@ mod stats;
 mod test_support;
 mod thrift_exec;
 
+pub(crate) use reorder::decode_ipc_stream;
+
 pub use ndjson::{NdjsonStream, execute_ndjson_stream};
 pub use sea::{ExecuteResult, ResultStream, execute_lazy, execute_lazy_prefer_inline, run_pipeline};
 pub use stats::cancel_hook;

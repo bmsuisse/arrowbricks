@@ -6,8 +6,8 @@ pub mod thrift;
 
 use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::{Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
+use arrow_schema::{Schema, SchemaRef};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -38,7 +38,7 @@ fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyA
     let schema = reader.schema();
     let mut ipc_buf: Vec<u8> = Vec::new();
     {
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut ipc_buf, &schema)
+        let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut ipc_buf, &schema)
             .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
         for batch in reader.by_ref() {
             let batch = batch.map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
@@ -61,13 +61,12 @@ fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyA
 /// re-parse the same cached bytes on every `__arrow_c_stream__` call.
 #[pyfunction]
 #[pyo3(signature = (data))]
-fn read_ipc_stream(data: &[u8]) -> PyResult<PyTable> {
-    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
-        .map_err(|e| PyRuntimeError::new_err(format!("bad Arrow IPC stream: {e}")))?;
-    let schema = reader.schema();
-    let batches: Vec<RecordBatch> = reader
-        .collect::<Result<_, _>>()
-        .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC decode error: {e}")))?;
+fn read_ipc_stream(data: Bound<'_, PyBytes>) -> PyResult<PyTable> {
+    // The immutable Python bytes own the memory for as long as any decoded
+    // array needs it, including arrays exported through the C Data Interface.
+    // PyBackedBytes provides that ownership without copying or custom unsafe code.
+    let blob = bytes::Bytes::from_owner(pyo3::pybacked::PyBackedBytes::from(data));
+    let (batches, schema) = pipeline::decode_ipc_stream(&blob).map_err(|e| PyRuntimeError::new_err(e.message))?;
     PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 

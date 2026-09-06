@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use arrow::datatypes::SchemaRef;
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
 use serde_json::Value;
 use tokio::sync::mpsc;
 

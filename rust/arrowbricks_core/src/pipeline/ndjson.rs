@@ -8,9 +8,11 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray};
-use arrow::datatypes::{DataType, Float32Type, Float64Type};
-use arrow::record_batch::RecordBatch;
+use arrow_array::Array;
+use arrow_array::RecordBatch;
+use arrow_array::cast::AsArray;
+use arrow_array::types::{Float32Type, Float64Type};
+use arrow_schema::DataType;
 use serde_json::Value;
 
 use crate::client::{ApiError, ApiErrorKind, CancelHandle, DbClient, Protocol, QueryStatsAccumulator, join_error};
@@ -89,8 +91,8 @@ fn non_finite_token(v: f64) -> Option<&'static str> {
 
 /// One top-level Float32/Float64 column.
 enum FloatColumn<'a> {
-    F64(usize, &'a arrow::array::Float64Array),
-    F32(usize, &'a arrow::array::Float32Array),
+    F64(usize, &'a arrow_array::Float64Array),
+    F32(usize, &'a arrow_array::Float32Array),
 }
 
 /// Rewrites each affected line's `null` (arrow-json's fixed encoding for a
@@ -433,8 +435,8 @@ mod tests {
 
     #[test]
     fn encode_ndjson_lines_leaves_a_real_null_alone_when_requested() {
-        use arrow::array::{Float64Array, Int64Array};
-        use arrow::datatypes::{Field, Schema};
+        use arrow_array::{Float64Array, Int64Array};
+        use arrow_schema::{Field, Schema};
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("value", DataType::Float64, true),

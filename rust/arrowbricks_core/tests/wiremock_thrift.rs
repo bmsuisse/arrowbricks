@@ -19,10 +19,10 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::array::{Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
+use arrow_array::{Int64Array, StringArray};
+use arrow_ipc::writer::StreamWriter;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrowbricks_core::client::{DbClient, MAX_SESSIONS_PER_KEY, Protocol};
 use arrowbricks_core::heartbeat::{HeartbeatWait, Tick};
 use arrowbricks_core::pipeline::{cancel_hook, execute_lazy_thrift, execute_ndjson_stream};
@@ -619,7 +619,7 @@ async fn thrift_ndjson_stream_actually_uses_thrift_not_sea() {
 }
 
 /// Regression test for a real bug found via a real-warehouse variety pass:
-/// `SELECT id, name FROM dim_article WHERE is_one_off = true LIMIT 5000`
+/// `SELECT id, name FROM benchmark_table WHERE is_one_off = true LIMIT 5000`
 /// came back with 5037 rows end to end (databricks-sql-connector, on
 /// either protocol, correctly returned exactly 5000 for the identical
 /// SQL) -- the server encoded more rows into the inline arrow batch than
@@ -788,6 +788,119 @@ async fn thrift_multi_batch_fetch_loop_preserves_order_across_concurrent_downloa
 // A FAILED statement surfaces as an error -- both the immediate
 // (getDirectResults) and polled (GetOperationStatus) failure paths.
 // ============================================================================
+
+#[tokio::test]
+async fn thrift_direct_metadata_starts_downloads_before_the_next_fetch_results_finishes() {
+    for nested_metadata in [false, true] {
+        let server = MockServer::start().await;
+        mount_open_session_always(&server, b"sess").await;
+        mount_close_operation_ok(&server).await;
+        let metadata = Some((false, None));
+        let direct = DirectResultsSpec {
+            operation_state: Some(operation_state::FINISHED),
+            metadata: if nested_metadata { None } else { metadata.clone() },
+            fetch: Some(FetchSpec {
+                has_more_rows: true,
+                result_links: vec![(format!("{}/_data/first", server.uri()), 1)],
+                metadata: if nested_metadata { metadata } else { None },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(IsThriftRpc("ExecuteStatement"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                build_execute_statement_resp(b"op", b"secret", Some(direct)),
+                "application/x-thrift",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(IsThriftRpc("FetchResults"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(build_fetch_results_resp(&FetchSpec::default()), "application/x-thrift")
+                    .set_delay(std::time::Duration::from_secs(2)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/_data/first"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(build_full_stream_bytes(&test_schema(), 0, 1)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut stream = execute_lazy_thrift(thrift_client(&server), "SELECT * FROM t", None, None, None)
+            .await
+            .unwrap();
+        let (first, _) = tokio::time::timeout(std::time::Duration::from_secs(1), stream.fetchmany_arrow(1))
+            .await
+            .expect("confirmed direct links must download while the next metadata RPC is still waiting")
+            .unwrap();
+        assert_ids_in_order(&first, 1);
+        assert!(stream.fetchall_arrow().await.unwrap().0.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn thrift_reserves_download_capacity_for_other_known_links() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+    let direct = DirectResultsSpec {
+        operation_state: Some(operation_state::FINISHED),
+        metadata: Some((false, None)),
+        fetch: Some(FetchSpec {
+            result_links: vec![
+                (format!("{}/_data/0", server.uri()), 1),
+                (format!("{}/_data/1", server.uri()), 1),
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    Mock::given(method("POST"))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op", b"secret", Some(direct)),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    for index in 0..2 {
+        let calls = calls.clone();
+        let bytes = build_full_stream_bytes(&test_schema(), index, index + 1);
+        Mock::given(method("GET"))
+            .and(path(format!("/_data/{index}")))
+            .respond_with(move |_: &Request| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+                    .set_body_bytes(bytes.clone())
+                    .set_delay(std::time::Duration::from_secs(2))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_protocol(Protocol::Thrift)
+            .with_concurrency(2),
+    );
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both known files must start before either slow response releases its slots");
+    assert_ids_in_order(&stream.fetchall_arrow().await.unwrap().0, 2);
+}
 
 #[tokio::test]
 async fn thrift_direct_results_error_state_fails_the_query_immediately() {
