@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.1.4 — 2026-09-07
+
+- Return a conversion error for unsupported empty STRUCT arrays instead of
+  panicking. The INLINE path reports the error without resubmitting an
+  already-succeeded statement.
+- Distribute spare cloud-fetch request slots across known files instead of
+  leaving the division remainder unused. Keep the same global concurrency
+  cap and a slot for each file when the batch fits within that cap. Repeated
+  real-warehouse comparisons showed lower large-query latency, with higher
+  peak process memory; see `benchmarks/2026-09-06-spare-slots.md`.
+- Release the Python interpreter lock while decoding cached IPC streams,
+  allowing independent replay calls to run concurrently while retaining
+  ownership of the immutable input bytes.
+- Collect NDJSON rows directly from the Arrow writer, avoiding a second
+  full-chunk JSON buffer. Preserve nulls, Unicode, row order, and non-finite
+  float handling. No new Python dependency or public API change.
+- Add reproducible CPU benchmarks and anonymized live-warehouse validation
+  in `benchmarks/2026-09-06-lowlevel.md`.
+- Add `--verify-ipc` to the two-version benchmark for private, untimed checks
+  of serialized Arrow results, including schema-only results. Suppress raw
+  worker errors so benchmark output cannot expose warehouse error details;
+  no result data or checksums are printed by the parent.
+
 ## 3.1.3 — 2026-09-06
 
 - Anonymized internal catalog/table references in benchmark reports,

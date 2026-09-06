@@ -288,10 +288,18 @@ python examples/benchmark_vs_connector.py
 For comparing arrowbricks versions with identical APIs, use
 [`examples/benchmark_versions.py`](examples/benchmark_versions.py). It keeps
 one connection per version, discards warm-ups, alternates execution order,
-passes concurrency explicitly, and checks row counts. See
+passes concurrency explicitly, and checks row counts. Add `--verify-ipc`
+(requires `arro3-core`) to compare serialized Arrow results in memory after
+timing. Results must have stable values, schema metadata, row order, and batch boundaries;
+verification contributes to peak process memory, and checksums are not printed. See
 [`benchmarks/2026-09-06.md`](benchmarks/2026-09-06.md) for replay/cache measurements
 and [`benchmarks/2026-09-06-downloads.md`](benchmarks/2026-09-06-downloads.md)
 for the subsequent cloud-fetch scheduling measurements and limits.
+
+Follow-up experiments cover [spare request slots](benchmarks/2026-09-06-spare-slots.md),
+[concurrent replay and NDJSON encoding](benchmarks/2026-09-06-lowlevel.md),
+and the rejected [LZ4 capacity](benchmarks/2026-09-06-lz4-capacity.md) and
+[direct-fill buffer](benchmarks/2026-09-06-direct-fill.md) changes.
 
 Cached IPC replay can be measured without a warehouse:
 
@@ -303,6 +311,8 @@ Replays now share immutable input bytes across decoded tables, reducing
 repeated copies and memory use. Arrow may still copy misaligned fixed-width
 buffers or decompress IPC-compressed bodies. Keeping a small slice of a
 decoded array can retain the full source allocation until that slice is released.
+Decoding releases the Python interpreter lock, so independent replay calls
+can run concurrently on separate Python threads.
 
 `BENCHMARK_SQL` overrides the query, `BENCHMARK_RUNS` (default 3) controls how many timed runs to average.
 

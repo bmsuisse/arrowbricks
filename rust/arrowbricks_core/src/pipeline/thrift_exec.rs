@@ -686,8 +686,13 @@ async fn run_thrift_fetch_loop(
         // Share the budget across all links already known in this batch.
         // Otherwise the first workers can claim eight slots each while
         // the remaining files wait without even starting a request.
-        let split_limit = (concurrency / row_set.result_links.len().max(1)).max(1);
-        for link in row_set.result_links {
+        let link_count = row_set.result_links.len().max(1);
+        for (link_position, link) in row_set.result_links.into_iter().enumerate() {
+            // Distribute the remainder too: 35 files under a 64-slot budget
+            // get 29 two-slot shares and six one-slot shares, rather than
+            // leaving 29 slots unused. Every file still gets at least one;
+            // the semaphore queues files when there are more than slots.
+            let split_limit = (concurrency / link_count + usize::from(link_position < concurrency % link_count)).max(1);
             let idx = chunk_index;
             chunk_index += 1;
             stats.chunks_seen.fetch_add(1, Ordering::Relaxed);

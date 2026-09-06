@@ -1,0 +1,234 @@
+{
+  "version": "3.1.4",
+  "purpose": "Correctness validation only; these diagnostic timings are not performance comparisons.",
+  "local_artifact": {
+    "version": "3.1.4",
+    "wheel_bytes": 3378064,
+    "wheel_sha256": "26fd9fa03f16c8e41bb192fc7aa597d427717c60d9e50e3f00af763f950cc95c",
+    "extension_bytes": 9288800,
+    "extension_sha256": "7c1f2ca82d271c6f7e64fa183ba46e3894ac4df2ef1d0f0680e640a920eca6c2",
+    "code_matches_tested_wheel": true,
+    "metadata_changes": [
+      "README documentation",
+      "SBOM build metadata"
+    ]
+  },
+  "validation": {
+    "rust_tests_passed": 121,
+    "python_tests_passed": 72,
+    "pyo3_tests_passed": 48,
+    "total_passed": 241,
+    "rust_manual_benchmarks_ignored": 3,
+    "python_tests_skipped": 1,
+    "checks": [
+      "Ruff",
+      "ty",
+      "rustfmt",
+      "Clippy",
+      "optional-dependency-free replay",
+      "local wheel/source privacy scan"
+    ],
+    "ci_python_versions": [
+      "3.11",
+      "3.12",
+      "3.13",
+      "3.14"
+    ],
+    "ci_run": 34062906090
+  },
+  "initial_strict_smoke": "Stopped on an IPC mismatch before accepting any timing sample; subsequent diagnostics below distinguish values from per-field metadata.",
+  "runs": {
+    "warm_value_checks": [
+      {
+        "pair": 1,
+        "ipc_equal": true,
+        "ordered_values_equal": true,
+        "unordered_values_equal": true,
+        "schema_equal": true,
+        "batch_rows_equal": true,
+        "batch_counts": [
+          235,
+          235
+        ],
+        "samples": [
+          {
+            "round": -1,
+            "version": "baseline",
+            "rows": 500000,
+            "total_s": 11.4726,
+            "execute_s": 0.912442,
+            "fetch_s": 10.5601,
+            "chunks": 34,
+            "bytes_downloaded": 322345442,
+            "peak_rss_mib": 1026.19
+          },
+          {
+            "round": -1,
+            "version": "candidate",
+            "rows": 500000,
+            "total_s": 11.6911,
+            "execute_s": 1.14907,
+            "fetch_s": 10.5421,
+            "chunks": 34,
+            "bytes_downloaded": 322345442,
+            "peak_rss_mib": 1096.2
+          }
+        ]
+      },
+      {
+        "pair": 2,
+        "ipc_equal": true,
+        "ordered_values_equal": true,
+        "unordered_values_equal": true,
+        "schema_equal": true,
+        "batch_rows_equal": true,
+        "batch_counts": [
+          235,
+          235
+        ],
+        "samples": [
+          {
+            "round": 0,
+            "version": "candidate",
+            "rows": 500000,
+            "total_s": 11.0302,
+            "execute_s": 0.615982,
+            "fetch_s": 10.4142,
+            "chunks": 34,
+            "bytes_downloaded": 322345442,
+            "peak_rss_mib": 1096.2
+          },
+          {
+            "round": 0,
+            "version": "baseline",
+            "rows": 500000,
+            "total_s": 12.3267,
+            "execute_s": 0.911064,
+            "fetch_s": 11.4157,
+            "chunks": 34,
+            "bytes_downloaded": 322345442,
+            "peak_rss_mib": 1104.94
+          }
+        ]
+      }
+    ],
+    "ordered_value_check": [
+      {
+        "pair": 1,
+        "ipc_equal": false,
+        "ordered_values_equal": true,
+        "unordered_values_equal": true,
+        "schema_equal": false,
+        "batch_rows_equal": true,
+        "batch_counts": [
+          218,
+          218
+        ],
+        "samples": [
+          {
+            "round": -1,
+            "version": "baseline",
+            "rows": 500000,
+            "total_s": 92.7482,
+            "execute_s": 85.047,
+            "fetch_s": 7.70118,
+            "chunks": 33,
+            "bytes_downloaded": 194697932,
+            "peak_rss_mib": 908.75
+          },
+          {
+            "round": -1,
+            "version": "candidate",
+            "rows": 500000,
+            "total_s": 8.55897,
+            "execute_s": 1.12975,
+            "fetch_s": 7.42922,
+            "chunks": 33,
+            "bytes_downloaded": 194697932,
+            "peak_rss_mib": 1033.7
+          }
+        ]
+      }
+    ],
+    "ordered_schema_diagnostic": [
+      {
+        "pair": 1,
+        "ipc_equal": false,
+        "schema_equal": false,
+        "batch_rows_equal": true,
+        "batch_counts": [
+          218,
+          218
+        ],
+        "samples": [
+          {
+            "round": -1,
+            "version": "baseline",
+            "rows": 500001,
+            "total_s": 90.9995,
+            "execute_s": 82.3017,
+            "fetch_s": 8.69778,
+            "chunks": 33,
+            "bytes_downloaded": 194698561,
+            "peak_rss_mib": 822.906
+          },
+          {
+            "round": -1,
+            "version": "candidate",
+            "rows": 500001,
+            "total_s": 8.09551,
+            "execute_s": 1.0734,
+            "fetch_s": 7.02211,
+            "chunks": 33,
+            "bytes_downloaded": 194698561,
+            "peak_rss_mib": 931.234
+          }
+        ],
+        "schema_level_metadata_equal": true,
+        "fields_differing_only_in_metadata": 120,
+        "fields_with_other_differences": 0
+      }
+    ],
+    "identical_released_code_control": [
+      {
+        "pair": 1,
+        "ipc_equal": false,
+        "schema_equal": false,
+        "batch_rows_equal": true,
+        "batch_counts": [
+          218,
+          218
+        ],
+        "samples": [
+          {
+            "round": -1,
+            "version": "baseline",
+            "rows": 500002,
+            "total_s": 84.3432,
+            "execute_s": 76.978,
+            "fetch_s": 7.36519,
+            "chunks": 33,
+            "bytes_downloaded": 194698659,
+            "peak_rss_mib": 910.562
+          },
+          {
+            "round": -1,
+            "version": "candidate",
+            "rows": 500002,
+            "total_s": 9.28098,
+            "execute_s": 1.1273,
+            "fetch_s": 8.15368,
+            "chunks": 33,
+            "bytes_downloaded": 194698659,
+            "peak_rss_mib": 882.875
+          }
+        ],
+        "schema_level_metadata_equal": true,
+        "fields_differing_only_in_metadata": 120,
+        "fields_with_other_differences": 0
+      }
+    ]
+  },
+  "privacy": "No query text, identifiers, credentials, row values, metadata contents or result hashes are included. Only compiled-artifact hashes are retained.",
+  "measurement_precision": "Floating-point measurements rounded to six significant digits."
+}

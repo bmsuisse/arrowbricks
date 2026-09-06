@@ -1,0 +1,119 @@
+{
+  "status": "rejected",
+  "baseline": "retained scheduling/IPC/NDJSON candidate",
+  "candidate": "direct-fill prototype, removed",
+  "warmup_pairs_excluded": 2,
+  "timed_pairs": 4,
+  "verification": "All six pairs matched complete IPC results in memory; result checksums omitted. Both workers used the same table snapshot.",
+  "summary": {
+    "baseline": {
+      "median_total_s": 11.1495,
+      "median_peak_rss_mib": 1007.94
+    },
+    "candidate": {
+      "median_total_s": 12.5839,
+      "median_peak_rss_mib": 1010.8
+    }
+  },
+  "artifacts": {
+    "retained": {
+      "extension_bytes": 9288800,
+      "extension_sha256": "16d12fdb36e1071b655bb11a8e21ba5f79336d9261d56ac495756f6356ad2de7"
+    },
+    "rejected": {
+      "extension_bytes": 9305312,
+      "extension_sha256": "a7296441b961d77aa60d8de27134cace848012ebe12292640970a9c49e7175b6"
+    }
+  },
+  "measurements": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.9802,
+      "execute_s": 0.503007,
+      "fetch_s": 11.4772,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 999.938
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 11.9863,
+      "execute_s": 0.568341,
+      "fetch_s": 11.4179,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1010.8
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 9.86598,
+      "execute_s": 0.480303,
+      "fetch_s": 9.38568,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1010.8
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 10.9493,
+      "execute_s": 0.554703,
+      "fetch_s": 10.3946,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1007.94
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.3498,
+      "execute_s": 0.501976,
+      "fetch_s": 10.8478,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1007.94
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 15.7681,
+      "execute_s": 0.519983,
+      "fetch_s": 15.2481,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1010.8
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 13.1815,
+      "execute_s": 0.523547,
+      "fetch_s": 12.6579,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1010.8
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 10.6672,
+      "execute_s": 0.539829,
+      "fetch_s": 10.1274,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1007.94
+    }
+  ],
+  "measurement_precision": "Floating-point measurements rounded to six significant digits; per-run samples retained."
+}

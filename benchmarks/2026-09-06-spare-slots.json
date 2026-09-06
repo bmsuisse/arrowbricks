@@ -1,0 +1,889 @@
+{
+  "artifacts": {
+    "baseline": {
+      "extension_bytes": 9288784,
+      "extension_sha256": "e239df676d6ce7dd283b0024b044931a424bc634700d3cad546ad8998d86a8fc"
+    },
+    "candidate": {
+      "extension_bytes": 9288800,
+      "extension_sha256": "b7a846218a76a5dc98a547f4b67714c958b44fd8ea49d1900a2fac977b027c7c"
+    },
+    "candidate_after_struct_fix": {
+      "extension_bytes": 9288800,
+      "extension_sha256": "16d12fdb36e1071b655bb11a8e21ba5f79336d9261d56ac495756f6356ad2de7"
+    }
+  },
+  "spare-large": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 13.4426,
+      "execute_s": 0.423418,
+      "fetch_s": 13.0192,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 969.422
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 11.4751,
+      "execute_s": 0.63389,
+      "fetch_s": 10.8412,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1032.88
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 9.97997,
+      "execute_s": 0.498482,
+      "fetch_s": 9.48149,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1086.56
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.5127,
+      "execute_s": 0.483651,
+      "fetch_s": 11.029,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 996.594
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 14.6892,
+      "execute_s": 0.445678,
+      "fetch_s": 14.2436,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1016.56
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 11.7399,
+      "execute_s": 0.638847,
+      "fetch_s": 11.1011,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1087.09
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 10.2964,
+      "execute_s": 0.461877,
+      "fetch_s": 9.8345,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1087.09
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.0688,
+      "execute_s": 0.462878,
+      "fetch_s": 10.6059,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1016.56
+    }
+  ],
+  "spare-repeat": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 15.1875,
+      "execute_s": 0.424724,
+      "fetch_s": 14.7628,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 997.828
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 9.94037,
+      "execute_s": 0.425398,
+      "fetch_s": 9.51497,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1108.89
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 9.44445,
+      "execute_s": 0.359813,
+      "fetch_s": 9.08463,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1108.89
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 10.397,
+      "execute_s": 0.47369,
+      "fetch_s": 9.9233,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 997.828
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 10.3568,
+      "execute_s": 0.450253,
+      "fetch_s": 9.90651,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1023.25
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 10.2591,
+      "execute_s": 0.458616,
+      "fetch_s": 9.80051,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1112.27
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 12.3211,
+      "execute_s": 0.374188,
+      "fetch_s": 11.9469,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1112.78
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 13.6357,
+      "execute_s": 0.491569,
+      "fetch_s": 13.1442,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1023.25
+    },
+    {
+      "round": 5,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 10.3469,
+      "execute_s": 0.436952,
+      "fetch_s": 9.90994,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1023.25
+    },
+    {
+      "round": 5,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 9.81451,
+      "execute_s": 0.463295,
+      "fetch_s": 9.35122,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1112.78
+    },
+    {
+      "round": 6,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 9.10912,
+      "execute_s": 0.430173,
+      "fetch_s": 8.67894,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1112.78
+    },
+    {
+      "round": 6,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 10.3163,
+      "execute_s": 0.460087,
+      "fetch_s": 9.8562,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1023.25
+    }
+  ],
+  "spare-control": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.7345,
+      "execute_s": 0.391761,
+      "fetch_s": 11.3428,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 939.0
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 11.1792,
+      "execute_s": 0.564736,
+      "fetch_s": 10.6145,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 982.969
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 17.3356,
+      "execute_s": 2.44633,
+      "fetch_s": 14.8893,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 982.969
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.2721,
+      "execute_s": 0.45539,
+      "fetch_s": 10.8167,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 975.344
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 11.212,
+      "execute_s": 0.418294,
+      "fetch_s": 10.7937,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 977.406
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 10.0846,
+      "execute_s": 0.447539,
+      "fetch_s": 9.6371,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1031.56
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 10.9467,
+      "execute_s": 0.383945,
+      "fetch_s": 10.5627,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1031.56
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 12.1073,
+      "execute_s": 0.422843,
+      "fetch_s": 11.6844,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 991.094
+    }
+  ],
+  "spare-small": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "total_s": 0.708343,
+      "execute_s": 0.460004,
+      "fetch_s": 0.248338,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.625
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "total_s": 0.583949,
+      "execute_s": 0.264854,
+      "fetch_s": 0.319094,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 81.6875
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "total_s": 0.679544,
+      "execute_s": 0.291808,
+      "fetch_s": 0.387736,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 83.6406
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "total_s": 0.592125,
+      "execute_s": 0.279571,
+      "fetch_s": 0.312554,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.7188
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "total_s": 0.598329,
+      "execute_s": 0.283404,
+      "fetch_s": 0.314924,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.8906
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "total_s": 0.65265,
+      "execute_s": 0.300529,
+      "fetch_s": 0.352121,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.5
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "total_s": 0.741891,
+      "execute_s": 0.299864,
+      "fetch_s": 0.442027,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.5
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "total_s": 0.623336,
+      "execute_s": 0.347764,
+      "fetch_s": 0.275572,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.0469
+    },
+    {
+      "round": 5,
+      "version": "baseline",
+      "total_s": 0.583338,
+      "execute_s": 0.304428,
+      "fetch_s": 0.27891,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.875
+    },
+    {
+      "round": 5,
+      "version": "candidate",
+      "total_s": 0.755164,
+      "execute_s": 0.362167,
+      "fetch_s": 0.392997,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.5
+    },
+    {
+      "round": 6,
+      "version": "candidate",
+      "total_s": 0.747183,
+      "execute_s": 0.307231,
+      "fetch_s": 0.439952,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.5
+    },
+    {
+      "round": 6,
+      "version": "baseline",
+      "total_s": 0.644248,
+      "execute_s": 0.3089,
+      "fetch_s": 0.335349,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.875
+    },
+    {
+      "round": 7,
+      "version": "baseline",
+      "total_s": 0.628587,
+      "execute_s": 0.283625,
+      "fetch_s": 0.344962,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.875
+    },
+    {
+      "round": 7,
+      "version": "candidate",
+      "total_s": 0.643377,
+      "execute_s": 0.272001,
+      "fetch_s": 0.371376,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.5
+    },
+    {
+      "round": 8,
+      "version": "candidate",
+      "total_s": 0.708844,
+      "execute_s": 0.286206,
+      "fetch_s": 0.422637,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 84.5
+    },
+    {
+      "round": 8,
+      "version": "baseline",
+      "total_s": 0.614704,
+      "execute_s": 0.303683,
+      "fetch_s": 0.311022,
+      "rows": 10000,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.875
+    }
+  ],
+  "spare-small-repeat": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.923718,
+      "execute_s": 0.36129,
+      "fetch_s": 0.562428,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 90.3125
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.672958,
+      "execute_s": 0.409016,
+      "fetch_s": 0.263943,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 91.5625
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.589579,
+      "execute_s": 0.261572,
+      "fetch_s": 0.328007,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 91.9219
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.636906,
+      "execute_s": 0.288323,
+      "fetch_s": 0.348583,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 94.0312
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.683784,
+      "execute_s": 0.265235,
+      "fetch_s": 0.418549,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 95.6094
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.581825,
+      "execute_s": 0.322346,
+      "fetch_s": 0.259479,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 92.5625
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.614832,
+      "execute_s": 0.283043,
+      "fetch_s": 0.331789,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 92.9688
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.63245,
+      "execute_s": 0.276691,
+      "fetch_s": 0.355759,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 96.5938
+    },
+    {
+      "round": 5,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.645693,
+      "execute_s": 0.258054,
+      "fetch_s": 0.38764,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 96.6094
+    },
+    {
+      "round": 5,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.673729,
+      "execute_s": 0.256461,
+      "fetch_s": 0.417268,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 93.0156
+    },
+    {
+      "round": 6,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.614253,
+      "execute_s": 0.263964,
+      "fetch_s": 0.350289,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 93.0312
+    },
+    {
+      "round": 6,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.586198,
+      "execute_s": 0.295977,
+      "fetch_s": 0.29022,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 96.6094
+    },
+    {
+      "round": 7,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.567087,
+      "execute_s": 0.267603,
+      "fetch_s": 0.299485,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 96.6094
+    },
+    {
+      "round": 7,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.674185,
+      "execute_s": 0.297894,
+      "fetch_s": 0.376291,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 93.0312
+    },
+    {
+      "round": 8,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.701325,
+      "execute_s": 0.278563,
+      "fetch_s": 0.422762,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 93.0312
+    },
+    {
+      "round": 8,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.661188,
+      "execute_s": 0.283085,
+      "fetch_s": 0.378103,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 96.6094
+    }
+  ],
+  "spare-small-control": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.847888,
+      "execute_s": 0.338298,
+      "fetch_s": 0.50959,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 82.8281
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.55944,
+      "execute_s": 0.280713,
+      "fetch_s": 0.278727,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 85.4531
+    },
+    {
+      "round": 2,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.518584,
+      "execute_s": 0.26136,
+      "fetch_s": 0.257224,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 87.8125
+    },
+    {
+      "round": 2,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.629668,
+      "execute_s": 0.273296,
+      "fetch_s": 0.356371,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 82.8281
+    },
+    {
+      "round": 3,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.649935,
+      "execute_s": 0.331925,
+      "fetch_s": 0.31801,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 82.8438
+    },
+    {
+      "round": 3,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.638191,
+      "execute_s": 0.294511,
+      "fetch_s": 0.343681,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 88.3438
+    },
+    {
+      "round": 4,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.843956,
+      "execute_s": 0.282272,
+      "fetch_s": 0.561684,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 90.3281
+    },
+    {
+      "round": 4,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.603108,
+      "execute_s": 0.276714,
+      "fetch_s": 0.326394,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 83.0
+    },
+    {
+      "round": 5,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.622636,
+      "execute_s": 0.288012,
+      "fetch_s": 0.334624,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.0312
+    },
+    {
+      "round": 5,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.612659,
+      "execute_s": 0.285183,
+      "fetch_s": 0.327476,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 90.3281
+    },
+    {
+      "round": 6,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.764609,
+      "execute_s": 0.288715,
+      "fetch_s": 0.475894,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 90.3281
+    },
+    {
+      "round": 6,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.577978,
+      "execute_s": 0.269606,
+      "fetch_s": 0.308373,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.0469
+    },
+    {
+      "round": 7,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.787279,
+      "execute_s": 0.252301,
+      "fetch_s": 0.534978,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.0469
+    },
+    {
+      "round": 7,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.579384,
+      "execute_s": 0.272527,
+      "fetch_s": 0.306856,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 90.3281
+    },
+    {
+      "round": 8,
+      "version": "candidate",
+      "rows": 10000,
+      "total_s": 0.632031,
+      "execute_s": 0.344583,
+      "fetch_s": 0.287448,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 90.3281
+    },
+    {
+      "round": 8,
+      "version": "baseline",
+      "rows": 10000,
+      "total_s": 0.85437,
+      "execute_s": 0.296357,
+      "fetch_s": 0.558013,
+      "chunks": 1,
+      "bytes_downloaded": 6074427,
+      "peak_rss_mib": 86.0469
+    }
+  ],
+  "spare-final-smoke": [
+    {
+      "round": 1,
+      "version": "baseline",
+      "rows": 500000,
+      "total_s": 14.3497,
+      "execute_s": 0.47181,
+      "fetch_s": 13.8779,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1001.47
+    },
+    {
+      "round": 1,
+      "version": "candidate",
+      "rows": 500000,
+      "total_s": 11.9394,
+      "execute_s": 0.679431,
+      "fetch_s": 11.2599,
+      "chunks": 35,
+      "bytes_downloaded": 310614409,
+      "peak_rss_mib": 1005.27
+    }
+  ],
+  "measurement_precision": "Floating-point measurements rounded to six significant digits; per-run samples retained."
+}
