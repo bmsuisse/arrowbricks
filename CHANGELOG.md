@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.1.4 — 2026-09-06
+## 3.1.4 — 2026-09-07
 
 - Return a conversion error for unsupported empty STRUCT arrays instead of
   panicking. The INLINE path reports the error without resubmitting an

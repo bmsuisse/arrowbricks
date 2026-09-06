@@ -290,7 +290,7 @@ For comparing arrowbricks versions with identical APIs, use
 one connection per version, discards warm-ups, alternates execution order,
 passes concurrency explicitly, and checks row counts. Add `--verify-ipc`
 (requires `arro3-core`) to compare serialized Arrow results in memory after
-timing. Results must have stable values, row order, and batch boundaries;
+timing. Results must have stable values, schema metadata, row order, and batch boundaries;
 verification contributes to peak process memory, and checksums are not printed. See
 [`benchmarks/2026-09-06.md`](benchmarks/2026-09-06.md) for replay/cache measurements
 and [`benchmarks/2026-09-06-downloads.md`](benchmarks/2026-09-06-downloads.md)
