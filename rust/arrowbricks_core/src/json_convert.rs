@@ -334,7 +334,8 @@ fn build_column(
 
             let validity: Vec<bool> = rows_parsed.iter().map(Option::is_some).collect();
             let fields = Fields::from(child_fields);
-            let struct_array = StructArray::new(fields.clone(), child_arrays, Some(NullBuffer::from(validity)));
+            let struct_array = StructArray::try_new(fields.clone(), child_arrays, Some(NullBuffer::from(validity)))
+                .map_err(|e| ApiError::permanent(format!("column `{name}`: invalid STRUCT array: {e}")))?;
             Ok((DataType::Struct(fields), Arc::new(struct_array)))
         }
         other => Err(ApiError {
@@ -700,6 +701,15 @@ mod tests {
         );
         assert!(!s.is_null(0), "row 0's struct itself is present, just one null field");
         assert!(s.is_null(1), "row 1's whole struct must be null");
+    }
+
+    #[test]
+    fn empty_struct_returns_a_conversion_error_instead_of_panicking() {
+        let columns = vec![struct_col("s", "STRUCT<>")];
+        for rows in [vec![], vec![vec![Some("{}".to_string())]], vec![vec![None]]] {
+            let err = json_array_to_record_batch(&rows, &columns).unwrap_err();
+            assert!(err.message.contains("invalid STRUCT array"));
+        }
     }
 
     #[test]
