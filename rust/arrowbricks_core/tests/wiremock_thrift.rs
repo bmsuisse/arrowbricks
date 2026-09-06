@@ -1457,6 +1457,61 @@ async fn mount_single_link_statement(server: &MockServer, link_path: &'static st
 }
 
 #[tokio::test]
+async fn thrift_distributes_spare_slots_across_known_links() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+    let direct = DirectResultsSpec {
+        operation_state: Some(operation_state::FINISHED),
+        metadata: Some((false, None)),
+        fetch: Some(FetchSpec {
+            result_links: vec![
+                (format!("{}/_data/first", server.uri()), 60_000),
+                (format!("{}/_data/second", server.uri()), 60_000),
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    Mock::given(method("POST"))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op", b"secret", Some(direct)),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let first = mount_ranged_blob(
+        &server,
+        "/_data/first",
+        build_full_stream_bytes(&test_schema(), 0, 60_000),
+    )
+    .await;
+    let second = mount_ranged_blob(
+        &server,
+        "/_data/second",
+        build_full_stream_bytes(&test_schema(), 60_000, 120_000),
+    )
+    .await;
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_protocol(Protocol::Thrift)
+            .with_concurrency(3),
+    );
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _) = stream.fetchall_arrow().await.unwrap();
+    assert_ids_in_order(&batches, 120_000);
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        2,
+        "the spare slot should split the first file"
+    );
+    assert_eq!(second.load(Ordering::SeqCst), 1, "the second file keeps its own slot");
+}
+
+#[tokio::test]
 async fn thrift_single_link_downloads_via_parallel_range_requests() {
     let server = MockServer::start().await;
     // 60,000 rows of `id: i64, label: "row_{i}"` comfortably clears the
