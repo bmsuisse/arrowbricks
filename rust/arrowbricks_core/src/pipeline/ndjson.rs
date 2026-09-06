@@ -6,6 +6,7 @@
 //! `Infinity`/`-Infinity`) string-patching arrow-json's own fixed encoding
 //! needs help with.
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use arrow_array::Array;
@@ -21,6 +22,37 @@ use super::reorder::{ReorderBuffer, decode_chunk_item};
 use super::sea::submit_sea_and_report;
 use super::stats::{ReportOnDrop, StatsReporter};
 use super::thrift_exec::{ThriftSubmitResult, submit_thrift_and_start_fetch};
+
+/// Collect rows as Arrow writes them, avoiding a second, chunk-sized buffer.
+/// Writes may end within a row (or even a UTF-8 character).
+struct LineCollector {
+    lines: Vec<String>,
+    pending: Vec<u8>,
+}
+
+impl Write for LineCollector {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut start = 0;
+        for end in memchr::memchr_iter(b'\n', bytes) {
+            let line = &bytes[start..end];
+            let row = if self.pending.is_empty() {
+                line.to_vec()
+            } else {
+                self.pending.extend_from_slice(line);
+                std::mem::take(&mut self.pending)
+            };
+            self.lines
+                .push(String::from_utf8(row).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?);
+            start = end + 1;
+        }
+        self.pending.extend_from_slice(&bytes[start..]);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Converts one chunk's decoded batches into NDJSON lines, one per row, in
 /// arro3-`write_ndjson(explicit_nulls=True)`-compatible format: null-valued
@@ -43,10 +75,13 @@ fn encode_ndjson_lines(batches: &[RecordBatch], non_finite_as_string: bool) -> R
     if batches.is_empty() {
         return Ok(Vec::new());
     }
-    let mut buf = Vec::new();
+    let mut output = LineCollector {
+        lines: Vec::with_capacity(batches.iter().map(RecordBatch::num_rows).sum()),
+        pending: Vec::new(),
+    };
     {
         let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
-        let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut buf);
+        let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut output);
         let refs: Vec<&RecordBatch> = batches.iter().collect();
         writer.write_batches(&refs).map_err(|e| ApiError {
             message: format!("NDJSON encode error: {e}"),
@@ -59,15 +94,10 @@ fn encode_ndjson_lines(batches: &[RecordBatch], non_finite_as_string: bool) -> R
             kind: ApiErrorKind::Other,
         })?;
     }
-    let mut lines: Vec<String> = String::from_utf8(buf)
-        .map_err(|e| ApiError {
-            message: format!("NDJSON encode produced invalid UTF-8: {e}"),
-            transient: false,
-            kind: ApiErrorKind::Other,
-        })?
-        .lines()
-        .map(|line| line.to_string())
-        .collect();
+    if !output.pending.is_empty() {
+        return Err(ApiError::permanent("NDJSON encode produced an unterminated row"));
+    }
+    let mut lines = output.lines;
 
     if non_finite_as_string {
         patch_non_finite_floats(batches, &mut lines);
@@ -368,6 +398,120 @@ pub async fn execute_ndjson_stream(
 mod tests {
     use super::*;
     use crate::pipeline::test_support::make_batch;
+
+    fn encode_ndjson_reference(batches: &[RecordBatch], non_finite_as_string: bool) -> Result<Vec<String>, ApiError> {
+        if batches.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut buf = Vec::new();
+        {
+            let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
+            let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut buf);
+            let refs: Vec<&RecordBatch> = batches.iter().collect();
+            writer.write_batches(&refs).map_err(|e| ApiError {
+                message: format!("NDJSON encode error: {e}"),
+                transient: false,
+                kind: ApiErrorKind::Other,
+            })?;
+            writer.finish().map_err(|e| ApiError {
+                message: format!("NDJSON encode error: {e}"),
+                transient: false,
+                kind: ApiErrorKind::Other,
+            })?;
+        }
+        let mut lines: Vec<String> = String::from_utf8(buf)
+            .map_err(|e| ApiError {
+                message: format!("NDJSON encode produced invalid UTF-8: {e}"),
+                transient: false,
+                kind: ApiErrorKind::Other,
+            })?
+            .lines()
+            .map(|line| line.to_string())
+            .collect();
+
+        if non_finite_as_string {
+            patch_non_finite_floats(batches, &mut lines);
+        }
+        Ok(lines)
+    }
+
+    #[test]
+    fn line_collector_handles_split_unicode_and_rejects_invalid_utf8() {
+        let mut output = LineCollector {
+            lines: Vec::new(),
+            pending: Vec::new(),
+        };
+        for byte in "{\"label\":\"café 🦀\"}\n{}\n".as_bytes() {
+            output.write_all(&[*byte]).unwrap();
+        }
+        assert_eq!(output.lines, ["{\"label\":\"café 🦀\"}", "{}"]);
+        assert!(output.pending.is_empty());
+        assert_eq!(
+            output.write_all(&[0xff, b'\n']).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    fn text_batch(rows: usize, columns: usize, width: usize) -> RecordBatch {
+        use arrow_array::StringArray;
+        use arrow_schema::{Field, Schema};
+        let value = format!("café 🦀 \"quoted\"\n{}", "x".repeat(width));
+        let array = Arc::new(StringArray::from_iter(
+            (0..rows).map(|i| (i % 7 != 0).then_some(value.as_str())),
+        ));
+        let fields = (0..columns)
+            .map(|i| Field::new(format!("c{i}"), DataType::Utf8, true))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            (0..columns).map(|_| array.clone() as _).collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn collected_ndjson_matches_reference_for_large_unicode_rows_and_multiple_batches() {
+        let batches = vec![
+            text_batch(20, 3, 12000),
+            text_batch(0, 3, 12000),
+            text_batch(17, 3, 12000),
+        ];
+        let expected = encode_ndjson_reference(&batches, false).unwrap();
+        let actual = encode_ndjson_lines(&batches, false).unwrap();
+        assert_eq!(actual.len(), 37);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "manual release-mode allocation/encoding benchmark"]
+    fn benchmark_ndjson_collector() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for (name, rows, columns, width) in [("narrow", 100000, 4, 16), ("wide", 20000, 32, 96)] {
+            let batches = vec![text_batch(rows, columns, width)];
+            assert_eq!(
+                encode_ndjson_lines(&batches, false).unwrap(),
+                encode_ndjson_reference(&batches, false).unwrap()
+            );
+            for round in 0..9 {
+                for candidate in if round % 2 == 0 { [false, true] } else { [true, false] } {
+                    let start = Instant::now();
+                    let lines = if candidate {
+                        encode_ndjson_lines(black_box(&batches), false)
+                    } else {
+                        encode_ndjson_reference(black_box(&batches), false)
+                    }
+                    .unwrap();
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    black_box(&lines);
+                    println!(
+                        "{}",
+                        serde_json::json!({"workload":name,"round":round,"candidate":candidate,"ms":elapsed,"rows":lines.len(),"bytes":lines.iter().map(String::len).sum::<usize>()})
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn non_finite_token_covers_nan_and_both_infinities_only() {

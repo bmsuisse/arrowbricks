@@ -190,6 +190,7 @@ dependencies = [
  "chrono",
  "hyper-rustls",
  "lz4_flex",
+ "memchr",
  "proptest",
  "pyo3",
  "pyo3-arrow",

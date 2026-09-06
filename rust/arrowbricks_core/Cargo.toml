@@ -16,6 +16,8 @@ arrow-ipc = "59.1.0"
 arrow-schema = "59.1.0"
 arrow-json = "59.1.0"
 bytes = "1.12.1"
+# Already in the dependency graph; vectorized newline search in NDJSON output.
+memchr = "2"
 # Already an unconditional transitive dependency of arrow-cast (pulled in by
 # pyo3-arrow) at this exact version -- declared directly here too so
 # json_convert.rs can decode BINARY columns without hand-rolling base64. No
