@@ -127,3 +127,40 @@ def test_read_ipc_stream_result_is_callable_more_than_once():
     second = arrowbricks_core.read_ipc_stream(data)
     assert first.num_rows == 3
     assert second.num_rows == 3
+
+
+def test_read_ipc_stream_allows_another_python_thread_to_run():
+    import threading
+
+    table = core.Table.from_pydict(
+        {"label": core.Array(["synthetic text " * 16] * 100_000, type=core.DataType.string())}
+    )
+    buf = io.BytesIO()
+    arrowbricks_core.write_ipc_stream(table, buf)
+    data = buf.getvalue()
+    ready = threading.Event()
+    go = threading.Event()
+    progressed = threading.Event()
+
+    def other_thread():
+        ready.set()
+        go.wait()
+        progressed.set()
+
+    thread = threading.Thread(target=other_thread)
+    thread.start()
+    ready.wait()
+    previous = sys.getswitchinterval()
+    try:
+        # Prevent a periodic Python bytecode switch from satisfying the test.
+        # The decoder itself must release the interpreter for the worker.
+        sys.setswitchinterval(10)
+        go.set()
+        result = arrowbricks_core.read_ipc_stream(data)
+        ran_during_decode = progressed.is_set()
+    finally:
+        sys.setswitchinterval(previous)
+        go.set()
+        thread.join(timeout=5)
+    assert result.num_rows == 100_000
+    assert ran_during_decode, "IPC decoding must release the interpreter lock"

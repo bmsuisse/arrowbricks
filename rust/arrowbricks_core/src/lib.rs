@@ -62,11 +62,14 @@ fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyA
 #[pyfunction]
 #[pyo3(signature = (data))]
 fn read_ipc_stream(data: Bound<'_, PyBytes>) -> PyResult<PyTable> {
+    let py = data.py();
     // The immutable Python bytes own the memory for as long as any decoded
     // array needs it, including arrays exported through the C Data Interface.
     // PyBackedBytes provides that ownership without copying or custom unsafe code.
     let blob = bytes::Bytes::from_owner(pyo3::pybacked::PyBackedBytes::from(data));
-    let (batches, schema) = pipeline::decode_ipc_stream(&blob).map_err(|e| PyRuntimeError::new_err(e.message))?;
+    let (batches, schema) = py
+        .detach(|| pipeline::decode_ipc_stream(&blob))
+        .map_err(|e| PyRuntimeError::new_err(e.message))?;
     PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
