@@ -36,18 +36,15 @@ use super::model::QueryStatsAccumulator;
 /// after each `EndMark` and picks up the next concatenated frame on a
 /// subsequent `read_to_end` call against the *same* instance (verified: the
 /// decoder's position in the underlying byte slice carries over across
-/// calls) -- so looping `read_to_end` on one decoder until it stops growing
-/// `out` reads every frame without reconstructing a decoder per frame.
+/// calls) -- so looping `read_to_end` on one decoder until its underlying
+/// reader is exhausted reads every frame without reconstructing a decoder.
 pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
     use std::io::Read;
-    // `compressed.len()` is a real lower bound, but LZ4 on Arrow-IPC data
-    // (long dictionary/offset-buffer runs, mostly-repeated bytes) typically
-    // compresses several-fold -- estimating just the lower bound means the
-    // real decompressed size almost always blows past initial capacity,
-    // paying for repeated doubling-and-copy growth on every chunk. `* 4` is
-    // a heuristic, not a guarantee (`Vec` still grows normally if it's wrong
-    // either way) -- just a better starting point than the guaranteed-too-
-    // small lower bound.
+    // LZ4 on Arrow-IPC data often compresses several-fold. Starting at the
+    // compressed size can therefore pay for repeated buffer growth. Neither
+    // size is a bound on the other: incompressible input can expand slightly.
+    // `* 4` remains a heuristic; Vec grows normally when it underestimates.
+    // See benchmark_lz4_capacity_hypotheses for the allocation tradeoffs.
     let mut out = Vec::with_capacity(compressed.len() * 4);
     let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
     // Terminate on the *reader* being exhausted, not on "output stopped
@@ -300,6 +297,65 @@ impl DbClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual release-mode decompression allocation experiment"]
+    fn benchmark_lz4_capacity_hypotheses() {
+        use std::hint::black_box;
+        use std::io::{Read, Write};
+        use std::time::Instant;
+
+        // Deterministic random bytes mixed with repeated bytes cover different
+        // compression ratios without depending on warehouse data.
+        for random_fraction in [0, 25, 50, 100] {
+            let mut state = 0x12345678_u64;
+            let input: Vec<u8> = (0..8 * 1024 * 1024)
+                .map(|i| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    if i % 100 < random_fraction { state as u8 } else { 0 }
+                })
+                .collect();
+            let mut compressed = Vec::new();
+            for part in input.chunks(512 * 1024) {
+                let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+                encoder.write_all(part).unwrap();
+                compressed.extend(encoder.finish().unwrap());
+            }
+            let variants = [
+                ("compressed_x1", compressed.len()),
+                ("compressed_x2", compressed.len() * 2),
+                ("compressed_x4", compressed.len() * 4),
+                ("exact", input.len()),
+                ("short_hint", input.len() - 64),
+            ];
+            for round in 0..10 {
+                for index in 0..variants.len() {
+                    let (variant, capacity) = variants[(index + round) % variants.len()];
+                    let start = Instant::now();
+                    let mut output = Vec::with_capacity(capacity);
+                    let mut decoder = lz4_flex::frame::FrameDecoder::new(black_box(compressed.as_slice()));
+                    while !decoder.get_ref().is_empty() {
+                        decoder.read_to_end(&mut output).unwrap();
+                    }
+                    let seconds = start.elapsed().as_secs_f64();
+                    assert_eq!(output, input);
+                    if round > 1 {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "random_percent": random_fraction, "variant": variant,
+                                "round": round, "seconds": seconds,
+                                "compressed_bytes": compressed.len(), "decoded_bytes": output.len(),
+                                "retained_capacity": output.capacity()
+                            })
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn split_download_starts_tail_requests_before_the_probe_body_finishes() {

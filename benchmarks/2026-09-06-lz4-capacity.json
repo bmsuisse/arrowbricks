@@ -1,0 +1,2886 @@
+{
+  "first": [
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.012787125,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.011732875,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.0117375,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.012569125,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.013172542,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.012199583,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.011956,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.013277334,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.012818458,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.012878584,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.012755291,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.01284525,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.013277375,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.012829375,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.012640917,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.013045583,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.013261041,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.012978875,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.011931,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.012643292,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.013135709,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.012843125,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.012572541,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.0122725,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.012622083,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.012783375,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.0115035,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.012130958,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.012809458,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.012482042,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.011839209,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.011517333,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.012597208,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.012647791,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.01287,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.012093542,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.012506167,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.012625459,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.012270542,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.011456958,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 2,
+      "seconds": 0.001188875,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.002573791,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.001464833,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 2,
+      "seconds": 0.002562083,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 2,
+      "seconds": 0.003225875,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.002544,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.001413833,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 3,
+      "seconds": 0.002106,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 3,
+      "seconds": 0.003289083,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 3,
+      "seconds": 0.002140792,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.002304875,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 4,
+      "seconds": 0.002195166,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 4,
+      "seconds": 0.002968625,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 4,
+      "seconds": 0.002024583,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.002511917,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 5,
+      "seconds": 0.002061417,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 5,
+      "seconds": 0.002938041,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 5,
+      "seconds": 0.001967,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.001957083,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.001363916,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 6,
+      "seconds": 0.002689125,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 6,
+      "seconds": 0.0020715,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.002065166,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.001373708,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 6,
+      "seconds": 0.001525792,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 7,
+      "seconds": 0.00124525,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.002539583,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.001459625,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 7,
+      "seconds": 0.002507459,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 7,
+      "seconds": 0.00294175,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.002576125,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.001481208,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 8,
+      "seconds": 0.002171292,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 8,
+      "seconds": 0.0030215,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 8,
+      "seconds": 0.001950583,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.002405625,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 9,
+      "seconds": 0.002079,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 9,
+      "seconds": 0.003073,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 9,
+      "seconds": 0.002014041,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.002343708,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 2,
+      "seconds": 0.00142275,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.002805167,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.001527709,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 2,
+      "seconds": 0.00245375,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 2,
+      "seconds": 0.001979042,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.002414125,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.001537292,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 3,
+      "seconds": 0.00242575,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 3,
+      "seconds": 0.002020459,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 3,
+      "seconds": 0.001307833,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.0025285,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 4,
+      "seconds": 0.002409709,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 4,
+      "seconds": 0.001934667,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 4,
+      "seconds": 0.001307875,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.002481542,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 5,
+      "seconds": 0.001948916,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 5,
+      "seconds": 0.001971916,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 5,
+      "seconds": 0.001325,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.002066875,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.001674042,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 6,
+      "seconds": 0.00145125,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 6,
+      "seconds": 0.001395791,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.002845917,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.001612459,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 6,
+      "seconds": 0.002629708,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 7,
+      "seconds": 0.001505209,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.003301375,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.001644292,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 7,
+      "seconds": 0.002667333,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 7,
+      "seconds": 0.002222959,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.002531625,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.001612375,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 8,
+      "seconds": 0.002624542,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 8,
+      "seconds": 0.00233175,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 8,
+      "seconds": 0.001433416,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.00268275,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 9,
+      "seconds": 0.003102167,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 9,
+      "seconds": 0.002276125,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 9,
+      "seconds": 0.001338709,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.002660916,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 2,
+      "seconds": 0.000742375,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.002051334,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.000721416,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 2,
+      "seconds": 0.000599792,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 2,
+      "seconds": 0.000633416,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.002160292,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.000766458,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 3,
+      "seconds": 0.000627209,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 3,
+      "seconds": 0.00059275,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 3,
+      "seconds": 0.000647416,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.002170125,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 4,
+      "seconds": 0.000664625,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 4,
+      "seconds": 0.000616,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 4,
+      "seconds": 0.000582042,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.001965541,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 5,
+      "seconds": 0.000617084,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 5,
+      "seconds": 0.000598708,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 5,
+      "seconds": 0.000734958,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.000847583,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.0008105,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 6,
+      "seconds": 0.000627875,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 6,
+      "seconds": 0.000627709,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.002072708,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.000841041,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 6,
+      "seconds": 0.000657042,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 7,
+      "seconds": 0.000639083,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.00217525,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.00075375,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 7,
+      "seconds": 0.000695333,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 7,
+      "seconds": 0.001087333,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.003460959,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.000805041,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 8,
+      "seconds": 0.000608917,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 8,
+      "seconds": 0.000659292,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 8,
+      "seconds": 0.000675167,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.002200958,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 9,
+      "seconds": 0.000598542,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 9,
+      "seconds": 0.000602208,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 9,
+      "seconds": 0.000650208,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.003288375,
+      "variant": "exact"
+    }
+  ],
+  "repeat": [
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.0124,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.011930334,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.011818125,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.012366458,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.012748875,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.01180725,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.012067625,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.012471125,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.012346208,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.01266725,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.011855042,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.012113875,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.012122541,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.012104291,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.011485583,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.01249675,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.012742833,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.012289291,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.012305375,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.012397916,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.013045375,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.01339925,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.011874125,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.011469667,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.012452625,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.012084708,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.011801625,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.011815042,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.012201208,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.012220333,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.011822833,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.011834791,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.012230125,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.012158167,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.012471,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.011812417,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.012203,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.012248541,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.012364041,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 33312,
+      "decoded_bytes": 8388608,
+      "random_percent": 0,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.011870042,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 2,
+      "seconds": 0.001338708,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.002782625,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.001527792,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 2,
+      "seconds": 0.002685542,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 2,
+      "seconds": 0.0046,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.003587458,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.001568292,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 3,
+      "seconds": 0.002600334,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 3,
+      "seconds": 0.003487833,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 3,
+      "seconds": 0.002258875,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.002409667,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 4,
+      "seconds": 0.002349459,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 4,
+      "seconds": 0.003320708,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 4,
+      "seconds": 0.002181291,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.002604667,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 5,
+      "seconds": 0.003484875,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 5,
+      "seconds": 0.003598209,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 5,
+      "seconds": 0.002508584,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.002114917,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.001795125,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 6,
+      "seconds": 0.002883333,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 6,
+      "seconds": 0.002385416,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.002440458,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.001584875,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 6,
+      "seconds": 0.00155575,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 7,
+      "seconds": 0.001246417,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.002948958,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.001892333,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 7,
+      "seconds": 0.002844917,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 7,
+      "seconds": 0.003494375,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.002692584,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.001504833,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 8,
+      "seconds": 0.002241292,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 8,
+      "seconds": 0.003157667,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 8,
+      "seconds": 0.002074417,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.002202166,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 9,
+      "seconds": 0.002223167,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 9,
+      "seconds": 0.003532291,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 9960276,
+      "round": 9,
+      "seconds": 0.002199125,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 2490069,
+      "decoded_bytes": 8388608,
+      "random_percent": 25,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.002243875,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 2,
+      "seconds": 0.001625209,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.0032085,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.00167775,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 2,
+      "seconds": 0.002871791,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 2,
+      "seconds": 0.002250208,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.002553708,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.00172725,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 3,
+      "seconds": 0.00274175,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 3,
+      "seconds": 0.002312125,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 3,
+      "seconds": 0.001398417,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.0028595,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 4,
+      "seconds": 0.002751791,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 4,
+      "seconds": 0.0022965,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 4,
+      "seconds": 0.001420459,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.002697166,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 5,
+      "seconds": 0.002139333,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 5,
+      "seconds": 0.002210625,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 5,
+      "seconds": 0.001388916,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.001899542,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.001670333,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 6,
+      "seconds": 0.001455084,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 6,
+      "seconds": 0.001459584,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.003048625,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.00168125,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 6,
+      "seconds": 0.002706584,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 7,
+      "seconds": 0.001449375,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.002765833,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.001548625,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 7,
+      "seconds": 0.002648084,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 7,
+      "seconds": 0.002093875,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.002568458,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.001622458,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 8,
+      "seconds": 0.002737,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 8,
+      "seconds": 0.002103375,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 8,
+      "seconds": 0.001421625,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.002568625,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 9,
+      "seconds": 0.002633292,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 9283122,
+      "round": 9,
+      "seconds": 0.002105167,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 18566244,
+      "round": 9,
+      "seconds": 0.001415042,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 4641561,
+      "decoded_bytes": 8388608,
+      "random_percent": 50,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.002452792,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 2,
+      "seconds": 0.000685792,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 2,
+      "seconds": 0.002421125,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 2,
+      "seconds": 0.000905,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 2,
+      "seconds": 0.000639917,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 2,
+      "seconds": 0.000645708,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 3,
+      "seconds": 0.002479667,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 3,
+      "seconds": 0.000833208,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 3,
+      "seconds": 0.00062125,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 3,
+      "seconds": 0.000639459,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 3,
+      "seconds": 0.000603,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 4,
+      "seconds": 0.002322083,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 4,
+      "seconds": 0.000627625,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 4,
+      "seconds": 0.000625459,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 4,
+      "seconds": 0.000675292,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 4,
+      "seconds": 0.002429333,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 5,
+      "seconds": 0.00074025,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 5,
+      "seconds": 0.000753084,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 5,
+      "seconds": 0.000631166,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 5,
+      "seconds": 0.000651375,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 5,
+      "seconds": 0.000931792,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 6,
+      "seconds": 0.000612666,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 6,
+      "seconds": 0.000622958,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 6,
+      "seconds": 0.002155916,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 6,
+      "seconds": 0.000843833,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 6,
+      "seconds": 0.000800542,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 7,
+      "seconds": 0.000641541,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 7,
+      "seconds": 0.002215333,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 7,
+      "seconds": 0.000867417,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 7,
+      "seconds": 0.000643,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 7,
+      "seconds": 0.000632875,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 8,
+      "seconds": 0.002317458,
+      "variant": "exact"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 8,
+      "seconds": 0.001012791,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 8,
+      "seconds": 0.000633,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 8,
+      "seconds": 0.000622625,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 8,
+      "seconds": 0.000626375,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777088,
+      "round": 9,
+      "seconds": 0.0023325,
+      "variant": "short_hint"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388848,
+      "round": 9,
+      "seconds": 0.0006095,
+      "variant": "compressed_x1"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 16777696,
+      "round": 9,
+      "seconds": 0.000610792,
+      "variant": "compressed_x2"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 33555392,
+      "round": 9,
+      "seconds": 0.000616041,
+      "variant": "compressed_x4"
+    },
+    {
+      "compressed_bytes": 8388848,
+      "decoded_bytes": 8388608,
+      "random_percent": 100,
+      "retained_capacity": 8388608,
+      "round": 9,
+      "seconds": 0.002228041,
+      "variant": "exact"
+    }
+  ]
+}
