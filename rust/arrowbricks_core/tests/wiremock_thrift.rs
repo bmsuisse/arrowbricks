@@ -1826,3 +1826,79 @@ async fn thrift_dropping_the_heartbeat_wait_mid_fetch_fires_cancel_operation() {
         "a bare drop (not through tick()'s own timeout branch) must record outcome=cancelled, not timeout"
     );
 }
+
+/// Thrift counterpart of `wiremock_pipeline.rs`'s
+/// `sea_abandoning_the_submit_poll_wait_fires_cancel_statement`.
+#[tokio::test]
+async fn thrift_abandoning_the_submit_poll_wait_fires_cancel_operation() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-poll", b"opsecret-poll", None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_get_operation_status_resp(operation_state::RUNNING, None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        execute_lazy_thrift(thrift_client(&server), "SELECT * FROM t", None, None, None),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the operation never finishes, so the wait must time out"
+    );
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn thrift_polled_terminal_error_does_not_fire_cancel_operation() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-err", b"opsecret-err", None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_get_operation_status_resp(operation_state::ERROR, Some("boom")),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    mount_close_operation_ok(&server).await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+
+    let result = execute_lazy_thrift(thrift_client(&server), "SELECT * FROM t", None, None, None).await;
+    assert!(result.is_err());
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        0,
+        "an already-terminal operation has nothing left to cancel"
+    );
+}

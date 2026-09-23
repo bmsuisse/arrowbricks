@@ -5,6 +5,7 @@ pub mod pipeline;
 pub mod thrift;
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
@@ -928,6 +929,16 @@ enum PyNdjsonStreamState {
         total_timeout_s: Option<f64>,
         non_finite_as_string: bool,
     },
+    /// Submit/poll in flight under the same `total_timeout_s` budget (and
+    /// heartbeats) as the chunk pulls that follow -- a timeout here drops
+    /// the submit future, which cancels the statement server-side (see
+    /// `pipeline/stats.rs`'s `CancelInFlightOnDrop`).
+    Submitting {
+        client: Arc<DbClient>,
+        wait: HeartbeatWait<NdjsonStream>,
+        total_timeout_s: Option<f64>,
+        started_at: Instant,
+    },
     Running {
         stream: Arc<AsyncMutex<NdjsonStream>>,
         heartbeat: HeartbeatStream<Vec<String>>,
@@ -970,22 +981,57 @@ impl PyNdjsonStreamIter {
                         else {
                             unreachable!()
                         };
-                        let client_for_cancel = client.clone();
-                        let stream = pipeline::execute_ndjson_stream(
+                        let started_at = Instant::now();
+                        let submit_client = client.clone();
+                        let wait = HeartbeatWait::new(
+                            async move {
+                                pipeline::execute_ndjson_stream(
+                                    submit_client,
+                                    &statement,
+                                    catalog.as_deref(),
+                                    schema.as_deref(),
+                                    parameters,
+                                    non_finite_as_string,
+                                )
+                                .await
+                            },
+                            total_timeout_s,
+                        );
+                        *guard = PyNdjsonStreamState::Submitting {
                             client,
-                            &statement,
-                            catalog.as_deref(),
-                            schema.as_deref(),
-                            parameters,
-                            non_finite_as_string,
-                        )
-                        .await
-                        .map_err(api_error_to_pyerr)?;
-                        let heartbeat = HeartbeatStream::new(total_timeout_s).with_cancel(pipeline::cancel_hook(
-                            client_for_cancel,
-                            stream.cancel_handle.clone(),
-                            stream.stats.clone(),
-                        ));
+                            wait,
+                            total_timeout_s,
+                            started_at,
+                        };
+                    }
+                    PyNdjsonStreamState::Submitting { wait, .. } => {
+                        let stream = match wait.tick().await {
+                            Ok(Some(Tick::Heartbeat)) => {
+                                return Python::attach(|py| heartbeat_singleton(py).map(|h| h.into_any()));
+                            }
+                            Ok(Some(Tick::Ready(stream))) => stream,
+                            Ok(None) => unreachable!("Submitting is replaced as soon as its wait yields Ready"),
+                            Err(e) => {
+                                *guard = PyNdjsonStreamState::Done;
+                                return Err(api_error_to_pyerr(e));
+                            }
+                        };
+                        let PyNdjsonStreamState::Submitting {
+                            client,
+                            total_timeout_s,
+                            started_at,
+                            ..
+                        } = std::mem::replace(&mut *guard, PyNdjsonStreamState::Done)
+                        else {
+                            unreachable!()
+                        };
+                        let heartbeat = HeartbeatStream::new(total_timeout_s)
+                            .starting_at(started_at)
+                            .with_cancel(pipeline::cancel_hook(
+                                client,
+                                stream.cancel_handle.clone(),
+                                stream.stats.clone(),
+                            ));
                         *guard = PyNdjsonStreamState::Running {
                             stream: Arc::new(AsyncMutex::new(stream)),
                             heartbeat,

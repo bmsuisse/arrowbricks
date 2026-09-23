@@ -300,11 +300,10 @@ impl NdjsonStream {
 }
 
 /// Submit -> poll -> start background chunk fetching for the chunk-at-a-time
-/// stream above. Matches Python's `fetch_arrow_chunks_with_manifest`: this
-/// await itself is never heartbeat-wrapped (only the per-chunk pulls that
-/// follow are) -- `stream_query_json` only wraps its chunk iterator, not
-/// this initial submit/poll wait, so this crate preserves that same gap
-/// rather than "fixing" it during the port.
+/// stream above. `lib.rs`'s `PyNdjsonStreamIter` runs this under a
+/// `HeartbeatWait` sharing the stream's `total_timeout_s` budget, so the
+/// submit/poll wait gets heartbeats and a timeout too; abandoning it
+/// cancels the statement server-side (`CancelInFlightOnDrop`).
 ///
 /// **Branches on `client.protocol`, same as `PyDbClient::execute`'s own
 /// dispatch (`lib.rs`) -- found missing entirely during a later review

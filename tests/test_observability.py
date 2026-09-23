@@ -23,7 +23,7 @@ import time
 import pytest
 from conftest import WAREHOUSE_ID, Request, Response
 
-from arrowbricks import DatabricksClient, QueryStats
+from arrowbricks import DatabricksClient, QueryStats, QueryTimeout
 from arrowbricks.cursor import Cursor
 
 
@@ -201,10 +201,9 @@ async def test_stream_query_json_total_timeout_reports_timeout_and_fires_server_
     stream_ndjson_lines` -> `heartbeat::HeartbeatStream` ->
     `pipeline::cancel_hook` -> `POST .../cancel`), complementing the
     lower-level, PyO3-free proof in `rust/arrowbricks_core/tests/
-    wiremock_pipeline.rs`. `stream_query_json`'s own `total_timeout_s` only
-    covers the chunk-download phase (a preserved, documented quirk -- its
-    submit/poll wait is never heartbeat-wrapped), which is exactly the phase
-    this design's two cancellation triggers cover anyway."""
+    wiremock_pipeline.rs`. This one times out during the chunk download;
+    `test_stream_query_json_total_timeout_during_submit_poll_cancels_statement`
+    covers the submit/poll wait."""
     server = mock_server()
     server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
     server.post("/api/2.0/sql/statements").mock(
@@ -231,12 +230,7 @@ async def test_stream_query_json_total_timeout_reports_timeout_and_fires_server_
     received: list[QueryStats] = []
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea", on_event=received.append)
 
-    # `stream_query_json`/`._core.Client.stream_ndjson_lines` surfaces the
-    # Rust-level `HeartbeatStream::tick()` timeout as a plain `RuntimeError`
-    # (not the Python-level `QueryTimeout` `Cursor.fetchall_streamed` raises
-    # -- a pre-existing distinction between the two heartbeat
-    # implementations, not something this change alters).
-    with pytest.raises(RuntimeError, match=r"exceeded 0\.05s timeout"):
+    with pytest.raises(QueryTimeout, match=r"exceeded 0\.05s timeout"):
         async for _line in client.stream_query_json("SELECT * FROM whatever", total_timeout_s=0.05):
             pass
 
@@ -337,6 +331,49 @@ async def test_cursor_fetchall_streamed_row_variant_also_raises_query_timeout(mo
     with pytest.raises(QueryTimeout):
         async for _row in cursor.fetchall_streamed(total_timeout_s=0.05):
             pass
+
+    await _wait_until(lambda: cancel_route.call_count >= 1)
+    assert cancel_route.call_count == 1
+
+
+def _mount_never_finishing_sea_statement(server, statement_id: str):
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(json_body={"statement_id": statement_id, "status": {"state": "RUNNING"}})
+    )
+    server.get(f"/api/2.0/sql/statements/{statement_id}").mock(
+        Response(json_body={"statement_id": statement_id, "status": {"state": "RUNNING"}})
+    )
+    return server.post(f"/api/2.0/sql/statements/{statement_id}/cancel").mock(Response(json_body={}))
+
+
+@pytest.mark.asyncio
+async def test_stream_query_json_total_timeout_during_submit_poll_cancels_statement(mock_server):
+    """A statement that never finishes used to hang `stream_query_json`
+    forever regardless of `total_timeout_s` -- the submit/poll wait sat
+    outside the timeout entirely."""
+    server = mock_server()
+    cancel_route = _mount_never_finishing_sea_statement(server, "stmt-json-poll")
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+
+    started = time.monotonic()
+    with pytest.raises(QueryTimeout, match=r"exceeded 0\.3s timeout"):
+        async for _line in client.stream_query_json("SELECT * FROM whatever", total_timeout_s=0.3):
+            pass
+    assert time.monotonic() - started < 3
+
+    await _wait_until(lambda: cancel_route.call_count >= 1)
+    assert cancel_route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cursor_execute_total_timeout_during_submit_poll_cancels_statement(mock_server):
+    server = mock_server()
+    cancel_route = _mount_never_finishing_sea_statement(server, "stmt-cursor-poll")
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+
+    with pytest.raises(QueryTimeout):
+        await Cursor(client).execute("SELECT * FROM whatever", total_timeout_s=0.3)
 
     await _wait_until(lambda: cancel_route.call_count >= 1)
     assert cancel_route.call_count == 1

@@ -22,7 +22,7 @@ use crate::client::{
 };
 
 use super::reorder::{ReorderBuffer, decode_chunk_item};
-use super::stats::{PoisonOnDrop, StatsReporter, report_submit_error};
+use super::stats::{CancelInFlightOnDrop, PoisonOnDrop, StatsReporter, report_submit_error};
 
 pub struct ExecuteResult {
     pub statement_id: String,
@@ -217,6 +217,7 @@ pub(crate) async fn submit_sea_and_report(
     stats: &QueryStatsAccumulator,
 ) -> Result<(StatementSubmitResult, f64), ApiError> {
     let submit_t0 = Instant::now();
+    let _cancel_guard = CancelInFlightOnDrop { client, stats };
     match client
         .execute_arrow_statement(statement, catalog, schema, parameters, stats)
         .await
@@ -326,6 +327,10 @@ pub async fn execute_lazy_prefer_inline(
     // submission rather than starting fresh -- see that fallback's own doc
     // comment.
     let submit_t0 = Instant::now();
+    let cancel_guard = CancelInFlightOnDrop {
+        client: &client,
+        stats: &stats,
+    };
     let outcome = match client
         .execute_arrow_statement_prefer_inline(statement, catalog, schema, parameters.clone(), &stats)
         .await
@@ -336,6 +341,8 @@ pub async fn execute_lazy_prefer_inline(
             return Err(e);
         }
     };
+    // The statement is terminal by now; released so `client` can move below.
+    drop(cancel_guard);
     let submit_to_ready_s = submit_t0.elapsed().as_secs_f64();
 
     let (statement_id, rows, columns) = match outcome {

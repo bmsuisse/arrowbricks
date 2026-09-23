@@ -26,7 +26,7 @@ use crate::thrift;
 
 use super::reorder::ReorderBuffer;
 use super::sea::ResultStream;
-use super::stats::{StatsReporter, report_submit_error};
+use super::stats::{CancelInFlightOnDrop, StatsReporter, report_submit_error};
 
 /// Encodes 16 raw bytes (a THandleIdentifier's guid) as lowercase hex --
 /// used only to give a Thrift result stream a human-readable `statement_id`
@@ -108,12 +108,18 @@ async fn submit_and_await_thrift_statement(
     }
 
     if !already_finished {
+        let _cancel_guard = CancelInFlightOnDrop { client, stats };
+        stats.set_in_flight(CancelHandle::Thrift {
+            operation: operation.clone(),
+        });
         loop {
             let status = client.thrift_get_operation_status_raw(&operation, stats).await?;
             if let Some(e) = status.terminal_error() {
+                stats.clear_in_flight();
                 return Err(ApiError::statement_failed(format!("Thrift statement failed: {e}")));
             }
             if status.is_finished() {
+                stats.clear_in_flight();
                 break;
             }
             tokio::time::sleep(crate::client::THRIFT_POLL_INTERVAL).await;

@@ -256,6 +256,14 @@ impl<T: Send + 'static> HeartbeatStream<T> {
 
     /// See `HeartbeatWait::with_cancel`'s own doc comment -- identical
     /// contract.
+    /// Counts `total_timeout_s` from `start` instead of from construction --
+    /// for a stream whose statement already spent part of the same budget
+    /// in its submit/poll wait.
+    pub fn starting_at(mut self, start: Instant) -> Self {
+        self.deadline = self.total_timeout_s.map(|s| start + Duration::from_secs_f64(s));
+        self
+    }
+
     pub fn with_cancel(mut self, on_cancel: impl FnOnce(bool) + Send + 'static) -> Self {
         self.on_cancel = Some(Box::new(on_cancel));
         self

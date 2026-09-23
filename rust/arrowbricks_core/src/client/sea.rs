@@ -21,7 +21,8 @@ use super::DbClient;
 use super::POLL_INTERVAL;
 use super::error::{ApiError, join_error};
 use super::model::{
-    ChunkItem, ChunkMeta, ColumnDescription, InlineOrExternal, QueryStatsAccumulator, StatementSubmitResult,
+    CancelHandle, ChunkItem, ChunkMeta, ColumnDescription, InlineOrExternal, QueryStatsAccumulator,
+    StatementSubmitResult,
 };
 
 /// Typed response shapes -- replaces navigating a dynamic `serde_json::Value`
@@ -390,6 +391,9 @@ impl DbClient {
             .authed_json(reqwest::Method::POST, &url, Some(&body), Some(stats))
             .await?;
 
+        stats.set_in_flight(CancelHandle::Sea {
+            statement_id: data.statement_id.clone(),
+        });
         while !matches!(
             data.status.state.as_str(),
             "SUCCEEDED" | "FAILED" | "CANCELED" | "CLOSED"
@@ -400,6 +404,7 @@ impl DbClient {
                 .authed_json(reqwest::Method::GET, &poll_url, None, Some(stats))
                 .await?;
         }
+        stats.clear_in_flight();
 
         match data.status.state.as_str() {
             "FAILED" => {

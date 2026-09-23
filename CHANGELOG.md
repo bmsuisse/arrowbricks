@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.2.0 — 2026-09-23
+
+- Cancel a statement server-side when its submit/poll wait is abandoned --
+  a `total_timeout_s` on `Cursor.execute()`/`execute_streamed()`, a
+  Python-side `task.cancel()`/`asyncio.wait_for`, or a poll request that
+  fails mid-wait. Previously only a timeout during the chunk download
+  cancelled, so a long-running query kept running on the warehouse after
+  the caller had given up.
+- `stream_query_json(total_timeout_s=...)` now also bounds the submit/poll
+  wait (and yields `HEARTBEAT` during it), not just the chunk downloads. A
+  statement that never finished used to block it forever regardless of
+  `total_timeout_s`.
+- `stream_query_json` raises `QueryTimeout` on timeout, same as the cursor
+  APIs, instead of a plain `ArrowbricksError`. Still a `RuntimeError`/
+  `ArrowbricksError` subclass, so existing `except` clauses keep matching.
+
 ## 3.1.4 — 2026-09-07
 
 - Return a conversion error for unsupported empty STRUCT arrays instead of

@@ -185,6 +185,11 @@ async def stream_query_json(
     top-level float columns are covered; one nested inside a STRUCT/ARRAY/MAP
     still comes back as `null` either way.
 
+    `total_timeout_s` bounds the whole statement -- the submit/poll wait
+    (heartbeats included) and every chunk download after it -- and raises
+    `QueryTimeout` once it elapses, firing a best-effort server-side cancel
+    so the statement doesn't keep running on the warehouse.
+
     Note this yields a whole chunk's rows at once -- Databricks' own chunk
     sizing already bounds how much that is."""
     if non_finite_floats not in ("null", "string"):
@@ -192,16 +197,23 @@ async def stream_query_json(
     sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
     core_client = client._core_client  # noqa: SLF001 -- same package, see client.py
 
-    async for item in core_client.stream_ndjson_lines(
-        sql,
-        catalog=catalog,
-        schema=schema,
-        parameters=params,
-        total_timeout_s=total_timeout_s,
-        non_finite_as_string=(non_finite_floats == "string"),
-    ):
-        if item is _core.HEARTBEAT:
-            yield HEARTBEAT
-            continue
-        for line in cast("list[str]", item):
-            yield line
+    try:
+        async for item in core_client.stream_ndjson_lines(
+            sql,
+            catalog=catalog,
+            schema=schema,
+            parameters=params,
+            total_timeout_s=total_timeout_s,
+            non_finite_as_string=(non_finite_floats == "string"),
+        ):
+            if item is _core.HEARTBEAT:
+                yield HEARTBEAT
+                continue
+            for line in cast("list[str]", item):
+                yield line
+    except _core.ArrowbricksError as exc:
+        # Same translation as cursor.py's fetchall_arrow_streamed -- the
+        # Rust-level heartbeat's timeout is a plain ArrowbricksError there.
+        if str(exc).startswith("Query exceeded"):
+            raise QueryTimeout(str(exc)) from exc
+        raise

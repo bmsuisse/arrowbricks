@@ -45,6 +45,30 @@ pub fn cancel_hook(
     }
 }
 
+/// Held across a statement's submit/poll wait: if it drops while the
+/// statement is still in flight (see `QueryStatsAccumulator::in_flight`),
+/// fires the same fire-and-forget server-side cancel `cancel_hook` does.
+/// `heartbeat.rs`'s hooks only exist once a `ResultStream`/`NdjsonStream`
+/// has been built, i.e. after the statement is already terminal -- without
+/// this, a timeout or cancellation during the wait itself (the phase a
+/// long-running query actually spends its time in) released the caller but
+/// left the statement running on the warehouse for nobody.
+pub(crate) struct CancelInFlightOnDrop<'a> {
+    pub(crate) client: &'a Arc<DbClient>,
+    pub(crate) stats: &'a QueryStatsAccumulator,
+}
+
+impl Drop for CancelInFlightOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.stats.take_in_flight() {
+            let client = self.client.clone();
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                client.cancel_statement(&handle).await;
+            });
+        }
+    }
+}
+
 /// Per-`ResultStream`/`NdjsonStream` bookkeeping needed to build and
 /// dispatch exactly one `QueryStatsData` per query, at completion -- see
 /// `client::QueryStatsAccumulator`/`EventSink` for the counters/dispatch
