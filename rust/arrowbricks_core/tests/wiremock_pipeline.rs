@@ -1187,6 +1187,52 @@ async fn session_is_created_once_and_reused_across_sequential_statements() {
     }
 }
 
+/// SEA counterpart of `wiremock_thrift.rs`'s cache-refresh test: a SUCCEEDED
+/// statement refreshes `ensure_warehouse_running`'s cache, so the third of
+/// three statements ~300ms apart (500ms TTL) needs no second warehouse GET.
+#[tokio::test]
+async fn successful_statement_refreshes_the_warehouse_running_cache() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"session_id": "sess-0"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": []},
+        })))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_protocol(Protocol::Sea)
+            .with_warehouse_confirmed_running_ttl(0.5),
+    );
+    for i in 0..3 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        run_pipeline(client.clone(), "SELECT 1", None, None, None)
+            .await
+            .unwrap();
+    }
+
+    let warehouse_gets = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method == wiremock::http::Method::GET && r.url.path().starts_with("/api/2.0/sql/warehouses/"))
+        .count();
+    assert_eq!(warehouse_gets, 1);
+}
+
 #[tokio::test]
 async fn session_creation_failure_falls_back_to_catalog_on_the_statement_body() {
     let server = MockServer::start().await;

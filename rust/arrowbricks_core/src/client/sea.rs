@@ -381,6 +381,9 @@ impl DbClient {
             session_id,
         };
         let result = self.submit_and_poll_inner(body, stats).await;
+        if result.is_ok() {
+            self.note_warehouse_running();
+        }
         checkin.finish(result.is_ok());
         result
     }
