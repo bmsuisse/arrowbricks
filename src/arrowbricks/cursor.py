@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from . import _core
-from ._streaming import HEARTBEAT, QueryTimeout, await_with_heartbeat, windowed_sql
+from ._streaming import HEARTBEAT, await_with_heartbeat, rust_timeout_as_query_timeout, windowed_sql
 from .client import DatabricksClient
 
 if TYPE_CHECKING:
@@ -309,7 +309,7 @@ class Cursor:
             # `execute_streamed`'s own `_gen()` pattern.
             self._require_empty_row_buffer("fetchall_arrow_streamed")
             result = self._require_result()
-            try:
+            with rust_timeout_as_query_timeout():
                 async for item in result.fetchall_arrow_streamed(total_timeout_s=total_timeout_s):
                     if item is _core.HEARTBEAT:
                         yield HEARTBEAT
@@ -317,21 +317,6 @@ class Cursor:
                         if self._schema is None:
                             self._schema = await result.schema()
                         yield item
-            except RuntimeError as exc:
-                # `heartbeat::HeartbeatWait`'s own `total_timeout_s` error
-                # (`format!("Query exceeded {secs}s timeout")`, heartbeat.rs)
-                # surfaces here as a plain `RuntimeError`, not this package's
-                # own `QueryTimeout` -- translated so callers relying on
-                # catching `QueryTimeout` (same contract `execute_streamed`/
-                # `fetchall_streamed` already promise) see the same exception
-                # type regardless of which heartbeat implementation is
-                # actually running underneath. Matched by a stable literal
-                # prefix this crate controls end to end (not string-matching
-                # someone else's error), so a real, unrelated `RuntimeError`
-                # from a genuine chunk-fetch failure is never misclassified.
-                if str(exc).startswith("Query exceeded"):
-                    raise QueryTimeout(str(exc)) from exc
-                raise
 
         return _gen()
 

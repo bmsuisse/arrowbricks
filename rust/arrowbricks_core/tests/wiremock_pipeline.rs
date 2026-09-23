@@ -1615,3 +1615,97 @@ async fn sea_dropping_the_heartbeat_wait_mid_fetch_fires_cancel_statement() {
         "a bare drop (not through tick()'s own timeout branch) must record outcome=cancelled, not timeout"
     );
 }
+
+async fn mount_running_warehouse_and_statement(server: &MockServer, state: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/2.0/sql/warehouses/{WAREHOUSE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "RUNNING"})))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": state, "error": {"error_code": "BAD_SQL", "message": "nope"}},
+        })))
+        .mount(server)
+        .await;
+}
+
+/// Abandoning the submit/poll wait itself (a `total_timeout_s` or a Python
+/// `task.cancel()` drops this future mid-poll) must cancel the statement
+/// server-side -- `heartbeat.rs`'s hooks don't exist yet at this point.
+#[tokio::test]
+async fn sea_abandoning_the_submit_poll_wait_fires_cancel_statement() {
+    let server = MockServer::start().await;
+    mount_running_warehouse_and_statement(&server, "PENDING").await;
+    let cancel_calls = mount_cancel_statement_ok(&server).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        execute_lazy(client, "SELECT * FROM t", None, None, None),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the statement never leaves PENDING, so the wait must time out"
+    );
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sea_terminal_statement_does_not_fire_cancel_statement() {
+    let server = MockServer::start().await;
+    mount_running_warehouse_and_statement(&server, "FAILED").await;
+    let cancel_calls = mount_cancel_statement_ok(&server).await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    let result = execute_lazy(client, "SELECT * FROM t", None, None, None).await;
+    assert!(result.is_err());
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        0,
+        "an already-terminal statement has nothing left to cancel"
+    );
+}
+
+/// A submit future dropped mid-poll must still release its pooled session's
+/// reservation -- leaking one per abandonment would, after
+/// `MAX_SESSIONS_PER_KEY` of them, leave every later query session-less.
+#[tokio::test]
+async fn abandoning_the_submit_poll_wait_releases_the_session_reservation() {
+    let server = MockServer::start().await;
+    mount_running_warehouse_and_statement(&server, "PENDING").await;
+    mount_cancel_statement_ok(&server).await;
+    let session_calls = Arc::new(AtomicUsize::new(0));
+    let session_calls_for_mock = session_calls.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = session_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"session_id": format!("sess-{n}")}))
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    for _ in 0..=MAX_SESSIONS_PER_KEY {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            execute_lazy(client.clone(), "SELECT * FROM t", Some("cat1"), None, None),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    assert_eq!(
+        session_calls.load(Ordering::SeqCst),
+        MAX_SESSIONS_PER_KEY + 1,
+        "every abandoned attempt must release its reservation, so each one can create a session"
+    );
+}

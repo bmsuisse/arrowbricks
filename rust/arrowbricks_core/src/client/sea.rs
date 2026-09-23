@@ -21,7 +21,8 @@ use super::DbClient;
 use super::POLL_INTERVAL;
 use super::error::{ApiError, join_error};
 use super::model::{
-    ChunkItem, ChunkMeta, ColumnDescription, InlineOrExternal, QueryStatsAccumulator, StatementSubmitResult,
+    CancelHandle, ChunkItem, ChunkMeta, ColumnDescription, InlineOrExternal, QueryStatsAccumulator,
+    StatementSubmitResult,
 };
 
 /// Typed response shapes -- replaces navigating a dynamic `serde_json::Value`
@@ -373,10 +374,14 @@ impl DbClient {
             }
         }
 
+        let mut checkin = SessionCheckin {
+            client: self,
+            catalog,
+            schema,
+            session_id,
+        };
         let result = self.submit_and_poll_inner(body, stats).await;
-        if let Some(id) = session_id {
-            self.checkin_session(catalog, schema, id, result.is_ok());
-        }
+        checkin.finish(result.is_ok());
         result
     }
 
@@ -390,6 +395,9 @@ impl DbClient {
             .authed_json(reqwest::Method::POST, &url, Some(&body), Some(stats))
             .await?;
 
+        stats.set_in_flight(CancelHandle::Sea {
+            statement_id: data.statement_id.clone(),
+        });
         while !matches!(
             data.status.state.as_str(),
             "SUCCEEDED" | "FAILED" | "CANCELED" | "CLOSED"
@@ -400,6 +408,7 @@ impl DbClient {
                 .authed_json(reqwest::Method::GET, &poll_url, None, Some(stats))
                 .await?;
         }
+        stats.clear_in_flight();
 
         match data.status.state.as_str() {
             "FAILED" => {
@@ -599,6 +608,31 @@ impl DbClient {
 /// panic case would let that worker's unfetched work vanish with no error at
 /// all: the channel closing normally looks to the consumer exactly like a
 /// complete, successful result instead of a truncated one.
+/// Returns `submit_and_poll`'s session to the pool even when its future is
+/// dropped mid-poll (a timeout or cancellation) -- without it the pool's
+/// reservation for that key leaks, and after `MAX_SESSIONS_PER_KEY` such
+/// drops every later query for the key runs session-less.
+struct SessionCheckin<'a> {
+    client: &'a DbClient,
+    catalog: Option<&'a str>,
+    schema: Option<&'a str>,
+    session_id: Option<String>,
+}
+
+impl SessionCheckin<'_> {
+    fn finish(&mut self, keep: bool) {
+        if let Some(id) = self.session_id.take() {
+            self.client.checkin_session(self.catalog, self.schema, id, keep);
+        }
+    }
+}
+
+impl Drop for SessionCheckin<'_> {
+    fn drop(&mut self) {
+        self.finish(false);
+    }
+}
+
 async fn join_first_error(handles: Vec<tokio::task::JoinHandle<Result<(), ApiError>>>) -> Option<ApiError> {
     let mut first_err = None;
     for h in handles {

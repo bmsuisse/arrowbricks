@@ -6,6 +6,7 @@
 //! statement gets you before any chunk is fetched (`ChunkMeta`,
 //! `StatementSubmitResult`, `InlineOrExternal`, `ChunkItem`).
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use bytes::Bytes;
@@ -55,7 +56,7 @@ pub struct ColumnDescription {
 /// `Drop for HeartbeatWait`/`Drop for HeartbeatStream`) can fire
 /// `DbClient::cancel_statement` without either of those generic structs
 /// needing to know anything protocol-specific themselves.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum CancelHandle {
     Sea { statement_id: String },
     Thrift { operation: thrift::OperationHandle },
@@ -113,6 +114,17 @@ pub struct QueryStatsAccumulator {
     /// anything itself.
     warehouse_wait_bits: AtomicU64,
     outcome: AtomicU8,
+    /// The statement/operation handle while it's submitted but not yet
+    /// terminal -- set by the submit/poll loops (`client/sea.rs`'s
+    /// `submit_and_poll_inner`, `pipeline/thrift_exec.rs`'s
+    /// `submit_and_await_thrift_statement`) as soon as Databricks hands one
+    /// back, cleared once the statement reaches a terminal state. Whatever
+    /// is still here when `pipeline/stats.rs`'s `CancelInFlightOnDrop`
+    /// drops (the submit future was abandoned -- a `total_timeout_s`, a
+    /// Python-side `task.cancel()`/`asyncio.wait_for` -- or a poll failed
+    /// mid-wait) gets a best-effort server-side cancel, so a query nobody
+    /// is waiting for anymore stops running on the warehouse.
+    in_flight: Mutex<Option<CancelHandle>>,
 }
 
 const OUTCOME_UNSET: u8 = 0;
@@ -169,6 +181,18 @@ impl QueryStatsAccumulator {
 
     pub fn warehouse_wait_s(&self) -> f64 {
         f64::from_bits(self.warehouse_wait_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn set_in_flight(&self, handle: CancelHandle) {
+        *self.in_flight.lock().unwrap() = Some(handle);
+    }
+
+    pub fn clear_in_flight(&self) {
+        *self.in_flight.lock().unwrap() = None;
+    }
+
+    pub fn take_in_flight(&self) -> Option<CancelHandle> {
+        self.in_flight.lock().unwrap().take()
     }
 }
 

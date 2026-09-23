@@ -26,7 +26,7 @@ use crate::thrift;
 
 use super::reorder::ReorderBuffer;
 use super::sea::ResultStream;
-use super::stats::{StatsReporter, report_submit_error};
+use super::stats::{CancelInFlightOnDrop, StatsReporter, report_submit_error};
 
 /// Encodes 16 raw bytes (a THandleIdentifier's guid) as lowercase hex --
 /// used only to give a Thrift result stream a human-readable `statement_id`
@@ -53,6 +53,34 @@ struct ThriftStatementReady {
     compression: Option<bool>,
     initial_rowset: Option<(thrift::RowSet, bool)>,
     already_closed: bool,
+}
+
+/// Releases and closes `submit_thrift_and_start_fetch`'s session if its
+/// future is dropped during submit/poll (a timeout or cancellation), which
+/// otherwise skipped both: the pool reservation leaked and the session
+/// stayed open server-side until its TTL.
+struct ThriftSessionOnDrop<'a> {
+    client: &'a Arc<DbClient>,
+    catalog: Option<&'a str>,
+    schema: Option<&'a str>,
+    session: Option<thrift::SessionHandle>,
+    from_pool: bool,
+}
+
+impl Drop for ThriftSessionOnDrop<'_> {
+    fn drop(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        if self.from_pool {
+            self.client
+                .thrift_checkin_session(self.catalog, self.schema, session.clone(), false);
+        }
+        let client = self.client.clone();
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            client.thrift_close_session_raw(&session).await;
+        });
+    }
 }
 
 async fn submit_and_await_thrift_statement(
@@ -108,12 +136,18 @@ async fn submit_and_await_thrift_statement(
     }
 
     if !already_finished {
+        let _cancel_guard = CancelInFlightOnDrop { client, stats };
+        stats.set_in_flight(CancelHandle::Thrift {
+            operation: operation.clone(),
+        });
         loop {
             let status = client.thrift_get_operation_status_raw(&operation, stats).await?;
             if let Some(e) = status.terminal_error() {
+                stats.clear_in_flight();
                 return Err(ApiError::statement_failed(format!("Thrift statement failed: {e}")));
             }
             if status.is_finished() {
+                stats.clear_in_flight();
                 break;
             }
             tokio::time::sleep(crate::client::THRIFT_POLL_INTERVAL).await;
@@ -306,7 +340,16 @@ pub(crate) async fn submit_thrift_and_start_fetch(
         },
     };
 
+    let mut session_guard = ThriftSessionOnDrop {
+        client: &client,
+        catalog,
+        schema,
+        session: Some(session.clone()),
+        from_pool,
+    };
     let ready = submit_and_await_thrift_statement(&client, &session, statement, parameters.as_ref(), &stats).await;
+    session_guard.session = None;
+    drop(session_guard);
     let submit_to_ready_s = submit_t0.elapsed().as_secs_f64();
 
     // Exactly one of these two arms ever touches `session` -- a pooled
