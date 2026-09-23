@@ -1902,3 +1902,49 @@ async fn thrift_polled_terminal_error_does_not_fire_cancel_operation() {
         "an already-terminal operation has nothing left to cancel"
     );
 }
+
+#[tokio::test]
+async fn thrift_abandoning_the_submit_poll_wait_closes_its_session() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-sess", b"opsecret-sess", None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_get_operation_status_resp(operation_state::RUNNING, None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    mount_cancel_operation_ok(&server).await;
+    let close_calls = Arc::new(AtomicUsize::new(0));
+    let close_calls_for_mock = close_calls.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("CloseSession"))
+        .respond_with(move |_req: &Request| {
+            close_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(build_close_session_resp(), "application/x-thrift")
+        })
+        .mount(&server)
+        .await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        execute_lazy_thrift(thrift_client(&server), "SELECT * FROM t", None, None, None),
+    )
+    .await;
+    assert!(result.is_err());
+
+    wait_for_calls(&close_calls, 1).await;
+    assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+}

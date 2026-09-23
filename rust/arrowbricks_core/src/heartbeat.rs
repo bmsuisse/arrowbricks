@@ -175,6 +175,10 @@ impl<T: Send + 'static> HeartbeatWait<T> {
         self
     }
 
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// One step: `Ok(Some(Tick::Heartbeat))` if still waiting,
     /// `Ok(Some(Tick::Ready(value)))` exactly once when the wrapped future
     /// completes, `Ok(None)` if already exhausted (caller should raise
@@ -254,16 +258,16 @@ impl<T: Send + 'static> HeartbeatStream<T> {
         }
     }
 
-    /// See `HeartbeatWait::with_cancel`'s own doc comment -- identical
-    /// contract.
-    /// Counts `total_timeout_s` from `start` instead of from construction --
-    /// for a stream whose statement already spent part of the same budget
-    /// in its submit/poll wait.
-    pub fn starting_at(mut self, start: Instant) -> Self {
-        self.deadline = self.total_timeout_s.map(|s| start + Duration::from_secs_f64(s));
+    /// Shares an existing deadline (e.g. `HeartbeatWait::deadline` of the
+    /// submit/poll wait that preceded this stream) instead of starting a
+    /// fresh `total_timeout_s` budget at construction.
+    pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = deadline;
         self
     }
 
+    /// See `HeartbeatWait::with_cancel`'s own doc comment -- identical
+    /// contract.
     pub fn with_cancel(mut self, on_cancel: impl FnOnce(bool) + Send + 'static) -> Self {
         self.on_cancel = Some(Box::new(on_cancel));
         self

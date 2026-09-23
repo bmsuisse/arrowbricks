@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Iterator
 from typing import Any, BinaryIO, TypeVar, cast
 
 from . import _core
@@ -52,6 +52,22 @@ class QueryTimeout(_core.ArrowbricksError):
     package raises itself, timeout included -- `ArrowbricksError` still
     subclasses `RuntimeError`, so an `except RuntimeError` written before
     this change keeps working unchanged either way."""
+
+
+@contextlib.contextmanager
+def rust_timeout_as_query_timeout() -> Iterator[None]:
+    """Translates the Rust-level heartbeat's `total_timeout_s` error -- a
+    plain `ArrowbricksError` with heartbeat.rs's literal `"Query exceeded
+    {secs}s timeout"` message -- into `QueryTimeout`, so callers see one
+    exception type whichever heartbeat implementation ran. Matched by a
+    prefix this crate controls end to end, so an unrelated error is never
+    misclassified."""
+    try:
+        yield
+    except _core.ArrowbricksError as exc:
+        if str(exc).startswith("Query exceeded"):
+            raise QueryTimeout(str(exc)) from exc
+        raise
 
 
 class _Heartbeat:
@@ -197,7 +213,7 @@ async def stream_query_json(
     sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
     core_client = client._core_client  # noqa: SLF001 -- same package, see client.py
 
-    try:
+    with rust_timeout_as_query_timeout():
         async for item in core_client.stream_ndjson_lines(
             sql,
             catalog=catalog,
@@ -211,9 +227,3 @@ async def stream_query_json(
                 continue
             for line in cast("list[str]", item):
                 yield line
-    except _core.ArrowbricksError as exc:
-        # Same translation as cursor.py's fetchall_arrow_streamed -- the
-        # Rust-level heartbeat's timeout is a plain ArrowbricksError there.
-        if str(exc).startswith("Query exceeded"):
-            raise QueryTimeout(str(exc)) from exc
-        raise

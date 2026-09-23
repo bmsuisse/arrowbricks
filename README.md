@@ -150,7 +150,7 @@ conn = connect(host=..., warehouse_id=..., token=..., on_event=log_query)
 
 When `total_timeout_s` elapses or your code cancels the surrounding coroutine (`task.cancel()`/`asyncio.wait_for`) while a query is in flight, arrowbricks fires a best-effort server-side cancel in the background (Thrift's `CancelOperation`, or SEA's `POST .../cancel`) so Databricks stops running the query instead of finishing it for nobody. This is fire-and-forget: the `QueryTimeout`/cancellation still reaches you immediately, and the cancel call's own result (success or failure) is never surfaced or awaited.
 
-This covers both phases of a query: the submit/poll wait while the statement is still running (`Cursor.execute()`/`execute_streamed()`, and the start of `client.stream_query_json(...)`), and the chunk download afterwards (`Cursor.fetchall_streamed()`/`fetchall_arrow_streamed()`, the rest of `stream_query_json`). `stream_query_json`'s `total_timeout_s` is one budget across both phases.
+This covers both phases of a query: the submit/poll wait while the statement is still running (`Cursor.execute()`/`execute_streamed()`, and the start of `client.stream_query_json(...)`), and the chunk download afterwards (`Cursor.fetchall_streamed()`/`fetchall_arrow_streamed()`, the rest of `stream_query_json`). `stream_query_json`'s `total_timeout_s` is one budget across both phases. On `protocol="sea"` there is one short blind spot: the submit request itself can wait server-side for up to `wait_timeout` (default 30s) before Databricks returns a statement id, and a query abandoned inside that window can't be cancelled.
 
 ## Errors
 

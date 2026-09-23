@@ -5,7 +5,6 @@ pub mod pipeline;
 pub mod thrift;
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
@@ -912,13 +911,10 @@ impl PyFetchallArrowStreamedIter {
     }
 }
 
-/// Not-yet-started vs. running state for `PyNdjsonStreamIter`. The
-/// submit/poll/spawn-workers step (`Pending` -> `Running`) happens on the
-/// iterator's first `__anext__` call, un-heartbeated -- matching
-/// `stream_query_json`'s pre-cutover behavior (its submit/poll wait was never
-/// heartbeat-wrapped, only its chunk loop was). The `total_timeout_s` budget
-/// starts counting from `Running`, not from construction, for the same
-/// reason.
+/// State for `PyNdjsonStreamIter`. The iterator's first `__anext__` starts
+/// the submit/poll/spawn-workers step (`Pending` -> `Submitting`), which is
+/// heartbeated and timed like the chunk pulls in `Running`; one
+/// `total_timeout_s` budget, counted from that first call, covers both.
 enum PyNdjsonStreamState {
     Pending {
         client: Arc<DbClient>,
@@ -937,7 +933,6 @@ enum PyNdjsonStreamState {
         client: Arc<DbClient>,
         wait: HeartbeatWait<NdjsonStream>,
         total_timeout_s: Option<f64>,
-        started_at: Instant,
     },
     Running {
         stream: Arc<AsyncMutex<NdjsonStream>>,
@@ -981,7 +976,6 @@ impl PyNdjsonStreamIter {
                         else {
                             unreachable!()
                         };
-                        let started_at = Instant::now();
                         let submit_client = client.clone();
                         let wait = HeartbeatWait::new(
                             async move {
@@ -1001,7 +995,6 @@ impl PyNdjsonStreamIter {
                             client,
                             wait,
                             total_timeout_s,
-                            started_at,
                         };
                     }
                     PyNdjsonStreamState::Submitting { wait, .. } => {
@@ -1018,15 +1011,14 @@ impl PyNdjsonStreamIter {
                         };
                         let PyNdjsonStreamState::Submitting {
                             client,
+                            wait,
                             total_timeout_s,
-                            started_at,
-                            ..
                         } = std::mem::replace(&mut *guard, PyNdjsonStreamState::Done)
                         else {
                             unreachable!()
                         };
                         let heartbeat = HeartbeatStream::new(total_timeout_s)
-                            .starting_at(started_at)
+                            .with_deadline(wait.deadline())
                             .with_cancel(pipeline::cancel_hook(
                                 client,
                                 stream.cancel_handle.clone(),

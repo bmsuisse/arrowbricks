@@ -7,7 +7,14 @@
   Python-side `task.cancel()`/`asyncio.wait_for`, or a poll request that
   fails mid-wait. Previously only a timeout during the chunk download
   cancelled, so a long-running query kept running on the warehouse after
-  the caller had given up.
+  the caller had given up. One gap remains on `protocol="sea"`: the submit
+  POST itself can block server-side for up to `wait_timeout` (default 30s)
+  before a statement id exists, and abandoning it inside that window has
+  nothing to cancel. Thrift submits with `runAsync` and has no such window.
+- Release the pooled session when a submit/poll wait is abandoned. It used
+  to leak the pool reservation (after `MAX_SESSIONS_PER_KEY` abandonments
+  every later query for that catalog/schema ran without a pooled session),
+  and on Thrift left the session open until its server-side TTL.
 - `stream_query_json(total_timeout_s=...)` now also bounds the submit/poll
   wait (and yields `HEARTBEAT` during it), not just the chunk downloads. A
   statement that never finished used to block it forever regardless of
