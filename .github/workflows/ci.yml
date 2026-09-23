@@ -1,9 +1,10 @@
 name: CI
 
+# Pushes to main run this via release.yml's `test` job (workflow_call), which
+# gates the auto-release on it -- so no separate `push: main` trigger here.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 
 jobs:
   # One Rust build covers both the crate's own checks/tests and produces the

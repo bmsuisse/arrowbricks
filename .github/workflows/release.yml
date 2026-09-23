@@ -1,34 +1,54 @@
 name: Release
 
+# Auto-release: every push to main runs the full CI suite, then publishes to
+# PyPI iff pyproject.toml's version has no matching `vX.Y.Z` tag yet. So a
+# release is just "bump the version (+ CHANGELOG) in a PR and merge it"; the
+# tag and GitHub Release are created here after a successful publish.
 on:
   push:
-    tags: ["v*.*.*"]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report whether a release would happen without publishing/tagging anything"
+        type: boolean
+        default: false
+
+# Two quick merges must not race each other into publishing the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   test:
+    uses: ./.github/workflows/ci.yml
+
+  plan:
+    name: Detect version bump
+    needs: test
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust/arrowbricks_core
-      - working-directory: rust/arrowbricks_core
-        run: cargo fmt --check
-      - working-directory: rust/arrowbricks_core
-        run: cargo test --no-default-features
-      - uses: astral-sh/setup-uv@v9.0.0
-        with:
-          python-version: "3.14"
-      - run: uv sync --all-extras --no-install-project
-      - run: uvx maturin build --release --out dist
-      - run: uv pip install dist/*.whl
-      - run: uv run pytest rust/arrowbricks_core/tests_py -v
-      - run: uv run ruff check .
-      - run: uv run ty check src tests
-      - run: uv run pytest -q
+          fetch-depth: 0
+      - id: check
+        run: |
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          CARGO_VERSION=$(grep -m1 '^version = ' rust/arrowbricks_core/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::warning::pyproject.toml ($VERSION) and rust/arrowbricks_core/Cargo.toml ($CARGO_VERSION) versions differ -- only pyproject.toml's is published"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            RELEASE=false
+          else
+            RELEASE=true
+          fi
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "arrowbricks: release=$RELEASE version=$VERSION"
 
   # abi3-py311 means one wheel per (OS, arch) covers every Python >= 3.11 --
   # no per-Python-version build matrix needed, unlike a non-abi3 PyO3 crate.
@@ -44,7 +64,8 @@ jobs:
   # specifically still has the same cross-compile problem aws-lc-sys did,
   # since native building never needed to find out.
   linux:
-    needs: test
+    needs: plan
+    if: needs.plan.outputs.release == 'true' && (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
     strategy:
       matrix:
         include:
@@ -66,7 +87,8 @@ jobs:
           path: dist
 
   macos:
-    needs: test
+    needs: plan
+    if: needs.plan.outputs.release == 'true' && (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
     runs-on: macos-latest
     strategy:
       matrix:
@@ -83,7 +105,8 @@ jobs:
           path: dist
 
   windows:
-    needs: test
+    needs: plan
+    if: needs.plan.outputs.release == 'true' && (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -97,7 +120,8 @@ jobs:
           path: dist
 
   sdist:
-    needs: test
+    needs: plan
+    if: needs.plan.outputs.release == 'true' && (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -111,12 +135,16 @@ jobs:
           path: dist
 
   publish:
-    needs: [linux, macos, windows, sdist]
+    needs: [plan, linux, macos, windows, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: write # push the vX.Y.Z tag + create the GitHub Release
       id-token: write # PyPI trusted publishing (OIDC) -- no stored API token
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
@@ -130,3 +158,32 @@ jobs:
           # the wheels that already uploaded successfully -- PyPI otherwise
           # rejects a re-upload of an already-published filename outright.
           skip-existing: true
+      - name: Tag release
+        run: |
+          git tag "v${{ needs.plan.outputs.version }}"
+          git push origin "v${{ needs.plan.outputs.version }}"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.plan.outputs.version }}"
+          TAG="v$VERSION"
+          PREV_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -vxF "$TAG" | head -n1)
+          # Prefer the hand-written CHANGELOG.md section ("## X.Y.Z ..." up to
+          # the next "## "); fall back to the commit list since the last tag.
+          NOTES=$(awk -v v="$VERSION" '
+            /^## / { if (found) exit; if ($2 == v) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md)
+          {
+            if [ -n "$(echo "$NOTES" | tr -d '[:space:]')" ]; then
+              echo "$NOTES"
+            elif [ -n "$PREV_TAG" ]; then
+              echo "Changes since $PREV_TAG:"
+              echo
+              git log "$PREV_TAG..HEAD" --pretty=format:'- %s (%h)'
+            else
+              echo "Initial release."
+            fi
+          } > release-notes.md
+          gh release create "$TAG" --title "arrowbricks v$VERSION" --notes-file release-notes.md

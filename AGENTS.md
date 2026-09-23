@@ -149,8 +149,12 @@ Cancellation tests (`wiremock_pipeline.rs`'s `sea_total_timeout_fires_cancel_sta
 
 ## Releasing
 
-1. Bump `version` in `pyproject.toml` (and `rust/arrowbricks_core/Cargo.toml`, kept in step for clarity even though only the root version ends up in the published wheel's metadata).
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. `.github/workflows/release.yml` runs the Rust+Python test job, then builds cross-platform wheels (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x64) + an sdist via `maturin-action`, and publishes to PyPI via trusted publishing (OIDC) -- no stored token. abi3-py311 means one wheel per (OS, arch) covers every supported Python, no per-version build matrix.
+Releases are automatic -- there's no manual tagging step.
+
+1. In a PR, bump `version` in `pyproject.toml` (and `rust/arrowbricks_core/Cargo.toml`, kept in step for clarity even though only the root version ends up in the published wheel's metadata -- `release.yml` warns if they differ) and add a `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md`.
+2. Merge to `main`. `.github/workflows/release.yml` runs the full `ci.yml` suite (via `workflow_call`), then its `plan` job checks whether a `vX.Y.Z` tag already exists for that version. If one does, it stops there, so merges without a version bump publish nothing.
+3. For a new version, it builds cross-platform wheels (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x64) + an sdist via `maturin-action` and publishes to PyPI via trusted publishing (OIDC) -- no stored token. abi3-py311 means one wheel per (OS, arch) covers every supported Python, no per-version build matrix. After a successful publish it pushes the `vX.Y.Z` tag and creates a GitHub Release whose notes are that version's `CHANGELOG.md` section (or the commit list since the previous tag if there's no section).
+
+To check what would happen without publishing, run the Release workflow manually (`workflow_dispatch`) with `dry_run` ticked.
 
 One-time, outside this repo: register this GitHub repo + `release.yml` workflow as a **trusted publisher** on the `arrowbricks` PyPI project (PyPI project settings -> Publishing). Without that, the `publish` job's OIDC exchange fails even though tests pass.
