@@ -1,6 +1,6 @@
 [package]
 name = "arrowbricks_core"
-version = "3.2.0"
+version = "4.0.0"
 edition = "2024"
 
 [lib]
@@ -11,7 +11,9 @@ crate-type = ["cdylib", "rlib"]
 # Depend on the components we use. The umbrella `arrow` crate also builds
 # arithmetic, string, and row kernels even with default-features disabled.
 # `ffi` backs src/arrow_ffi.rs, this crate's own Arrow PyCapsule bridge.
-arrow-array = { version = "59.1.0", features = ["ffi"] }
+# `chrono-tz` lets arrow-json format Databricks' named-zone timestamps
+# ("Etc/UTC"); pyo3-arrow used to enable it implicitly.
+arrow-array = { version = "59.1.0", features = ["ffi", "chrono-tz"] }
 arrow-buffer = "59.1.0"
 arrow-ipc = "59.1.0"
 arrow-schema = "59.1.0"

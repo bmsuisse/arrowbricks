@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 4.0.0 — 2026-09-27
 
+- Keep named-timezone support (`Etc/UTC`, as Databricks sends TIMESTAMP)
+  in `stream_query_json`: enable arrow-array's `chrono-tz` feature directly,
+  which pyo3-arrow previously enabled implicitly.
 - Preserve batch schema validation in the smaller Arrow bridge so inconsistent
   result chunks fail before they can be exported under the wrong type.
-
 - **Breaking:** `fetchall_arrow()`, `fetchmany_arrow()` and
   `read_ipc_stream()` return `arrowbricks._core.Table`, a minimal Arrow
   PyCapsule object, instead of pyo3-arrow's `Table`. It exposes `num_rows`,

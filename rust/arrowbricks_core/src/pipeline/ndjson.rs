@@ -576,6 +576,25 @@ mod tests {
         assert_eq!(string_lines[3], r#"{"id":4,"value":1.5}"#); // finite values untouched
     }
 
+    /// Databricks sends TIMESTAMP as `Timestamp(us, "Etc/UTC")`. A named zone
+    /// needs arrow-array's `chrono-tz` feature, which pyo3-arrow used to
+    /// enable implicitly; without it this errors ("only offset based
+    /// timezones supported").
+    #[test]
+    fn encode_ndjson_lines_handles_a_named_timezone() {
+        use arrow_array::TimestampMicrosecondArray;
+        use arrow_schema::{Field, Schema, TimeUnit};
+        let array = TimestampMicrosecondArray::from(vec![1_767_225_600_000_000]).with_timezone("Etc/UTC");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("Etc/UTC".into())),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap();
+        let lines = encode_ndjson_lines(std::slice::from_ref(&batch), false).unwrap();
+        assert_eq!(lines[0], r#"{"ts":"2026-01-01T00:00:00Z"}"#);
+    }
+
     #[test]
     fn encode_ndjson_lines_leaves_a_real_null_alone_when_requested() {
         use arrow_array::{Float64Array, Int64Array};
