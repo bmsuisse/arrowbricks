@@ -16,12 +16,12 @@ use pyo3::types::PyBytes;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
+use arrow_ffi::PyTable;
 use client::{
     ApiError, ApiErrorKind, CancelHandle, DbClient, EventSink, Protocol, QueryStatsAccumulator, QueryStatsData,
     TokenFuture, TokenProvider,
 };
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
-use arrow_ffi::PyTable;
 use pipeline::{NdjsonStream, ResultStream};
 
 /// Writes any object implementing `__arrow_c_stream__` (a `Table`/
@@ -69,7 +69,7 @@ fn read_ipc_stream(data: Bound<'_, PyBytes>) -> PyResult<PyTable> {
     let (batches, schema) = py
         .detach(|| pipeline::decode_ipc_stream(&blob))
         .map_err(|e| PyRuntimeError::new_err(e.message))?;
-    Ok(PyTable::new(batches, schema))
+    PyTable::try_new(batches, schema)
 }
 
 /// Wraps a `PyErr` raised by the caller's own `token_provider` callable (its
@@ -803,7 +803,7 @@ fn column_pairs(columns: &[client::ColumnDescription]) -> Vec<(String, Option<St
 /// schema rather than a schema-less `Table`.
 fn batches_to_pytable(batches: Vec<RecordBatch>, schema: Option<SchemaRef>) -> PyResult<PyTable> {
     let schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
-    Ok(PyTable::new(batches, schema))
+    PyTable::try_new(batches, schema)
 }
 
 #[pymethods]

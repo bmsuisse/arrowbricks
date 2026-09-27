@@ -164,3 +164,41 @@ def test_read_ipc_stream_allows_another_python_thread_to_run():
         thread.join(timeout=5)
     assert result.num_rows == 100_000
     assert ran_during_decode, "IPC decoding must release the interpreter lock"
+
+
+def test_table_exports_are_independent_and_outlive_the_table():
+    source = core.Table.from_pydict({"id": core.Array([1, 2], type=core.DataType.int64())})
+    buf = io.BytesIO()
+    arrowbricks_core.write_ipc_stream(source, buf)
+    table = arrowbricks_core.read_ipc_stream(buf.getvalue())
+    assert len(table) == 2
+    assert table.column_names == ["id"]
+    # A capsule discarded without a consumer must release only its own reader.
+    unused = table.__arrow_c_stream__()
+    del unused
+    first = table.__arrow_c_stream__(requested_schema=None)
+    second = table.__arrow_c_stream__()
+    del table, source, buf
+    gc.collect()
+
+    class Export:
+        def __init__(self, capsule):
+            self.capsule = capsule
+
+        def __arrow_c_stream__(self, requested_schema=None):
+            return self.capsule
+
+    for capsule in (first, second):
+        assert core.Table.from_arrow(Export(capsule))["id"].to_pylist() == [1, 2]
+    # Each capsule can be consumed only once; a second import must error.
+    with pytest.raises(RuntimeError):
+        arrowbricks_core.write_ipc_stream(Export(first), io.BytesIO())
+
+
+def test_write_ipc_stream_rejects_a_schema_capsule():
+    class WrongCapsule:
+        def __arrow_c_stream__(self):
+            return core.Schema([core.Field("id", core.DataType.int64())]).__arrow_c_schema__()
+
+    with pytest.raises(ValueError):
+        arrowbricks_core.write_ipc_stream(WrongCapsule(), io.BytesIO())

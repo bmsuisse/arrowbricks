@@ -513,3 +513,44 @@ async def test_description_falls_back_to_real_arrow_schema_when_manifest_omits_i
     assert [r[0] for r in rows] == [0, 1, 2]
     assert cursor.description is not None
     assert cursor.description[0][0] == "id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paged", [False, True])
+async def test_arrow_fetch_rejects_inconsistent_chunk_schemas(mock_server, paged):
+    """Never export a later chunk's buffers under the first chunk's type."""
+    import io
+
+    from arro3.core import Array, DataType
+
+    from arrowbricks import write_ipc_stream
+
+    server = mock_server()
+    server.get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}").mock(Response(json_body={"state": "RUNNING"}))
+    server.post("/api/2.0/sql/statements").mock(
+        Response(
+            json_body={
+                "statement_id": "mixed-schema",
+                "status": {"state": "SUCCEEDED"},
+                "manifest": {"chunks": [{"chunk_index": i, "row_count": 1} for i in range(2)]},
+            }
+        )
+    )
+    for i, dtype in enumerate([DataType.int64(), DataType.float64()]):
+        buf = io.BytesIO()
+        write_ipc_stream(Table.from_pydict({"value": Array([1], type=dtype)}), buf)
+        server.get(f"/api/2.0/sql/statements/mixed-schema/result/chunks/{i}").mock(
+            Response(json_body={"external_links": [{"external_link": f"{server.host}/chunk-{i}"}]})
+        )
+        server.get(f"/chunk-{i}").mock(Response(content=buf.getvalue()))
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+    try:
+        cursor = Cursor(client)
+        await cursor.execute("SELECT value FROM test")
+        if paged:
+            first = await cursor.fetchmany_arrow(1)
+            assert Table.from_arrow(first)["value"].to_pylist() == [1]
+        with pytest.raises(RuntimeError, match="All batches must have same schema"):
+            await cursor.fetchall_arrow()
+    finally:
+        await client.aclose()

@@ -27,8 +27,20 @@ pub struct PyTable {
 }
 
 impl PyTable {
-    pub fn new(batches: Vec<RecordBatch>, schema: SchemaRef) -> Self {
-        Self { batches, schema }
+    pub fn try_new(batches: Vec<RecordBatch>, schema: SchemaRef) -> PyResult<Self> {
+        // A stream advertises one schema for every batch. Exporting different
+        // buffer layouts under it can make consumers misinterpret memory.
+        // Like the previous bridge, ignore metadata and nullability differences.
+        if batches.iter().any(|batch| {
+            let fields = batch.schema_ref().fields();
+            fields.len() != schema.fields().len()
+                || fields.iter().zip(schema.fields()).any(|(actual, expected)| {
+                    actual.name() != expected.name() || !actual.data_type().equals_datatype(expected.data_type())
+                })
+        }) {
+            return Err(PyRuntimeError::new_err("All batches must have same schema"));
+        }
+        Ok(Self { batches, schema })
     }
 }
 
@@ -54,7 +66,11 @@ impl PyTable {
     }
 
     fn __repr__(&self) -> String {
-        format!("arrowbricks.Table(num_rows={}, num_columns={})", self.num_rows(), self.num_columns())
+        format!(
+            "arrowbricks.Table(num_rows={}, num_columns={})",
+            self.num_rows(),
+            self.num_columns()
+        )
     }
 
     /// `requested_schema` is ignored, as the PyCapsule interface allows: the
@@ -80,7 +96,9 @@ impl PyTable {
 /// Imports any object implementing `__arrow_c_stream__`.
 pub fn import_stream(obj: &Bound<'_, PyAny>) -> PyResult<ArrowArrayStreamReader> {
     let capsule = obj.call_method0("__arrow_c_stream__")?.cast_into::<PyCapsule>()?;
-    let ptr = capsule.pointer_checked(Some(STREAM_CAPSULE))?.cast::<FFI_ArrowArrayStream>();
+    let ptr = capsule
+        .pointer_checked(Some(STREAM_CAPSULE))?
+        .cast::<FFI_ArrowArrayStream>();
     // SAFETY: the capsule name check guarantees an `ArrowArrayStream`;
     // `from_raw` moves it out and marks the capsule's copy released, so the
     // capsule destructor does not release it a second time.
