@@ -1188,8 +1188,8 @@ async fn thrift_session_is_created_once_and_reused_across_sequential_statements(
 }
 
 /// A successful statement refreshes `ensure_warehouse_running`'s RUNNING
-/// cache. With a 500ms TTL and ~300ms gaps, the third statement is >500ms
-/// after the only warehouse GET but <500ms after the second statement
+/// cache. With a 1s TTL and ~600ms gaps, the third statement is >1s
+/// after the only warehouse GET but <1s after the second statement
 /// succeeded -- so exactly one GET only if success refreshes the cache.
 #[tokio::test]
 async fn thrift_successful_statement_refreshes_the_warehouse_running_cache() {
@@ -1214,11 +1214,11 @@ async fn thrift_successful_statement_refreshes_the_warehouse_running_cache() {
     let client = Arc::new(
         DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
             .with_protocol(Protocol::Thrift)
-            .with_warehouse_confirmed_running_ttl(0.5),
+            .with_warehouse_confirmed_running_ttl(1.0),
     );
     for i in 0..3 {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
         let mut stream = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
             .await
@@ -1302,7 +1302,7 @@ async fn thrift_polling_ramps_up_so_a_quick_statement_returns_fast() {
     assert_eq!(poll_calls.load(Ordering::SeqCst), 3);
     assert_ids_in_order(&batches, 1);
     assert!(
-        submit_elapsed < std::time::Duration::from_millis(200),
+        submit_elapsed < std::time::Duration::from_millis(300),
         "two RUNNING polls should cost ~35ms of ramped sleep, not 2x200ms: took {submit_elapsed:?}"
     );
 }

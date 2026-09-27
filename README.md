@@ -200,6 +200,15 @@ except ArrowbricksError:
 
 ## Arrow vs. row-tuple fetches
 
+From 4.0, Arrow fetches and `ReplayableArrowChunk.to_table()` return
+`arrowbricks._core.Table`. It exposes `num_rows`, `num_columns`,
+`column_names`, `len(table)` and the Arrow capsule interfaces. For methods
+such as `.column()`, `.schema` or `.to_batches()`, first convert with
+`arro3.core.Table.from_arrow(table)`, `pyarrow.table(table)` or
+`polars.from_arrow(table)`. DuckDB can consume it directly.
+`write_ipc_stream` requires `__arrow_c_stream__`; wrap an array-only producer
+in a table before passing it in.
+
 Everything above works with zero dependencies installed *except* row-tuple fetches. `fetchall_arrow`/`fetchmany_arrow` return an Arrow table straight from the Rust core -- the faster path if your code can consume Arrow directly (DuckDB, pyarrow, polars, a Parquet writer, ...):
 
 ```python

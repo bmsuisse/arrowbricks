@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve batch schema validation in the smaller Arrow bridge so inconsistent
+  result chunks fail before they can be exported under the wrong type.
+
 - **Breaking:** `fetchall_arrow()`, `fetchmany_arrow()` and
   `read_ipc_stream()` return `arrowbricks._core.Table`, a minimal Arrow
   PyCapsule object, instead of pyo3-arrow's `Table`. It exposes `num_rows`,
@@ -20,7 +23,8 @@
   before, 0 of 9 after. Back-to-back queries are unchanged.
 - Thrift status polling sleeps 10/25/50/100 ms, then 200 ms steady, instead
   of a fixed 200 ms. The server holds each `GetOperationStatus` open for
-  about 5 s, so this saves at most one sleep on long-running queries.
+  about 5 s in the measured workspace, so the ramp mainly helps when
+  status calls return quickly.
 
 ## 3.2.0 — 2026-09-23
 

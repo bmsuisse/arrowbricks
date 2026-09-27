@@ -1189,7 +1189,7 @@ async fn session_is_created_once_and_reused_across_sequential_statements() {
 
 /// SEA counterpart of `wiremock_thrift.rs`'s cache-refresh test: a SUCCEEDED
 /// statement refreshes `ensure_warehouse_running`'s cache, so the third of
-/// three statements ~300ms apart (500ms TTL) needs no second warehouse GET.
+/// three statements ~600ms apart (1s TTL) needs no second warehouse GET.
 #[tokio::test]
 async fn successful_statement_refreshes_the_warehouse_running_cache() {
     let server = MockServer::start().await;
@@ -1212,11 +1212,11 @@ async fn successful_statement_refreshes_the_warehouse_running_cache() {
     let client = Arc::new(
         DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
             .with_protocol(Protocol::Sea)
-            .with_warehouse_confirmed_running_ttl(0.5),
+            .with_warehouse_confirmed_running_ttl(1.0),
     );
     for i in 0..3 {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
         run_pipeline(client.clone(), "SELECT 1", None, None, None)
             .await
