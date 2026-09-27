@@ -1,3 +1,4 @@
+mod arrow_ffi;
 pub mod client;
 pub mod heartbeat;
 pub mod json_convert;
@@ -12,8 +13,6 @@ use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyBytes;
-use pyo3_arrow::PyTable;
-use pyo3_arrow::input::AnyRecordBatch;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -22,6 +21,7 @@ use client::{
     TokenFuture, TokenProvider,
 };
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
+use arrow_ffi::PyTable;
 use pipeline::{NdjsonStream, ResultStream};
 
 /// Writes any object implementing `__arrow_c_stream__` (a `Table`/
@@ -33,9 +33,8 @@ use pipeline::{NdjsonStream, ResultStream};
 #[pyfunction]
 #[pyo3(signature = (stream, buf))]
 fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyAny>) -> PyResult<()> {
-    let any_rb: AnyRecordBatch = stream.extract()?;
-    let mut reader = any_rb.into_reader()?;
-    let schema = reader.schema();
+    let mut reader = arrow_ffi::import_stream(&stream)?;
+    let schema = arrow_array::RecordBatchReader::schema(&reader);
     let mut ipc_buf: Vec<u8> = Vec::new();
     {
         let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut ipc_buf, &schema)
@@ -70,7 +69,7 @@ fn read_ipc_stream(data: Bound<'_, PyBytes>) -> PyResult<PyTable> {
     let (batches, schema) = py
         .detach(|| pipeline::decode_ipc_stream(&blob))
         .map_err(|e| PyRuntimeError::new_err(e.message))?;
-    PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    Ok(PyTable::new(batches, schema))
 }
 
 /// Wraps a `PyErr` raised by the caller's own `token_provider` callable (its
@@ -804,7 +803,7 @@ fn column_pairs(columns: &[client::ColumnDescription]) -> Vec<(String, Option<St
 /// schema rather than a schema-less `Table`.
 fn batches_to_pytable(batches: Vec<RecordBatch>, schema: Option<SchemaRef>) -> PyResult<PyTable> {
     let schema = schema.unwrap_or_else(|| Arc::new(Schema::empty()));
-    PyTable::try_new(batches, schema).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    Ok(PyTable::new(batches, schema))
 }
 
 #[pymethods]
@@ -854,11 +853,7 @@ impl PyResultSet {
     /// `Cursor.description`'s shape. `None` before any fetch (the caller
     /// should fall back to `columns`, the manifest-based pre-fetch
     /// estimate). Computed directly from the decoded `arrow_schema::Schema`
-    /// here rather than via a returned `Table`'s own `.schema` property --
-    /// that property specifically requires a *real* `arro3.core` install to
-    /// construct its return value (by pyo3-arrow's own design, so callers
-    /// get their own runtime's Schema type back), which would reintroduce
-    /// exactly the dependency this crate's callers don't have.
+    /// here, so no Arrow library is needed to read it.
     fn schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1065,6 +1060,7 @@ impl PyNdjsonStreamIter {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_ipc_stream, m)?)?;
     m.add_function(wrap_pyfunction!(read_ipc_stream, m)?)?;
+    m.add_class::<PyTable>()?;
     m.add_class::<PyDbClient>()?;
     m.add_class::<PyResultSet>()?;
     m.add_class::<PyHeartbeat>()?;

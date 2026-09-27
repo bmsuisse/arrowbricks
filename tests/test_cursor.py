@@ -4,6 +4,7 @@ import json
 import time
 
 import pytest
+from arro3.core import Table
 from conftest import WAREHOUSE_ID, Request, Response
 
 from arrowbricks import HEARTBEAT, DatabricksClient, QueryTimeout
@@ -123,7 +124,7 @@ async def test_prefer_inline_uses_embedded_data_array_with_no_further_requests(m
     await cursor.execute("SELECT * FROM t", prefer_inline=True)
     table = await cursor.fetchall_arrow()
     assert table.num_rows == 2
-    assert table.column("id").to_pylist() == [0, 1]
+    assert Table.from_arrow(table).column("id").to_pylist() == [0, 1]
     assert submit_route.call_count == 1, "prefer_inline must not need a second statement execution when it succeeds"
 
 
@@ -327,7 +328,7 @@ async def test_fetchall_arrow_returns_a_table_with_all_rows(mock_warehouse):
 
     assert table.num_rows == 8
     assert table.column_names == ["id", "label"]
-    assert table.column(0).combine_chunks().to_pylist() == list(range(8))
+    assert Table.from_arrow(table).column(0).combine_chunks().to_pylist() == list(range(8))
 
 
 @pytest.mark.asyncio
@@ -342,8 +343,8 @@ async def test_fetchmany_arrow_pages_across_chunk_boundaries(mock_warehouse):
 
     assert first.num_rows == 4
     assert second.num_rows == 2
-    assert first.column(0).combine_chunks().to_pylist() == [0, 1, 2, 3]
-    assert second.column(0).combine_chunks().to_pylist() == [4, 5]
+    assert Table.from_arrow(first).column(0).combine_chunks().to_pylist() == [0, 1, 2, 3]
+    assert Table.from_arrow(second).column(0).combine_chunks().to_pylist() == [4, 5]
 
 
 @pytest.mark.asyncio

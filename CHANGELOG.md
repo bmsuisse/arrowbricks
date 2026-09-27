@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Breaking:** `fetchall_arrow()`, `fetchmany_arrow()` and
+  `read_ipc_stream()` return `arrowbricks._core.Table`, a minimal Arrow
+  PyCapsule object, instead of pyo3-arrow's `Table`. It exposes `num_rows`,
+  `num_columns`, `column_names`, `len()`, `__arrow_c_stream__` and
+  `__arrow_c_schema__`; use `pyarrow.table(t)`, `polars.DataFrame(t)` or
+  `arro3.core.Table.from_arrow(t)` for anything else. DuckDB reads it
+  directly as before. `requested_schema` is ignored, as the PyCapsule
+  interface permits. The compiled extension shrinks from 9.3 MB to 4.6 MB
+  (wheel 3.4 MB to 2.2 MB on macOS arm64), with no measured speed change.
+- `write_ipc_stream` accepts objects implementing `__arrow_c_stream__`;
+  `__arrow_c_array__`-only objects are no longer accepted.
 - Refresh the warehouse-running cache whenever a statement succeeds, so
   steady traffic with gaps under `warehouse_confirmed_running_ttl_s` no
   longer pays the warehouse-status GET. Measured on a real warehouse with

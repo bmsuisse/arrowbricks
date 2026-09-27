@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 import thrift_mock as tm
+from arro3.core import Table
 
 from arrowbricks import _core as arrowbricks_core
 
@@ -51,7 +52,7 @@ async def test_thrift_execute_returns_data_inline_via_direct_results(mock_thrift
     result = await client.execute("SELECT * FROM t")
     table = await result.fetchall_arrow()
     assert table.num_rows == 3
-    assert table.column("id").to_pylist() == [0, 1, 2]
+    assert Table.from_arrow(table).column("id").to_pylist() == [0, 1, 2]
 
 
 @pytest.mark.asyncio
@@ -88,7 +89,7 @@ async def test_thrift_multi_batch_fetch_preserves_order(mock_thrift_server):
     result = await client.execute("SELECT * FROM t ORDER BY id")
     table = await result.fetchall_arrow()
     assert table.num_rows == total_rows
-    assert table.column("id").to_pylist() == list(range(total_rows))
+    assert Table.from_arrow(table).column("id").to_pylist() == list(range(total_rows))
 
 
 @pytest.mark.asyncio
@@ -133,7 +134,7 @@ async def test_thrift_lz4_compressed_result_links_are_decompressed(mock_thrift_s
     result = await client.execute("SELECT * FROM t")
     table = await result.fetchall_arrow()
     assert table.num_rows == 4
-    assert table.column("id").to_pylist() == [0, 1, 2, 3]
+    assert Table.from_arrow(table).column("id").to_pylist() == [0, 1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -222,4 +223,4 @@ async def test_thrift_is_the_default_protocol_when_omitted(mock_thrift_server):
     client = arrowbricks_core.Client(host=server.host, warehouse_id=WAREHOUSE_ID, token="fake")
     result = await client.execute("SELECT * FROM t")
     table = await result.fetchall_arrow()
-    assert table.column("id").to_pylist() == [0, 1]
+    assert Table.from_arrow(table).column("id").to_pylist() == [0, 1]

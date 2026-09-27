@@ -10,7 +10,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Depend on the components we use. The umbrella `arrow` crate also builds
 # arithmetic, string, and row kernels even with default-features disabled.
-arrow-array = "59.1.0"
+# `ffi` backs src/arrow_ffi.rs, this crate's own Arrow PyCapsule bridge.
+arrow-array = { version = "59.1.0", features = ["ffi"] }
 arrow-buffer = "59.1.0"
 arrow-ipc = "59.1.0"
 arrow-schema = "59.1.0"
@@ -19,13 +20,12 @@ bytes = "1.12.1"
 # Already in the dependency graph; vectorized newline search in NDJSON output.
 memchr = "2"
 # Already an unconditional transitive dependency of arrow-cast (pulled in by
-# pyo3-arrow) at this exact version -- declared directly here too so
+# arrow-json) at this exact version -- declared directly here too so
 # json_convert.rs can decode BINARY columns without hand-rolling base64. No
 # new code ships that wasn't already linked in (feature unification, same
 # reasoning as chrono/rustls below).
 base64 = "0.23"
-# Already an unconditional transitive dependency of pyo3-arrow (see its own
-# comment below) -- declared directly here too so json_convert.rs can parse
+# Already an unconditional transitive dependency of arrow-array -- declared directly here too so json_convert.rs can parse
 # DATE/TIMESTAMP/TIMESTAMP_NTZ strings without hand-rolling calendar
 # arithmetic. No new code ships that wasn't already linked in.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -35,12 +35,6 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Pure Rust, no C toolchain dependency -- unlike reqwest's TLS stack below.
 lz4_flex = { version = "0.14", default-features = false, features = ["frame", "std"] }
 pyo3 = { version = "0.29.1", features = ["abi3-py311"] }
-# pyo3-arrow's only optional feature is buffer_protocol (on by default),
-# which we don't use -- numpy/chrono/chrono-tz/arrow-cast(prettyprint) below
-# it are unconditional dependencies of the crate itself, not features, so
-# they ship regardless; not worth dropping pyo3-arrow over that (reimplementing
-# the Arrow C Data Interface ourselves is a much bigger risk than the MBs saved).
-pyo3-arrow = { version = "0.19.0", default-features = false }
 pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
 pythonize = "0.29.0"
 # reqwest's own `rustls` feature is hardcoded to `__rustls-aws-lc-rs`, no way
@@ -134,9 +128,3 @@ opt-level = "s"
 strip = true
 lto = true
 codegen-units = 1
-
-[profile.release.package.pyo3-arrow]
-# This bridge is dominated by interoperability helpers. Optimizing it for
-# size saves ~32 KiB on macOS arm64; the IPC decoder keeps opt-level="s".
-# Replay and live-query benchmarks are recorded in benchmarks/2026-09-06.md.
-opt-level = "z"
