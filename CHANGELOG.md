@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Refresh the warehouse-running cache whenever a statement succeeds, so
+  steady traffic with gaps under `warehouse_confirmed_running_ttl_s` no
+  longer pays the warehouse-status GET. Measured on a real warehouse with
+  queries 20 s apart: the extra 60-90 ms GET appeared on 4 of 9 queries
+  before, 0 of 9 after. Back-to-back queries are unchanged.
+- Thrift status polling sleeps 10/25/50/100 ms, then 200 ms steady, instead
+  of a fixed 200 ms. The server holds each `GetOperationStatus` open for
+  about 5 s, so this saves at most one sleep on long-running queries.
+
 ## 3.2.0 — 2026-09-23
 
 - Cancel a statement server-side when its submit/poll wait is abandoned --
@@ -22,6 +33,7 @@
 - `stream_query_json` raises `QueryTimeout` on timeout, same as the cursor
   APIs, instead of a plain `ArrowbricksError`. Still a `RuntimeError`/
   `ArrowbricksError` subclass, so existing `except` clauses keep matching.
+
 
 ## 3.1.4 — 2026-09-07
 
