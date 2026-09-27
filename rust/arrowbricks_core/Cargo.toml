@@ -25,9 +25,9 @@ memchr = "2"
 # new code ships that wasn't already linked in (feature unification, same
 # reasoning as chrono/rustls below).
 base64 = "0.23"
-# Already an unconditional transitive dependency of arrow-array -- declared directly here too so json_convert.rs can parse
-# DATE/TIMESTAMP/TIMESTAMP_NTZ strings without hand-rolling calendar
-# arithmetic. No new code ships that wasn't already linked in.
+# Already an unconditional transitive dependency of arrow-array -- declared
+# directly here too so json_convert.rs can parse DATE/TIMESTAMP/TIMESTAMP_NTZ
+# strings without hand-rolling calendar arithmetic. No new code ships that wasn't already linked in.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Decompresses cloud-fetch chunk bytes when the server honors our
 # `result_compression: LZ4_FRAME` request (see client.rs's execute_statement)
