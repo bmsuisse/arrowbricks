@@ -14,8 +14,8 @@
   `__arrow_c_schema__`; use `pyarrow.table(t)`, `polars.DataFrame(t)` or
   `arro3.core.Table.from_arrow(t)` for anything else. DuckDB reads it
   directly as before. `requested_schema` is ignored, as the PyCapsule
-  interface permits. The compiled extension shrinks from 9.3 MB to 4.6 MB
-  (wheel 3.4 MB to 2.2 MB on macOS arm64), with no measured speed change.
+  interface permits. The compiled extension shrinks from 9.3 MB to 5.9 MB
+  (wheel 3.4 MB to 2.4 MB on macOS arm64), with no measured speed change.
 - `write_ipc_stream` accepts objects implementing `__arrow_c_stream__`;
   `__arrow_c_array__`-only objects are no longer accepted.
 - Refresh the warehouse-running cache whenever a statement succeeds, so
