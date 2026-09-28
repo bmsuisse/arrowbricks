@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "3.2.0"
+version = "4.0.0"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
 readme = "README.md"
 license = "MIT"
@@ -15,12 +15,8 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-# pyo3-arrow's own Table.column()/schema methods are designed to hand back
-# the caller's *real* arro3.core objects for further arro3-ecosystem
-# interop (not a value pyo3-arrow can materialize itself), so
-# fetchone/fetchmany/fetchall need this installed. `pip install
-# arrowbricks[arro3]` -- or handle rows as Arrow via fetchall_arrow/
-# fetchmany_arrow instead, which don't need it at all.
+# Row materialization converts our capsule table through arro3-core.
+# Arrow fetches and streaming do not need this optional dependency.
 arro3 = ["arro3-core>=0.8"]
 
 [project.urls]

@@ -465,7 +465,7 @@ pub async fn execute_lazy_prefer_inline(
 
 /// Full submit -> poll -> fetch -> reorder -> decode pipeline. Returns the
 /// assembled batches in logical (chunk_index) order plus their schema, ready
-/// to hand to `pyo3_arrow::PyTable` for a zero-copy Arrow C Data Interface
+/// to hand to `arrow_ffi::PyTable` for a zero-copy Arrow C Data Interface
 /// handoff back to Python (consumable by DuckDB/pyarrow/arro3 directly).
 ///
 /// Decode of each reordered chunk is pushed onto `spawn_blocking` rather

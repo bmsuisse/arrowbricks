@@ -217,13 +217,18 @@ pub const MAX_SPLIT_PARTS: usize = 8;
 /// silently could.
 const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 64;
 
-/// How long the Thrift path polls `GetOperationStatus` when a statement
-/// doesn't finish within its `getDirectResults` budget (see
-/// `execute_lazy_thrift`) -- shorter than SEA's `POLL_INTERVAL` (2s) since
-/// this path exists specifically to be fast for small/quick queries; a
-/// query slow enough to need many polls pays a modest, bounded amount of
-/// extra round trips either way.
-pub(crate) const THRIFT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Sleep before the `attempt`-th (0-based) re-poll of Thrift
+/// `GetOperationStatus` when a statement doesn't finish within its
+/// `getDirectResults` budget (see `execute_lazy_thrift`): a short ramp
+/// (10/25/50/100ms), then 200ms steady. A fixed 200ms made a statement that
+/// finished just after the first poll pay a full 200ms of pure sleep; the
+/// ramp costs at most four extra cheap RPCs before settling at the old
+/// steady rate. Shorter than SEA's `POLL_INTERVAL` (2s) since this path
+/// exists specifically to be fast for small/quick queries.
+pub(crate) fn thrift_poll_delay(attempt: usize) -> Duration {
+    const RAMP_MS: [u64; 5] = [10, 25, 50, 100, 200];
+    Duration::from_millis(RAMP_MS[attempt.min(RAMP_MS.len() - 1)])
+}
 
 /// Request hints on `TExecuteStatementReq.getDirectResults`/`TFetchResultsReq` --
 /// how much of the result the server should try to hand back in one RPC.
@@ -644,6 +649,15 @@ impl DbClient {
         .await
     }
 
+    /// Refreshes `ensure_warehouse_running`'s RUNNING cache. Also called once a
+    /// statement reaches a successful terminal state (SEA's `submit_and_poll`,
+    /// Thrift's `submit_and_await_thrift_statement`): a statement that just ran
+    /// proves the warehouse is up as well as the REST GET does, so steady
+    /// traffic with gaps under the TTL never pays that GET again.
+    pub(crate) fn note_warehouse_running(&self) {
+        *self.warehouse_confirmed_running_at.lock().unwrap() = Some(Instant::now());
+    }
+
     /// Shared by both protocols -- plain REST against `/api/2.0/sql/warehouses/{id}`,
     /// nothing SEA- or Thrift-specific about it (see AGENTS.md for why the
     /// Thrift path didn't always call this).
@@ -660,7 +674,7 @@ impl DbClient {
         let url = format!("{}/api/2.0/sql/warehouses/{}", self.host, self.warehouse_id);
         let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None, None).await?;
         if data.state == "RUNNING" {
-            *self.warehouse_confirmed_running_at.lock().unwrap() = Some(Instant::now());
+            self.note_warehouse_running();
             return Ok(());
         }
         if data.state == "STOPPED" {
@@ -673,7 +687,7 @@ impl DbClient {
             tokio::time::sleep(POLL_INTERVAL).await;
             let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None, None).await?;
             if data.state == "RUNNING" {
-                *self.warehouse_confirmed_running_at.lock().unwrap() = Some(Instant::now());
+                self.note_warehouse_running();
                 return Ok(());
             }
         }

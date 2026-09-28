@@ -140,7 +140,7 @@ async fn submit_and_await_thrift_statement(
         stats.set_in_flight(CancelHandle::Thrift {
             operation: operation.clone(),
         });
-        loop {
+        for attempt in 0.. {
             let status = client.thrift_get_operation_status_raw(&operation, stats).await?;
             if let Some(e) = status.terminal_error() {
                 stats.clear_in_flight();
@@ -150,9 +150,10 @@ async fn submit_and_await_thrift_statement(
                 stats.clear_in_flight();
                 break;
             }
-            tokio::time::sleep(crate::client::THRIFT_POLL_INTERVAL).await;
+            tokio::time::sleep(crate::client::thrift_poll_delay(attempt)).await;
         }
     }
+    client.note_warehouse_running();
 
     Ok(ThriftStatementReady {
         operation,

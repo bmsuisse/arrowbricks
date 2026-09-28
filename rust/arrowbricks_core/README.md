@@ -63,12 +63,11 @@ asyncio.run(main())
 ```
 
 `table` implements the [Arrow C Data Interface](https://arrow.apache.org/docs/format/CDataInterface.html)
-(`__arrow_c_stream__`/`__arrow_c_array__`) -- any consumer that speaks that
-protocol (DuckDB, pyarrow, arro3) can import it with zero copies, no extra
-dependency needed. Note: `table.column(i)`/`table.schema` (materializing
-native Python values) are `pyo3-arrow` methods designed to hand back the
-caller's own *real* `arro3.core` objects -- they need `arro3-core` installed,
-unlike the table object itself.
+(`__arrow_c_stream__`/`__arrow_c_schema__`) -- any consumer that speaks that
+protocol (DuckDB, pyarrow, polars, arro3) can import it with zero copies, no
+extra dependency needed. The table itself only exposes `num_rows`,
+`num_columns`, `column_names` and `len()`; to read values, import it into an
+Arrow library first (e.g. `arro3.core.Table.from_arrow(table)`).
 
 ## API
 

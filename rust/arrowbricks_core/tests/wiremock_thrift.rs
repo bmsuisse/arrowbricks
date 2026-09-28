@@ -1187,6 +1187,126 @@ async fn thrift_session_is_created_once_and_reused_across_sequential_statements(
     );
 }
 
+/// A successful statement refreshes `ensure_warehouse_running`'s RUNNING
+/// cache. With a 1s TTL and ~600ms gaps, the third statement is >1s
+/// after the only warehouse GET but <1s after the second statement
+/// succeeded -- so exactly one GET only if success refreshes the cache.
+#[tokio::test]
+async fn thrift_successful_statement_refreshes_the_warehouse_running_cache() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+
+    let schema = test_schema();
+    let schema_for_mock = schema.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(move |_req: &Request| {
+            ResponseTemplate::new(200).set_body_raw(
+                small_execute_statement_success(b"op".to_vec(), &schema_for_mock),
+                "application/x-thrift",
+            )
+        })
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_protocol(Protocol::Thrift)
+            .with_warehouse_confirmed_running_ttl(1.0),
+    );
+    for i in 0..3 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        }
+        let mut stream = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
+            .await
+            .unwrap();
+        stream.fetchall_arrow().await.unwrap();
+    }
+
+    let warehouse_gets = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method == wiremock::http::Method::GET && r.url.path().starts_with("/api/2.0/sql/warehouses/"))
+        .count();
+    assert_eq!(
+        warehouse_gets, 1,
+        "a statement that just succeeded proves the warehouse is running -- no further GET within the TTL"
+    );
+}
+
+/// `GetOperationStatus` polling ramps up (10/25/50/100ms, then 200ms) instead
+/// of a fixed 200ms: two RUNNING polls then FINISHED must cost ~35ms of
+/// sleep, not the old fixed 400ms.
+#[tokio::test]
+async fn thrift_polling_ramps_up_so_a_quick_statement_returns_fast() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-p", b"opsecret-p", None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+
+    let poll_calls = Arc::new(AtomicUsize::new(0));
+    let poll_calls_for_mock = poll_calls.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(move |_req: &Request| {
+            let n = poll_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            let state = if n < 2 {
+                operation_state::RUNNING
+            } else {
+                operation_state::FINISHED
+            };
+            ResponseTemplate::new(200)
+                .set_body_raw(build_get_operation_status_resp(state, None), "application/x-thrift")
+        })
+        .mount(&server)
+        .await;
+
+    let schema = test_schema();
+    let (schema_bytes, batch_bytes) = build_schema_and_batch_messages(&schema, &[(0, 1)]);
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("FetchResults"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_fetch_results_resp(&FetchSpec {
+                has_more_rows: false,
+                arrow_batches: vec![(batch_bytes[0].clone(), 1)],
+                metadata: Some((false, Some(schema_bytes))),
+                ..Default::default()
+            }),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let t0 = std::time::Instant::now();
+    let mut stream = execute_lazy_thrift(client, "SELECT 1", None, None, None).await.unwrap();
+    let submit_elapsed = t0.elapsed();
+    let (batches, _) = stream.fetchall_arrow().await.unwrap();
+
+    assert_eq!(poll_calls.load(Ordering::SeqCst), 3);
+    assert_ids_in_order(&batches, 1);
+    assert!(
+        submit_elapsed < std::time::Duration::from_millis(300),
+        "two RUNNING polls should cost ~35ms of ramped sleep, not 2x200ms: took {submit_elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn thrift_pool_exhaustion_falls_back_to_a_throwaway_session_that_still_succeeds() {
     let server = MockServer::start().await;

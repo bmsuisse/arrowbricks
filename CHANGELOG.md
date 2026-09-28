@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.0.0 — 2026-09-27
+
+- Keep named-timezone support (`Etc/UTC`, as Databricks sends TIMESTAMP)
+  in `stream_query_json`: enable arrow-array's `chrono-tz` feature directly,
+  which pyo3-arrow previously enabled implicitly.
+- Preserve batch schema validation in the smaller Arrow bridge so inconsistent
+  result chunks fail before they can be exported under the wrong type.
+- **Breaking:** `fetchall_arrow()`, `fetchmany_arrow()` and
+  `read_ipc_stream()` return `arrowbricks._core.Table`, a minimal Arrow
+  PyCapsule object, instead of pyo3-arrow's `Table`. It exposes `num_rows`,
+  `num_columns`, `column_names`, `len()`, `__arrow_c_stream__` and
+  `__arrow_c_schema__`; use `pyarrow.table(t)`, `polars.DataFrame(t)` or
+  `arro3.core.Table.from_arrow(t)` for anything else. DuckDB reads it
+  directly as before. `requested_schema` is ignored, as the PyCapsule
+  interface permits. The compiled extension shrinks from 9.3 MB to 5.9 MB
+  (wheel 3.4 MB to 2.4 MB on macOS arm64), with no measured speed change.
+- `write_ipc_stream` accepts objects implementing `__arrow_c_stream__`;
+  `__arrow_c_array__`-only objects are no longer accepted.
+- Refresh the warehouse-running cache whenever a statement succeeds, so
+  steady traffic with gaps under `warehouse_confirmed_running_ttl_s` no
+  longer pays the warehouse-status GET. Measured on a real warehouse with
+  queries 20 s apart: the extra 60-90 ms GET appeared on 4 of 9 queries
+  before, 0 of 9 after. Back-to-back queries are unchanged.
+- Thrift status polling sleeps 10/25/50/100 ms, then 200 ms steady, instead
+  of a fixed 200 ms. The server holds each `GetOperationStatus` open for
+  about 5 s in the measured workspace, so the ramp mainly helps when
+  status calls return quickly.
+
 ## 3.2.0 — 2026-09-23
 
 - Cancel a statement server-side when its submit/poll wait is abandoned --
@@ -22,6 +50,7 @@
 - `stream_query_json` raises `QueryTimeout` on timeout, same as the cursor
   APIs, instead of a plain `ArrowbricksError`. Still a `RuntimeError`/
   `ArrowbricksError` subclass, so existing `except` clauses keep matching.
+
 
 ## 3.1.4 — 2026-09-07
 

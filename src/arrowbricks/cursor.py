@@ -52,6 +52,9 @@ def _table_to_rows(table: Any) -> list[Row]:
     if table.num_rows == 0:
         return []
     try:
+        from arro3.core import Table
+
+        table = Table.from_arrow(table)
         columns = [table.column(i).combine_chunks().to_pylist() for i in range(table.num_columns)]
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
