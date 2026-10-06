@@ -67,10 +67,9 @@ pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError
     Ok(Bytes::from(out))
 }
 
-/// `Response::bytes()` collects the body as separate frames and then copies
-/// them into one buffer, so each in-flight chunk briefly costs twice its
-/// size. Reading straight into a buffer sized from `Content-Length` avoids
-/// that copy; without a length it falls back to `bytes()`.
+/// Reads the body into one buffer sized from `Content-Length`. Frames are
+/// freed as they are consumed, so a chunk peaks at about its own size instead
+/// of the ~2x `Response::bytes()` reaches while joining collected frames.
 async fn read_body(mut resp: reqwest::Response) -> Result<Bytes, reqwest::Error> {
     // Cap the up-front reservation so a bogus header can't demand gigabytes.
     let Some(len) = resp.content_length().map(|n| n.min(1 << 30) as usize) else {
