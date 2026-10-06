@@ -1,5 +1,13 @@
 # Changelog
 
+## 5.0.1 — 2026-10-06
+
+- Refresh all locked dependencies: Rust crates via `cargo update` (within
+  the declared semver ranges, so the compiled extension picks up the latest
+  patch releases of tokio, rustls, hyper, zerocopy and others) and the dev
+  tooling via `uv lock --upgrade` (arro3 0.9, databricks-sql-connector 4.6,
+  ruff 0.16.10, ty 0.0.84, ...). No API or behavior changes.
+
 ## 5.0.0 — 2026-10-06
 
 - Python 3.15 support: the full suite passes on 3.15.0rc2, also with
