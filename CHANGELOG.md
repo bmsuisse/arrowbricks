@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.0.3 — 2026-10-06
+
+- Internal cleanup, no behavior change: the 21 hand-built permanent
+  `ApiError` literals now use `ApiError::permanent`; the multi-frame LZ4
+  decode loop (with its past silent-truncation fix) lives in one helper
+  shared by the chunk-download and Thrift inline-blob paths; `Cursor`
+  shares one schema-refresh helper and no longer copies the row list when
+  nothing is buffered in `fetchall()`/`fetchmany()`.
+
 ## 5.0.2 — 2026-10-06
 
 - Read each cloud-fetch chunk into a buffer sized from `Content-Length`
