@@ -1,5 +1,22 @@
 # Changelog
 
+## 5.0.0 — 2026-10-06
+
+- Python 3.15 support: the full suite passes on 3.15.0rc2, also with
+  `-W error`. CI now tests 3.11-3.15. The abi3-py311 wheel is unchanged and
+  works on every supported version.
+- Faster import: `import arrowbricks` no longer imports `asyncio` (about
+  27 ms of a 33 ms import); it loads on first use of `await_with_heartbeat`,
+  by which point a running event loop has loaded it anyway. Measured on
+  3.14: 33 ms -> 5 ms.
+- Python 3.15 only: `__lazy_modules__` (PEP 810) defers loading the
+  `_streaming`, `client` and `cursor` submodules until first use, so
+  `import arrowbricks` costs about 1.3 ms there (just the compiled core).
+  Older versions ignore the list and import eagerly, so behavior is the same.
+- Set `asyncio_default_fixture_loop_scope` explicitly in the pytest config.
+- Major version bump to mark the 3.15 support baseline; no API changes
+  from 4.0.0.
+
 ## 4.0.0 — 2026-09-27
 
 - Keep named-timezone support (`Etc/UTC`, as Databricks sends TIMESTAMP)

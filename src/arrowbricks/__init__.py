@@ -1,3 +1,7 @@
+# PEP 810 (Python 3.15+): defer loading these submodules until a name from
+# them is first used. Older Pythons ignore this list and import eagerly.
+__lazy_modules__ = ["arrowbricks._streaming", "arrowbricks.client", "arrowbricks.cursor"]
+
 from ._core import ArrowbricksError, AuthError, QueryStats, StatementError, TransientError
 from ._streaming import (
     HEARTBEAT,

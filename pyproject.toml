@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "4.0.0"
+version = "5.0.0"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
 readme = "README.md"
 license = "MIT"
@@ -76,6 +76,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 # Bare `pytest`/`pytest -q` (no explicit path) covers tests/ -- including
 # tests/arro3_free (nested here on purpose; see its own conftest.py for why
 # that doesn't pull arro3 into its collection) -- but NOT
