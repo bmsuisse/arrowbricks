@@ -67,6 +67,21 @@ pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError
     Ok(Bytes::from(out))
 }
 
+/// Reads the body into one buffer sized from `Content-Length`. Frames are
+/// freed as they are consumed, so a chunk peaks at about its own size instead
+/// of the ~2x `Response::bytes()` reaches while joining collected frames.
+async fn read_body(mut resp: reqwest::Response) -> Result<Bytes, reqwest::Error> {
+    // Cap the up-front reservation so a bogus header can't demand gigabytes.
+    let Some(len) = resp.content_length().map(|n| n.min(1 << 30) as usize) else {
+        return resp.bytes().await;
+    };
+    let mut buf = Vec::with_capacity(len);
+    while let Some(frame) = resp.chunk().await? {
+        buf.extend_from_slice(&frame);
+    }
+    Ok(Bytes::from(buf))
+}
+
 impl DbClient {
     /// Unauthenticated -- external links are presigned blob-storage URLs,
     /// same as `_fetch_link_bytes` in the Python client. `compressed` decodes
@@ -99,7 +114,7 @@ impl DbClient {
                 let text = resp.text().await.unwrap_or_default();
                 return Err(ApiError::from_status(status, &text, true));
             }
-            let bytes = resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))?;
+            let bytes = read_body(resp).await.map_err(|e| ApiError::from_reqwest(e, true))?;
             // Counted here, before decompression -- "downloaded" means bytes
             // actually received off the wire, which is exactly the smaller,
             // (usually) LZ4-compressed size `compress_results` exists to

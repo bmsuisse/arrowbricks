@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.0.2 — 2026-10-06
+
+- Read each cloud-fetch chunk into a buffer sized from `Content-Length`
+  instead of `Response::bytes()`, which kept collected frames alive while
+  joining them, so every in-flight chunk peaked at about twice its size.
+  Against a local mock warehouse (about 770 MB result) peak RSS fell from
+  1302 MB to 707 MB and fetch time from 0.266 s to 0.208 s. Responses
+  without `Content-Length` keep the previous path. No API changes.
+
 ## 5.0.1 — 2026-10-06
 
 - Refresh all locked dependencies: Rust crates via `cargo update` (within
