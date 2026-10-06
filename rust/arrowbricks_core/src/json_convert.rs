@@ -28,14 +28,12 @@ use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde_json::Value as JsonValue;
 
-use crate::client::{ApiError, ApiErrorKind, ColumnDescription};
+use crate::client::{ApiError, ColumnDescription};
 
 fn conv_err(column: &str, value: &str, type_name: &str, detail: impl std::fmt::Display) -> ApiError {
-    ApiError {
-        message: format!("column `{column}` (type {type_name}): could not parse {value:?}: {detail}"),
-        transient: false,
-        kind: ApiErrorKind::Other,
-    }
+    ApiError::permanent(format!(
+        "column `{column}` (type {type_name}): could not parse {value:?}: {detail}"
+    ))
 }
 
 pub fn json_array_to_record_batch(
@@ -46,11 +44,10 @@ pub fn json_array_to_record_batch(
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
 
     for (col_idx, col) in columns.iter().enumerate() {
-        let type_name = col.type_name.as_deref().ok_or_else(|| ApiError {
-            message: format!("column `{}` has no type_name in the manifest", col.name),
-            transient: false,
-            kind: ApiErrorKind::Other,
-        })?;
+        let type_name = col
+            .type_name
+            .as_deref()
+            .ok_or_else(|| ApiError::permanent(format!("column `{}` has no type_name in the manifest", col.name)))?;
         let values = rows.iter().map(|row| row.get(col_idx).cloned().flatten());
         let (data_type, array) = build_column(
             &col.name,
@@ -65,11 +62,8 @@ pub fn json_array_to_record_batch(
     }
 
     let schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(schema, arrays).map_err(|e| ApiError {
-        message: format!("failed to assemble RecordBatch from JSON_ARRAY data: {e}"),
-        transient: false,
-        kind: ApiErrorKind::Other,
-    })
+    RecordBatch::try_new(schema, arrays)
+        .map_err(|e| ApiError::permanent(format!("failed to assemble RecordBatch from JSON_ARRAY data: {e}")))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -153,11 +147,9 @@ fn build_column(
         }
         "DECIMAL" => {
             let (Some(precision), Some(scale)) = (precision, scale) else {
-                return Err(ApiError {
-                    message: format!("column `{name}`: DECIMAL type missing type_precision/type_scale in manifest"),
-                    transient: false,
-                    kind: ApiErrorKind::Other,
-                });
+                return Err(ApiError::permanent(format!(
+                    "column `{name}`: DECIMAL type missing type_precision/type_scale in manifest"
+                )));
             };
             let mut out = Vec::new();
             for v in values {
@@ -168,10 +160,10 @@ fn build_column(
             }
             let array = Decimal128Array::from(out)
                 .with_precision_and_scale(precision, scale)
-                .map_err(|e| ApiError {
-                    message: format!("column `{name}`: invalid DECIMAL(precision={precision}, scale={scale}): {e}"),
-                    transient: false,
-                    kind: ApiErrorKind::Other,
+                .map_err(|e| {
+                    ApiError::permanent(format!(
+                        "column `{name}`: invalid DECIMAL(precision={precision}, scale={scale}): {e}"
+                    ))
                 })?;
             Ok((DataType::Decimal128(precision, scale), Arc::new(array)))
         }
@@ -259,15 +251,13 @@ fn build_column(
             Ok((DataType::Binary, Arc::new(BinaryArray::from(refs))))
         }
         "STRUCT" => {
-            let type_text = type_text.ok_or_else(|| ApiError {
-                message: format!("column `{name}`: STRUCT type missing type_text in manifest"),
-                transient: false,
-                kind: ApiErrorKind::Other,
+            let type_text = type_text.ok_or_else(|| {
+                ApiError::permanent(format!("column `{name}`: STRUCT type missing type_text in manifest"))
             })?;
-            let field_defs = parse_struct_fields(type_text).map_err(|e| ApiError {
-                message: format!("column `{name}`: could not parse STRUCT type_text {type_text:?}: {e}"),
-                transient: false,
-                kind: ApiErrorKind::Other,
+            let field_defs = parse_struct_fields(type_text).map_err(|e| {
+                ApiError::permanent(format!(
+                    "column `{name}`: could not parse STRUCT type_text {type_text:?}: {e}"
+                ))
             })?;
 
             // One parsed JSON object per row (`None` = the whole struct is
@@ -338,11 +328,9 @@ fn build_column(
                 .map_err(|e| ApiError::permanent(format!("column `{name}`: invalid STRUCT array: {e}")))?;
             Ok((DataType::Struct(fields), Arc::new(struct_array)))
         }
-        other => Err(ApiError {
-            message: format!("column `{name}`: type {other} isn't supported by the INLINE/JSON_ARRAY fast path"),
-            transient: false,
-            kind: ApiErrorKind::Other,
-        }),
+        other => Err(ApiError::permanent(format!(
+            "column `{name}`: type {other} isn't supported by the INLINE/JSON_ARRAY fast path"
+        ))),
     }
 }
 

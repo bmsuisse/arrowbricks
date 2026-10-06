@@ -39,14 +39,21 @@ use super::model::QueryStatsAccumulator;
 /// calls) -- so looping `read_to_end` on one decoder until its underlying
 /// reader is exhausted reads every frame without reconstructing a decoder.
 pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError> {
-    use std::io::Read;
     // LZ4 on Arrow-IPC data often compresses several-fold. Starting at the
     // compressed size can therefore pay for repeated buffer growth. Neither
     // size is a bound on the other: incompressible input can expand slightly.
     // `* 4` remains a heuristic; Vec grows normally when it underestimates.
     // See benchmark_lz4_capacity_hypotheses for the allocation tradeoffs.
     let mut out = Vec::with_capacity(compressed.len() * 4);
-    let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
+    lz4_frame_decode_into(compressed, &mut out)?;
+    Ok(Bytes::from(out))
+}
+
+/// Appends every concatenated LZ4 frame in `src` to `out` -- the loop
+/// `decompress_lz4_frame` and the Thrift inline-blob path both need.
+pub(crate) fn lz4_frame_decode_into(src: &[u8], out: &mut Vec<u8>) -> Result<(), ApiError> {
+    use std::io::Read;
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(src);
     // Terminate on the *reader* being exhausted, not on "output stopped
     // growing" -- found in code review that a frame which happens to decode
     // to zero bytes (a real, valid LZ4 Frame shape: header + immediate
@@ -61,10 +68,10 @@ pub(crate) fn decompress_lz4_frame(compressed: &Bytes) -> Result<Bytes, ApiError
     // between two real ones, see `decompress_lz4_frame_survives_a_zero_content_frame_in_the_middle`.
     while !decoder.get_ref().is_empty() {
         decoder
-            .read_to_end(&mut out)
+            .read_to_end(out)
             .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
     }
-    Ok(Bytes::from(out))
+    Ok(())
 }
 
 /// Reads the body into one buffer sized from `Content-Length`. Frames are

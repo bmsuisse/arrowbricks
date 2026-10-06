@@ -44,6 +44,7 @@ mod sea;
 mod thrift_rpc;
 mod volume;
 
+pub(crate) use download::lz4_frame_decode_into;
 pub(crate) use error::join_error;
 pub use error::{ApiError, ApiErrorKind};
 pub use model::{

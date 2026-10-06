@@ -16,7 +16,7 @@ use arrow_array::types::{Float32Type, Float64Type};
 use arrow_schema::DataType;
 use serde_json::Value;
 
-use crate::client::{ApiError, ApiErrorKind, CancelHandle, DbClient, Protocol, QueryStatsAccumulator, join_error};
+use crate::client::{ApiError, CancelHandle, DbClient, Protocol, QueryStatsAccumulator, join_error};
 
 use super::reorder::{ReorderBuffer, decode_chunk_item};
 use super::sea::submit_sea_and_report;
@@ -83,16 +83,12 @@ fn encode_ndjson_lines(batches: &[RecordBatch], non_finite_as_string: bool) -> R
         let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
         let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut output);
         let refs: Vec<&RecordBatch> = batches.iter().collect();
-        writer.write_batches(&refs).map_err(|e| ApiError {
-            message: format!("NDJSON encode error: {e}"),
-            transient: false,
-            kind: ApiErrorKind::Other,
-        })?;
-        writer.finish().map_err(|e| ApiError {
-            message: format!("NDJSON encode error: {e}"),
-            transient: false,
-            kind: ApiErrorKind::Other,
-        })?;
+        writer
+            .write_batches(&refs)
+            .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
+        writer
+            .finish()
+            .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
     }
     if !output.pending.is_empty() {
         return Err(ApiError::permanent("NDJSON encode produced an unterminated row"));
@@ -407,23 +403,15 @@ mod tests {
             let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
             let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut buf);
             let refs: Vec<&RecordBatch> = batches.iter().collect();
-            writer.write_batches(&refs).map_err(|e| ApiError {
-                message: format!("NDJSON encode error: {e}"),
-                transient: false,
-                kind: ApiErrorKind::Other,
-            })?;
-            writer.finish().map_err(|e| ApiError {
-                message: format!("NDJSON encode error: {e}"),
-                transient: false,
-                kind: ApiErrorKind::Other,
-            })?;
+            writer
+                .write_batches(&refs)
+                .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
+            writer
+                .finish()
+                .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
         }
         let mut lines: Vec<String> = String::from_utf8(buf)
-            .map_err(|e| ApiError {
-                message: format!("NDJSON encode produced invalid UTF-8: {e}"),
-                transient: false,
-                kind: ApiErrorKind::Other,
-            })?
+            .map_err(|e| ApiError::permanent(format!("NDJSON encode produced invalid UTF-8: {e}")))?
             .lines()
             .map(|line| line.to_string())
             .collect();

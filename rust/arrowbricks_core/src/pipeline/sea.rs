@@ -17,8 +17,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::{
-    ApiError, ApiErrorKind, CancelHandle, ColumnDescription, DbClient, InlineOrExternal, QueryStatsAccumulator,
-    QueryStatsData, StatementSubmitResult, join_error,
+    ApiError, CancelHandle, ColumnDescription, DbClient, InlineOrExternal, QueryStatsAccumulator, QueryStatsData,
+    StatementSubmitResult, join_error,
 };
 
 use super::reorder::{ReorderBuffer, decode_chunk_item};
@@ -100,13 +100,10 @@ impl ResultStream {
     /// single capped batch isn't enough).
     async fn fetch_at_least(&mut self, want_rows: usize) -> Result<(), ApiError> {
         if self.poisoned {
-            return Err(ApiError {
-                message: "this result was left incomplete by a previous cancelled, timed-out, or failed fetch -- \
-                          re-run the query instead of continuing to use this cursor/result"
-                    .to_string(),
-                transient: false,
-                kind: ApiErrorKind::Other,
-            });
+            return Err(ApiError::permanent(
+                "this result was left incomplete by a previous cancelled, timed-out, or failed fetch -- \
+                          re-run the query instead of continuing to use this cursor/result",
+            ));
         }
         let mut guard = PoisonOnDrop::new(&mut self.poisoned, &mut self.reporter, self.stats.as_ref());
         while self.pending_rows < want_rows && !self.exhausted {
