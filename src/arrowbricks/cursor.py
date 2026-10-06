@@ -48,6 +48,11 @@ Description = tuple[str, str | None, None, None, None, None, None]
 _ROW_BATCH = 1000
 
 
+def _join_rows(buffered: list[Row], rows: list[Row]) -> list[Row]:
+    # `buffered + rows` copies every row; usually there's nothing buffered.
+    return buffered + rows if buffered else rows
+
+
 def _table_to_rows(table: Any) -> list[Row]:
     if table.num_rows == 0:
         return []
@@ -223,8 +228,7 @@ class Cursor:
         if self._row_pos >= len(self._row_buffer):
             result = self._require_result()
             table = await result.fetchmany_arrow(_ROW_BATCH)
-            if self._schema is None:
-                self._schema = await result.schema()
+            await self._ensure_schema(result)
             self._row_buffer = _table_to_rows(table)
             self._row_pos = 0
         if self._row_pos >= len(self._row_buffer):
@@ -237,26 +241,28 @@ class Cursor:
         buffered = self._take_buffered(size)
         if len(buffered) == size:
             return buffered
-        return buffered + _table_to_rows(await self.fetchmany_arrow(size - len(buffered)))
+        return _join_rows(buffered, _table_to_rows(await self.fetchmany_arrow(size - len(buffered))))
 
     async def fetchall(self) -> list[Row]:
         buffered = self._take_buffered(len(self._row_buffer))
-        return buffered + _table_to_rows(await self.fetchall_arrow())
+        return _join_rows(buffered, _table_to_rows(await self.fetchall_arrow()))
+
+    async def _ensure_schema(self, result: _core.ResultSet) -> None:
+        if self._schema is None:
+            self._schema = await result.schema()
 
     async def fetchmany_arrow(self, size: int) -> core.Table:
         self._require_empty_row_buffer("fetchmany_arrow")
         result = self._require_result()
         table = await result.fetchmany_arrow(size)
-        if self._schema is None:
-            self._schema = await result.schema()
+        await self._ensure_schema(result)
         return table
 
     async def fetchall_arrow(self) -> core.Table:
         self._require_empty_row_buffer("fetchall_arrow")
         result = self._require_result()
         table = await result.fetchall_arrow()
-        if self._schema is None:
-            self._schema = await result.schema()
+        await self._ensure_schema(result)
         return table
 
     def fetchall_streamed(self, *, total_timeout_s: float | None = None) -> AsyncIterator[Any]:
@@ -317,8 +323,7 @@ class Cursor:
                     if item is _core.HEARTBEAT:
                         yield HEARTBEAT
                     else:
-                        if self._schema is None:
-                            self._schema = await result.schema()
+                        await self._ensure_schema(result)
                         yield item
 
         return _gen()

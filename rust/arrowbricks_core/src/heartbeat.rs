@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
 
-use crate::client::{ApiError, ApiErrorKind, join_error};
+use crate::client::{ApiError, join_error};
 
 /// Matches `_streaming.py`'s `_HEARTBEAT_INTERVAL_S` -- well under typical
 /// PaaS idle-connection ceilings for a caller forwarding these as SSE
@@ -85,11 +85,7 @@ async fn check_deadline_or_wait<T>(
     let _ = handle.await;
     *handle_slot = None;
     let secs = total_timeout_s.unwrap_or(0.0);
-    Err(ApiError {
-        message: format!("Query exceeded {secs}s timeout"),
-        transient: false,
-        kind: ApiErrorKind::Other,
-    })
+    Err(ApiError::permanent(format!("Query exceeded {secs}s timeout")))
 }
 
 /// Shared `Drop` logic for `HeartbeatWait`/`HeartbeatStream`: best-effort, if
@@ -475,17 +471,8 @@ mod tests {
 
     #[tokio::test]
     async fn wrapped_future_error_propagates() {
-        let mut wait: HeartbeatWait<()> = HeartbeatWait::with_interval(
-            async {
-                Err(ApiError {
-                    message: "boom".into(),
-                    transient: false,
-                    kind: ApiErrorKind::Other,
-                })
-            },
-            None,
-            TEST_INTERVAL,
-        );
+        let mut wait: HeartbeatWait<()> =
+            HeartbeatWait::with_interval(async { Err(ApiError::permanent("boom")) }, None, TEST_INTERVAL);
         let err = wait.tick().await.unwrap_err();
         assert_eq!(err.message, "boom");
     }

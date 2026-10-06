@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 
 use crate::client::{
     ApiError, CancelHandle, ChunkItem, ColumnDescription, DbClient, QueryStatsAccumulator, join_error,
+    lz4_frame_decode_into,
 };
 use crate::thrift;
 
@@ -854,16 +855,7 @@ fn build_inline_blob(
     for b in batches {
         row_count += b.row_count;
         if lz4_compressed {
-            // Decompress directly into the output buffer using FrameDecoder,
-            // avoiding a separate intermediate allocation and copy. The
-            // FrameDecoder's read_to_end appends to the existing buffer.
-            use std::io::Read;
-            let mut decoder = lz4_flex::frame::FrameDecoder::new(&b.batch[..]);
-            while !decoder.get_ref().is_empty() {
-                decoder
-                    .read_to_end(&mut out)
-                    .map_err(|e| ApiError::permanent(format!("LZ4 frame decompress failed: {e}")))?;
-            }
+            lz4_frame_decode_into(&b.batch, &mut out)?;
         } else {
             out.extend_from_slice(&b.batch);
         }

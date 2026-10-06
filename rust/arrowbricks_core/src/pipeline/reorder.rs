@@ -15,7 +15,7 @@ use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::client::{ApiError, ApiErrorKind, ChunkItem};
+use crate::client::{ApiError, ChunkItem};
 
 /// Same dict-of-lists-keyed-by-index shape as `_ResultSet._pending`: a
 /// `chunk_index` can carry more than one blob (multiple `external_links` per
@@ -123,11 +123,9 @@ fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
 /// schema-only streams that contain no record batches.
 pub(crate) fn decode_ipc_stream(blob: &Bytes) -> Result<(Vec<RecordBatch>, SchemaRef), ApiError> {
     if blob.is_empty() {
-        return Err(ApiError {
-            message: "empty Arrow IPC chunk: expected at least a schema message".to_string(),
-            transient: false,
-            kind: ApiErrorKind::Other,
-        });
+        return Err(ApiError::permanent(
+            "empty Arrow IPC chunk: expected at least a schema message",
+        ));
     }
     let mut buffer = ArrowBuffer::from(blob.clone());
     let mut decoder = StreamDecoder::new();
@@ -137,19 +135,13 @@ pub(crate) fn decode_ipc_stream(blob: &Bytes) -> Result<(Vec<RecordBatch>, Schem
             Ok(Some(batch)) => batches.push(batch),
             Ok(None) => {}
             Err(e) => {
-                return Err(ApiError {
-                    message: format!("Arrow IPC decode error: {e}"),
-                    transient: false,
-                    kind: ApiErrorKind::Other,
-                });
+                return Err(ApiError::permanent(format!("Arrow IPC decode error: {e}")));
             }
         }
     }
-    decoder.finish().map_err(|e| ApiError {
-        message: format!("bad Arrow IPC stream: {e}"),
-        transient: false,
-        kind: ApiErrorKind::Other,
-    })?;
+    decoder
+        .finish()
+        .map_err(|e| ApiError::permanent(format!("bad Arrow IPC stream: {e}")))?;
     let schema = decoder
         .schema()
         .ok_or_else(|| ApiError::permanent("Arrow IPC stream has no schema"))?;
@@ -299,15 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_surfaces_after_already_yielded_items() {
-        let sent = vec![
-            Ok(item(0)),
-            Ok(item(1)),
-            Err(ApiError {
-                message: "boom".into(),
-                transient: false,
-                kind: ApiErrorKind::Other,
-            }),
-        ];
+        let sent = vec![Ok(item(0)), Ok(item(1)), Err(ApiError::permanent("boom"))];
         let (tx, rx) = mpsc::channel(sent.len());
         for r in sent {
             tx.send(r).await.unwrap();

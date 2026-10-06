@@ -654,20 +654,13 @@ async fn join_first_error(handles: Vec<tokio::task::JoinHandle<Result<(), ApiErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::ApiErrorKind;
 
     fn ok_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {
         tokio::spawn(async { Ok(()) })
     }
 
     fn err_task(msg: &'static str) -> tokio::task::JoinHandle<Result<(), ApiError>> {
-        tokio::spawn(async move {
-            Err(ApiError {
-                message: msg.to_string(),
-                transient: false,
-                kind: ApiErrorKind::Other,
-            })
-        })
+        tokio::spawn(async move { Err(ApiError::permanent(msg)) })
     }
 
     fn panicking_task() -> tokio::task::JoinHandle<Result<(), ApiError>> {
