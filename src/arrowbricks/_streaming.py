@@ -11,13 +11,15 @@ Python-side Arrow-to-JSON conversion step at all.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Iterator
-from typing import Any, BinaryIO, TypeVar, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar, cast
 
 from . import _core
 from .client import DatabricksClient
+
+if TYPE_CHECKING:
+    import asyncio
 
 __all__ = [
     "HEARTBEAT",
@@ -131,6 +133,10 @@ async def await_with_heartbeat(
     Yields HEARTBEAT zero or more times, then yields the awaitable's real
     result exactly once. Re-raises whatever `aw` raised, or QueryTimeout if
     `total_timeout_s` elapses first."""
+    # Imported here, not at module level: asyncio costs ~27 ms to import and
+    # only this coroutine (already running inside a loop) needs it.
+    import asyncio
+
     task: asyncio.Task[T] = asyncio.ensure_future(aw)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + total_timeout_s if total_timeout_s is not None else None
