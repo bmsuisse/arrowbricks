@@ -867,6 +867,33 @@ fn build_inline_blob(
 mod tests {
     use super::*;
 
+    #[test]
+    fn build_inline_blob_decodes_every_lz4_frame_including_an_empty_one() {
+        use std::io::Write;
+
+        fn frame(data: &[u8]) -> bytes::Bytes {
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            encoder.write_all(data).unwrap();
+            bytes::Bytes::from(encoder.finish().unwrap())
+        }
+        let mut one_batch = frame(b"AAAA").to_vec();
+        one_batch.extend(frame(b"")); // a valid frame with no content must not end decoding
+        one_batch.extend(frame(b"BBBB"));
+        let batches = vec![
+            thrift::ArrowBatch {
+                batch: bytes::Bytes::from(one_batch),
+                row_count: 3,
+            },
+            thrift::ArrowBatch {
+                batch: frame(b"CC"),
+                row_count: 2,
+            },
+        ];
+        let (blob, rows) = build_inline_blob(Some(bytes::Bytes::from_static(b"S-")), batches, true).unwrap();
+        assert_eq!(&blob[..], b"S-AAAABBBBCC");
+        assert_eq!(rows, 5);
+    }
+
     fn ok_worker() -> tokio::task::JoinHandle<()> {
         tokio::spawn(async {})
     }

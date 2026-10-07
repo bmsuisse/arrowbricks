@@ -54,6 +54,10 @@ impl Write for LineCollector {
     }
 }
 
+fn encode_err(e: impl std::fmt::Display) -> ApiError {
+    ApiError::permanent(format!("NDJSON encode error: {e}"))
+}
+
 /// Converts one chunk's decoded batches into NDJSON lines, one per row, in
 /// arro3-`write_ndjson(explicit_nulls=True)`-compatible format: null-valued
 /// keys stay present as JSON `null` rather than being omitted, and a
@@ -83,12 +87,8 @@ fn encode_ndjson_lines(batches: &[RecordBatch], non_finite_as_string: bool) -> R
         let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
         let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut output);
         let refs: Vec<&RecordBatch> = batches.iter().collect();
-        writer
-            .write_batches(&refs)
-            .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
-        writer
-            .finish()
-            .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
+        writer.write_batches(&refs).map_err(encode_err)?;
+        writer.finish().map_err(encode_err)?;
     }
     if !output.pending.is_empty() {
         return Err(ApiError::permanent("NDJSON encode produced an unterminated row"));
@@ -403,12 +403,8 @@ mod tests {
             let builder = arrow_json::WriterBuilder::new().with_explicit_nulls(true);
             let mut writer = builder.build::<_, arrow_json::writer::LineDelimited>(&mut buf);
             let refs: Vec<&RecordBatch> = batches.iter().collect();
-            writer
-                .write_batches(&refs)
-                .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
-            writer
-                .finish()
-                .map_err(|e| ApiError::permanent(format!("NDJSON encode error: {e}")))?;
+            writer.write_batches(&refs).map_err(encode_err)?;
+            writer.finish().map_err(encode_err)?;
         }
         let mut lines: Vec<String> = String::from_utf8(buf)
             .map_err(|e| ApiError::permanent(format!("NDJSON encode produced invalid UTF-8: {e}")))?

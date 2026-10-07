@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu", feature = "large-block-alloc"))]
 mod alloc;
 mod arrow_ffi;
 pub mod client;
@@ -8,10 +8,6 @@ pub mod pipeline;
 pub mod thrift;
 
 use std::sync::{Arc, Mutex};
-
-#[cfg(target_os = "linux")]
-#[global_allocator]
-static GLOBAL: alloc::LargeBlockAlloc = alloc::LargeBlockAlloc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
@@ -29,6 +25,10 @@ use client::{
 };
 use heartbeat::{HeartbeatStream, HeartbeatWait, Tick};
 use pipeline::{NdjsonStream, ResultStream};
+
+#[cfg(all(target_os = "linux", target_env = "gnu", feature = "large-block-alloc"))]
+#[global_allocator]
+static GLOBAL: alloc::LargeBlockAlloc = alloc::LargeBlockAlloc;
 
 /// Writes any object implementing `__arrow_c_stream__` (a `Table`/
 /// `RecordBatchReader` from this crate, arro3, pyarrow, or anything else

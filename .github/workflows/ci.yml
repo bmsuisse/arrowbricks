@@ -28,7 +28,7 @@ jobs:
         # disables linking against libpython -- correct for the cdylib
         # maturin ships, wrong for a plain `cargo test` binary. See
         # Cargo.toml's [features] comment.
-        run: cargo test --no-default-features
+        run: cargo test --no-default-features --features large-block-alloc
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.14"

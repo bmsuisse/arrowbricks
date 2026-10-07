@@ -13,13 +13,10 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Iterator
-from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar, cast
+from typing import Any, BinaryIO, TypeVar, cast
 
 from . import _core
 from .client import DatabricksClient
-
-if TYPE_CHECKING:
-    import asyncio
 
 __all__ = [
     "HEARTBEAT",

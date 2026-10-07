@@ -1,6 +1,6 @@
 [package]
 name = "arrowbricks_core"
-version = "5.1.0"
+version = "5.1.1"
 edition = "2024"
 
 [lib]
@@ -73,13 +73,17 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 libc = "0.2"
 
 [features]
-default = ["extension-module"]
+default = ["extension-module", "large-block-alloc"]
 # `extension-module` skips linking against libpython -- correct for the
 # cdylib maturin actually ships (Python provides those symbols at import
 # time), but it breaks a plain `cargo test`/`cargo bench` binary, which does
 # need to link libpython itself. Tests/benches build with
 # `--no-default-features` to get a normal link.
 extension-module = ["pyo3/extension-module"]
+# Linux/glibc only: returns buffers of 1 MiB or more to the OS when freed (src/alloc.rs).
+# A Rust crate depending on this one with its own global allocator opts out with
+# `default-features = false`.
+large-block-alloc = []
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
