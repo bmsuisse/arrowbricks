@@ -1,5 +1,22 @@
 # Changelog
 
+## 5.1.0 — 2026-10-07
+
+- Linux: buffers of 1 MiB or more now come straight from `mmap` and go back
+  to the OS when freed (`src/alloc.rs`, a scoped global allocator for this
+  extension only; the host process's malloc is untouched, other platforms
+  are unchanged). glibc raises its mmap threshold as large blocks are freed,
+  so repeated queries in one long-lived process kept the memory: idle RSS
+  grew from 200 MB to 1.4 GB over five queries of the same 500k-row table.
+  Measured on a real warehouse (5 workloads, Thrift and SEA, LZ4-compressed
+  results, interleaved against 5.0.3): peak RSS -41% to -64% on the larger
+  results, idle RSS after repeated queries about -80%, time unchanged within
+  noise. Tiny results are unaffected. No API changes.
+- Correction to 5.0.2: its memory and speed figures were measured against a
+  local mock warehouse serving uncompressed bodies. Against a real warehouse,
+  where results arrive LZ4-compressed, 5.0.2 and 5.0.3 behave like 4.0.0 on
+  fetch time and memory; the gain described here comes from 5.1.0.
+
 ## 5.0.3 — 2026-10-06
 
 - Internal cleanup, no behavior change: the 21 hand-built permanent
