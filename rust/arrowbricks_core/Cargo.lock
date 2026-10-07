@@ -188,6 +188,7 @@ dependencies = [
  "bytes",
  "chrono",
  "hyper-rustls",
+ "libc",
  "lz4_flex",
  "memchr",
  "proptest",

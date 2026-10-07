@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod alloc;
 mod arrow_ffi;
 pub mod client;
 pub mod heartbeat;
@@ -6,6 +8,10 @@ pub mod pipeline;
 pub mod thrift;
 
 use std::sync::{Arc, Mutex};
+
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: alloc::LargeBlockAlloc = alloc::LargeBlockAlloc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};

@@ -68,6 +68,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 
+# Already in the dependency graph (via tokio/mio); src/alloc.rs uses mmap directly.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["extension-module"]
 # `extension-module` skips linking against libpython -- correct for the
