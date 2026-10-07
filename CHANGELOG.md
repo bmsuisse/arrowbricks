@@ -1,10 +1,32 @@
 # Changelog
 
+## 5.1.1 — 2026-10-07
+
+- Fix a hole in 5.0.2's `read_body`: the up-front buffer reservation came from
+  the untrusted `Content-Length` (capped at 1 GiB per download), and a failed
+  reservation aborted the process, which the new allocator can turn into a
+  crash under `RLIMIT_AS` or strict overcommit. It now reserves at most
+  256 MiB, and falls back to `Response::bytes()` if even that fails.
+- The allocator is behind a default-on `large-block-alloc` cargo feature and
+  now requires Linux with glibc (it was only ever measured there; musl wheels
+  are unaffected). A Rust crate that depends on `arrowbricks_core` with its
+  own global allocator can opt out with `default-features = false`.
+- Tests: a check that fails if the allocator is removed or mis-gated, `read_body`
+  with and without `Content-Length` and with a short body, the Thrift inline
+  LZ4 path with a zero-content frame, and `import arrowbricks` not loading
+  `asyncio` (plus deferred submodules on 3.15).
+- `AGENTS.md` and `rust/.../alloc.rs`: `// SAFETY:` comments with a lint to keep
+  them, and design-invariant entries for the allocator, `read_body` and the
+  lazy-import rule; the LZ4-loop entry now points at `lz4_frame_decode_into`.
+- Removed the claim in 5.0.0 that the 3.15 suite passes with `-W error`: four
+  tests fail intermittently under it from unclosed mock-server sockets.
+- No API changes.
+
 ## 5.1.0 — 2026-10-07
 
-- Linux: buffers of 1 MiB or more now come straight from `mmap` and go back
-  to the OS when freed (`src/alloc.rs`, a scoped global allocator for this
-  extension only; the host process's malloc is untouched, other platforms
+- Linux (glibc): buffers of 1 MiB or more now come straight from `mmap` and go
+  back to the OS when freed (`rust/arrowbricks_core/src/alloc.rs`, a global
+  allocator that covers only this extension's Rust allocations; the host process's malloc is untouched, other platforms
   are unchanged). glibc raises its mmap threshold as large blocks are freed,
   so repeated queries in one long-lived process kept the memory: idle RSS
   grew from 200 MB to 1.4 GB over five queries of the same 500k-row table.
@@ -15,7 +37,8 @@
 - Correction to 5.0.2: its memory and speed figures were measured against a
   local mock warehouse serving uncompressed bodies. Against a real warehouse,
   where results arrive LZ4-compressed, 5.0.2 and 5.0.3 behave like 4.0.0 on
-  fetch time and memory; the gain described here comes from 5.1.0.
+  fetch time and memory; the real-warehouse memory gain is in 5.1.0 above.
+  Data and method: `benchmarks/2026-10-07-allocator.md`.
 
 ## 5.0.3 — 2026-10-06
 
@@ -28,12 +51,15 @@
 
 ## 5.0.2 — 2026-10-06
 
-- Read each cloud-fetch chunk into a buffer sized from `Content-Length`
-  instead of `Response::bytes()`, which kept collected frames alive while
+- Read each single-request cloud-fetch download into a buffer sized from
+  `Content-Length` instead of `Response::bytes()`, which kept collected frames alive while
   joining them, so every in-flight chunk peaked at about twice its size.
   Against a local mock warehouse (about 770 MB result) peak RSS fell from
   1302 MB to 707 MB and fetch time from 0.266 s to 0.208 s. Responses
-  without `Content-Length` keep the previous path. No API changes.
+  without `Content-Length` keep the previous path. Range-split parts still use
+  `bytes()`. **These figures are mock-only (uncompressed bodies); on real LZ4
+  results this release made no measurable difference, see the 5.1.0 entry.**
+  No API changes.
 
 ## 5.0.1 — 2026-10-06
 
@@ -45,8 +71,7 @@
 
 ## 5.0.0 — 2026-10-06
 
-- Python 3.15 support: the full suite passes on 3.15.0rc2, also with
-  `-W error`. CI now tests 3.11-3.15. The abi3-py311 wheel is unchanged and
+- Python 3.15 support: the full suite passes on 3.15.0rc2. CI now tests 3.11-3.15. The abi3-py311 wheel is unchanged and
   works on every supported version.
 - Faster import: `import arrowbricks` no longer imports `asyncio` (about
   27 ms of a 33 ms import); it loads on first use of `await_with_heartbeat`,

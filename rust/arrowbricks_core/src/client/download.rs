@@ -74,15 +74,25 @@ pub(crate) fn lz4_frame_decode_into(src: &[u8], out: &mut Vec<u8>) -> Result<(),
     Ok(())
 }
 
+/// Most a download reserves up front from `Content-Length`; a longer body
+/// simply grows the buffer.
+const MAX_PREALLOC: usize = 256 << 20;
+
 /// Reads the body into one buffer sized from `Content-Length`. Frames are
 /// freed as they are consumed, so a chunk peaks at about its own size instead
 /// of the ~2x `Response::bytes()` reaches while joining collected frames.
 async fn read_body(mut resp: reqwest::Response) -> Result<Bytes, reqwest::Error> {
-    // Cap the up-front reservation so a bogus header can't demand gigabytes.
-    let Some(len) = resp.content_length().map(|n| n.min(1 << 30) as usize) else {
+    // The header is untrusted: reserve at most `MAX_PREALLOC`, and if that
+    // reservation fails (address-space limits) or there is no length, fall
+    // back to `bytes()` instead of aborting the process on allocation failure.
+    let mut buf = Vec::new();
+    let reserved = resp
+        .content_length()
+        .map(|len| usize::try_from(len).unwrap_or(usize::MAX).min(MAX_PREALLOC))
+        .is_some_and(|len| buf.try_reserve_exact(len).is_ok());
+    if !reserved {
         return resp.bytes().await;
-    };
-    let mut buf = Vec::with_capacity(len);
+    }
     while let Some(frame) = resp.chunk().await? {
         buf.extend_from_slice(&frame);
     }
@@ -620,5 +630,73 @@ mod proptests {
             let cut = ((full.len() as f64) * cut_at_fraction) as usize;
             let _ = decompress_lz4_frame(&Bytes::from(full[..cut].to_vec()));
         }
+    }
+}
+
+#[cfg(test)]
+mod read_body_tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// The production HTTP client (`DbClient::new` installs the rustls crypto provider).
+    async fn get(url: String) -> reqwest::Response {
+        DbClient::new("http://unused.invalid", "wh", "token")
+            .http
+            .get(url)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Serves `response` verbatim to the first connection, then closes it.
+    fn serve_once(response: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            stream.write_all(response).unwrap();
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn read_body_reads_a_content_length_body() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
+        let resp = get(url).await;
+        assert_eq!(read_body(resp).await.unwrap(), Bytes::from_static(b"hello world"));
+    }
+
+    #[tokio::test]
+    async fn read_body_falls_back_when_there_is_no_content_length() {
+        let url =
+            serve_once(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+        let resp = get(url).await;
+        assert_eq!(read_body(resp).await.unwrap(), Bytes::from_static(b"hello world"));
+    }
+
+    #[tokio::test]
+    async fn read_body_errors_on_a_body_shorter_than_content_length() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc");
+        let resp = get(url).await;
+        assert!(read_body(resp).await.is_err());
+    }
+
+    #[test]
+    fn lz4_frame_decode_into_appends_every_frame_including_an_empty_one() {
+        fn frame(data: &[u8]) -> Vec<u8> {
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        }
+        let mut src = frame(b"abc");
+        src.extend(frame(b""));
+        src.extend(frame(b"def"));
+        let mut out = b"prefix-".to_vec();
+        lz4_frame_decode_into(&src, &mut out).unwrap();
+        assert_eq!(out, b"prefix-abcdef");
     }
 }
