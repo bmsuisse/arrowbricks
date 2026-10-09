@@ -170,7 +170,9 @@ impl DbClient {
         if let Some(e) = resp.status.error() {
             // A rejected ExecuteStatement is a statement failure (bad SQL, bad
             // parameter, ...), the same `StatementError` SEA raises for it.
-            return Err(ApiError::statement_failed(format!("Thrift ExecuteStatement failed: {e}")));
+            return Err(ApiError::statement_failed(format!(
+                "Thrift ExecuteStatement failed: {e}"
+            )));
         }
         Ok(resp)
     }

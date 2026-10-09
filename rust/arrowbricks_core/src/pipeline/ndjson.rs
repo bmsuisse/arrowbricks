@@ -633,7 +633,13 @@ mod tests {
             assert!(n <= 4 && n > 0);
             page_sizes.push(n);
             for b in &page {
-                seen.extend(b.column(0).as_primitive::<arrow_array::types::Int64Type>().values().iter().copied());
+                seen.extend(
+                    b.column(0)
+                        .as_primitive::<arrow_array::types::Int64Type>()
+                        .values()
+                        .iter()
+                        .copied(),
+                );
             }
         }
         assert_eq!(seen, (0..13).collect::<Vec<_>>());

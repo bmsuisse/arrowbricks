@@ -1140,7 +1140,10 @@ async fn session_create_body_uses_catalog_and_schema_keys() {
     Mock::given(method("POST"))
         .and(path("/api/2.0/sql/sessions"))
         .respond_with(move |req: &wiremock::Request| {
-            bodies_for_mock.lock().unwrap().push(serde_json::from_slice(&req.body).unwrap());
+            bodies_for_mock
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&req.body).unwrap());
             ResponseTemplate::new(200).set_body_json(json!({"session_id": "sess-0"}))
         })
         .mount(&server)
