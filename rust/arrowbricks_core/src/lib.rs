@@ -30,6 +30,22 @@ use pipeline::{NdjsonStream, ResultStream};
 #[global_allocator]
 static GLOBAL: alloc::LargeBlockAlloc = alloc::LargeBlockAlloc;
 
+/// Reject invalid deadlines before spawning any work or consuming a result.
+#[pyfunction]
+fn _validate_timeout(total_timeout_s: Option<f64>) -> PyResult<()> {
+    if let Some(seconds) = total_timeout_s {
+        let duration = std::time::Duration::try_from_secs_f64(seconds)
+            .ok()
+            .filter(|duration| std::time::Instant::now().checked_add(*duration).is_some());
+        if duration.is_none() {
+            return Err(PyValueError::new_err(
+                "total_timeout_s must be a finite, non-negative, representable number of seconds",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Writes any object implementing `__arrow_c_stream__` (a `Table`/
 /// `RecordBatchReader` from this crate, arro3, pyarrow, or anything else
 /// Arrow-C-Data-Interface-compatible) as Arrow-IPC stream bytes to `buf` (a
@@ -38,25 +54,60 @@ static GLOBAL: alloc::LargeBlockAlloc = alloc::LargeBlockAlloc;
 /// user-facing wrapper) for why uncompressed is the safe default.
 #[pyfunction]
 #[pyo3(signature = (stream, buf))]
-fn write_ipc_stream(py: Python<'_>, stream: Bound<'_, PyAny>, buf: Bound<'_, PyAny>) -> PyResult<()> {
+fn write_ipc_stream(stream: Bound<'_, PyAny>, buf: Bound<'_, PyAny>) -> PyResult<()> {
     let mut reader = arrow_ffi::import_stream(&stream)?;
     let schema = arrow_array::RecordBatchReader::schema(&reader);
-    let mut ipc_buf: Vec<u8> = Vec::new();
-    {
-        let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut ipc_buf, &schema)
-            .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+    let mut sink = PythonWriter { buf, error: None };
+    let result = (|| -> Result<(), arrow_schema::ArrowError> {
+        let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut sink, &schema)?;
         for batch in reader.by_ref() {
-            let batch = batch.map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
-            writer
-                .write(&batch)
-                .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+            writer.write(&batch?)?;
         }
-        writer
-            .finish()
-            .map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))?;
+        writer.finish()
+    })();
+    if let Some(error) = sink.error {
+        return Err(error);
     }
-    buf.call_method1("write", (PyBytes::new(py, &ipc_buf),))?;
-    Ok(())
+    result.map_err(|e| PyRuntimeError::new_err(format!("Arrow IPC write error: {e}")))
+}
+
+/// Stream directly to the caller without a whole-result Vec and Python copy.
+/// Returning the accepted byte count lets Rust's write_all handle short writes.
+struct PythonWriter<'py> {
+    buf: Bound<'py, PyAny>,
+    error: Option<PyErr>,
+}
+
+impl std::io::Write for PythonWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let bytes = &bytes[..bytes.len().min(1024 * 1024)];
+        let result = self
+            .buf
+            .call_method1("write", (PyBytes::new(self.buf.py(), bytes),))
+            .and_then(|value| {
+                // Existing custom sinks sometimes return None after accepting all bytes.
+                let written = if value.is_none() {
+                    bytes.len()
+                } else {
+                    value.extract::<usize>()?
+                };
+                if written == 0 && !bytes.is_empty() || written > bytes.len() {
+                    return Err(pyo3::exceptions::PyOSError::new_err(
+                        "write() returned an invalid byte count",
+                    ));
+                }
+                Ok(written)
+            });
+        result.map_err(|error| {
+            self.error = Some(error);
+            std::io::Error::other("Python output write failed")
+        })
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Do not flush or close a file owned by the caller.
+        Ok(())
+    }
 }
 
 /// Read-side counterpart to `write_ipc_stream`: parses raw Arrow-IPC stream
@@ -737,11 +788,11 @@ impl PyDbClient {
         })
     }
 
-    /// Chunk-at-a-time counterpart to `execute`+`fetchall_arrow`, entirely
+    /// Paged counterpart to `execute`+`fetchall_arrow`, entirely
     /// backing `stream_query_json`: yields `HEARTBEAT` while waiting on each
     /// still-in-flight chunk (not just the initial statement wait), then a
     /// `list[str]` of NDJSON lines (one per row, arro3-`write_ndjson(
-    /// explicit_nulls=True)`-compatible) per chunk as it arrives in logical
+    /// explicit_nulls=True)`-compatible), at most 4096 rows per page, in logical
     /// order -- decode and JSON-encoding both happen here, so there's no
     /// further Python-side conversion step. Not async itself, same as
     /// `ResultSet.fetchall_arrow_streamed` -- the returned iterator's
@@ -759,6 +810,7 @@ impl PyDbClient {
         total_timeout_s: Option<f64>,
         non_finite_as_string: bool,
     ) -> PyResult<PyNdjsonStreamIter> {
+        _validate_timeout(total_timeout_s)?;
         let parameters = parameters_to_value(py, parameters)?;
         Ok(PyNdjsonStreamIter {
             state: Arc::new(AsyncMutex::new(PyNdjsonStreamState::Pending {
@@ -841,7 +893,8 @@ impl PyResultSet {
     /// initial wait for the statement to become ready. Downloading many
     /// chunks for a large result can itself take a while.
     #[pyo3(signature = (total_timeout_s=None))]
-    fn fetchall_arrow_streamed(&self, total_timeout_s: Option<f64>) -> PyFetchallArrowStreamedIter {
+    fn fetchall_arrow_streamed(&self, total_timeout_s: Option<f64>) -> PyResult<PyFetchallArrowStreamedIter> {
+        _validate_timeout(total_timeout_s)?;
         let inner = self.inner.clone();
         let fut = async move { inner.lock().await.fetchall_arrow().await };
         let wait = HeartbeatWait::new(fut, total_timeout_s).with_cancel(pipeline::cancel_hook(
@@ -849,9 +902,9 @@ impl PyResultSet {
             self.cancel_handle.clone(),
             self.stats.clone(),
         ));
-        PyFetchallArrowStreamedIter {
+        Ok(PyFetchallArrowStreamedIter {
             wait: Arc::new(AsyncMutex::new(Some(wait))),
-        }
+        })
     }
 
     /// The real Arrow schema, once known (after at least one chunk has been
@@ -944,8 +997,8 @@ enum PyNdjsonStreamState {
 
 /// Async iterator returned by `Client.stream_ndjson_lines`: yields the
 /// `HEARTBEAT` singleton while waiting on the statement or any individual
-/// chunk, and a `list[str]` of NDJSON lines per chunk (in logical order) as
-/// each arrives, until the result is exhausted.
+/// chunk, and a `list[str]` of NDJSON lines per page of rows (in logical order),
+/// until the result is exhausted.
 #[pyclass(name = "NdjsonStreamIter")]
 struct PyNdjsonStreamIter {
     state: Arc<AsyncMutex<PyNdjsonStreamState>>,
@@ -1064,6 +1117,7 @@ impl PyNdjsonStreamIter {
 /// "arrowbricks._core", manifest-path pointing back at this crate).
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(_validate_timeout, m)?)?;
     m.add_function(wrap_pyfunction!(write_ipc_stream, m)?)?;
     m.add_function(wrap_pyfunction!(read_ipc_stream, m)?)?;
     m.add_class::<PyTable>()?;

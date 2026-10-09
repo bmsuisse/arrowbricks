@@ -24,11 +24,139 @@ use arrow_array::{
     Int16Array, Int32Array, Int64Array, StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow_buffer::NullBuffer;
-use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde_json::Value as JsonValue;
 
 use crate::client::{ApiError, ColumnDescription};
+
+/// SEA supplies only SQL type metadata when there are no result chunks.
+/// Missing nullability is conservatively nullable; no value conversion is involved.
+pub(crate) fn empty_manifest_schema(columns: &[ColumnDescription]) -> Result<SchemaRef, ApiError> {
+    let fields = columns
+        .iter()
+        .map(|column| {
+            let text = column
+                .type_text
+                .as_deref()
+                .or(column.type_name.as_deref())
+                .ok_or_else(|| ApiError::permanent("empty result column has no SQL type"))?;
+            // Older manifests may carry decimal precision separately from type_text.
+            let dtype = if text == "DECIMAL" {
+                build_column(
+                    &column.name,
+                    text,
+                    column.type_precision,
+                    column.type_scale,
+                    None,
+                    std::iter::empty(),
+                )?
+                .0
+            } else {
+                empty_sql_type(text, 0)?
+            };
+            Ok(Field::new(&column.name, dtype, true))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+fn empty_sql_type(text: &str, depth: usize) -> Result<DataType, ApiError> {
+    if depth > 64 {
+        return Err(ApiError::permanent("empty result SQL type nesting exceeds 64"));
+    }
+    let text = text.trim().strip_suffix(" NOT NULL").unwrap_or(text.trim());
+    if let Some((kind, inner)) = text.split_once('<') {
+        let inner = inner
+            .strip_suffix('>')
+            .ok_or_else(|| ApiError::permanent("unclosed SQL type"))?;
+        let parts = split_type_parts(inner, b',')?;
+        return match kind.trim() {
+            "ARRAY" if parts.len() == 1 => Ok(DataType::List(Arc::new(Field::new(
+                "element",
+                empty_sql_type(parts[0], depth + 1)?,
+                !parts[0].ends_with(" NOT NULL"),
+            )))),
+            "MAP" if parts.len() == 2 => Ok(DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("key", empty_sql_type(parts[0], depth + 1)?, false),
+                        Field::new(
+                            "value",
+                            empty_sql_type(parts[1], depth + 1)?,
+                            !parts[1].ends_with(" NOT NULL"),
+                        ),
+                    ])),
+                    false,
+                )),
+                false,
+            )),
+            "STRUCT" => {
+                let mut fields = Vec::new();
+                for part in parts {
+                    let pair = split_type_parts(part, b':')?;
+                    if pair.len() != 2 {
+                        return Err(ApiError::permanent("invalid empty-result STRUCT field"));
+                    }
+                    let name = pair[0].trim();
+                    let name = name
+                        .strip_prefix('`')
+                        .and_then(|s| s.strip_suffix('`'))
+                        .unwrap_or(name)
+                        .replace("``", "`");
+                    fields.push(Field::new(
+                        name,
+                        empty_sql_type(pair[1], depth + 1)?,
+                        !pair[1].ends_with(" NOT NULL"),
+                    ));
+                }
+                Ok(DataType::Struct(Fields::from(fields)))
+            }
+            _ => Err(ApiError::permanent("unsupported empty-result composite SQL type")),
+        };
+    }
+    match text {
+        "VOID" | "NULL" => return Ok(DataType::Null),
+        "VARIANT" => return Ok(DataType::Utf8),
+        _ => {}
+    }
+    let (_, kind, precision, scale) = parse_one_field(&format!("_: {text}")).map_err(ApiError::permanent)?;
+    build_column("empty result", &kind, precision, scale, None, std::iter::empty()).map(|(dtype, _)| dtype)
+}
+
+/// Split SQL DDL outside nested types and escaped backtick identifiers.
+fn split_type_parts(text: &str, separator: u8) -> Result<Vec<&str>, ApiError> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    let mut quoted = false;
+    for (i, byte) in text.bytes().enumerate() {
+        if byte == b'`' {
+            quoted = !quoted;
+        } else if !quoted {
+            match byte {
+                b'<' | b'(' => depth += 1,
+                b'>' | b')' => depth -= 1,
+                b if b == separator && depth == 0 => {
+                    parts.push(text[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            if !(0..=64).contains(&depth) {
+                return Err(ApiError::permanent("invalid SQL type nesting"));
+            }
+        }
+    }
+    if quoted || depth != 0 {
+        return Err(ApiError::permanent("unclosed SQL type or identifier"));
+    }
+    if start < text.len() {
+        parts.push(text[start..].trim());
+    }
+    Ok(parts)
+}
 
 fn conv_err(column: &str, value: &str, type_name: &str, detail: impl std::fmt::Display) -> ApiError {
     ApiError::permanent(format!(
@@ -446,6 +574,38 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_schema_recovers_nested_and_quoted_sql_types() {
+        let dtype = empty_sql_type("STRUCT<`x,y`: ARRAY<DECIMAL(10,2)>, `a:b``c`: MAP<STRING, BIGINT>>", 0).unwrap();
+        let DataType::Struct(fields) = dtype else {
+            panic!("expected struct")
+        };
+        assert_eq!(fields[0].name(), "x,y");
+        let DataType::List(element) = fields[0].data_type() else {
+            panic!("expected list")
+        };
+        assert_eq!(element.data_type(), &DataType::Decimal128(10, 2));
+        assert_eq!(fields[1].name(), "a:b`c");
+        let DataType::Map(entries, false) = fields[1].data_type() else {
+            panic!("expected map")
+        };
+        let DataType::Struct(pair) = entries.data_type() else {
+            panic!("expected entries")
+        };
+        assert_eq!(pair[0].data_type(), &DataType::Utf8);
+        assert!(!pair[0].is_nullable());
+        assert_eq!(pair[1].data_type(), &DataType::Int64);
+    }
+
+    #[test]
+    fn empty_schema_rejects_malformed_or_excessively_nested_types() {
+        for text in ["ARRAY<INT", "MAP<INT>", "STRUCT<`unclosed: INT>", "DECIMAL(999,2)"] {
+            assert!(empty_sql_type(text, 0).is_err(), "accepted {text}");
+        }
+        let deep = format!("{}INT{}", "ARRAY<".repeat(100), ">".repeat(100));
+        assert!(empty_sql_type(&deep, 0).is_err());
+    }
 
     fn col(name: &str, type_name: &str) -> ColumnDescription {
         ColumnDescription {

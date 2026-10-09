@@ -168,7 +168,9 @@ impl DbClient {
         let resp_bytes = self.thrift_call(body, false, Some(stats)).await?;
         let resp = thrift::parse_execute_statement(&resp_bytes).map_err(Self::thrift_parse_error)?;
         if let Some(e) = resp.status.error() {
-            return Err(ApiError::permanent(format!("Thrift ExecuteStatement failed: {e}")));
+            // A rejected ExecuteStatement is a statement failure (bad SQL, bad
+            // parameter, ...), the same `StatementError` SEA raises for it.
+            return Err(ApiError::statement_failed(format!("Thrift ExecuteStatement failed: {e}")));
         }
         Ok(resp)
     }

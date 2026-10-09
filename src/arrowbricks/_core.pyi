@@ -1,6 +1,8 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, BinaryIO, Literal
 
+def _validate_timeout(total_timeout_s: float | None) -> None: ...
+
 def write_ipc_stream(stream: Any, buf: BinaryIO) -> None: ...  # stream: anything implementing __arrow_c_stream__
 
 class Table:

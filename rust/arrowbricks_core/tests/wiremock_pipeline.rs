@@ -1128,6 +1128,46 @@ async fn mount_warehouse_running(server: &MockServer) {
 }
 
 #[tokio::test]
+async fn session_create_body_uses_catalog_and_schema_keys() {
+    // The sessions API ignores unknown keys, so `catalog_name`/`schema_name`
+    // silently dropped the schema (found by a live check: current_schema()
+    // came back `default`). Pin the real key names.
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+
+    let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let bodies_for_mock = bodies.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/sessions"))
+        .respond_with(move |req: &wiremock::Request| {
+            bodies_for_mock.lock().unwrap().push(serde_json::from_slice(&req.body).unwrap());
+            ResponseTemplate::new(200).set_body_json(json!({"session_id": "sess-0"}))
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {"chunks": []},
+        })))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
+    run_pipeline(client, "SELECT 1", Some("cat1"), Some("sch1"), None)
+        .await
+        .unwrap();
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["catalog"], "cat1");
+    assert_eq!(bodies[0]["schema"], "sch1");
+    assert!(bodies[0].get("catalog_name").is_none() && bodies[0].get("schema_name").is_none());
+}
+
+#[tokio::test]
 async fn session_is_created_once_and_reused_across_sequential_statements() {
     let server = MockServer::start().await;
     mount_warehouse_running(&server).await;

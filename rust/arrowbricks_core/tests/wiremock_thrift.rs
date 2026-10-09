@@ -1987,6 +1987,40 @@ async fn thrift_abandoning_the_submit_poll_wait_fires_cancel_operation() {
     assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
 }
 
+/// The caller is dropped while `ExecuteStatement` itself is still in flight
+/// (cold connection, slow submit): no handle exists yet, but the server may
+/// already have accepted the statement, so it must be cancelled as soon as
+/// the response with its handle arrives.
+#[tokio::test]
+async fn thrift_abandoning_during_execute_statement_still_cancels_the_operation() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(
+                    build_execute_statement_resp(b"op-slow", b"opsecret-slow", None),
+                    "application/x-thrift",
+                )
+                .set_delay(std::time::Duration::from_millis(600)),
+        )
+        .mount(&server)
+        .await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        execute_lazy_thrift(thrift_client(&server), "SELECT * FROM t", None, None, None),
+    )
+    .await;
+    assert!(result.is_err(), "the submit is slower than the timeout");
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn thrift_polled_terminal_error_does_not_fire_cancel_operation() {
     let server = MockServer::start().await;

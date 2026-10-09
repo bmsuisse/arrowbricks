@@ -144,10 +144,10 @@ impl DbClient {
         let url = format!("{}/api/2.0/sql/sessions", self.host);
         let mut body = json!({ "warehouse_id": self.warehouse_id });
         if let Some(c) = catalog {
-            body["catalog_name"] = json!(c);
+            body["catalog"] = json!(c);
         }
         if let Some(s) = schema {
-            body["schema_name"] = json!(s);
+            body["schema"] = json!(s);
         }
         let data: SessionCreateBody = self.authed_json(reqwest::Method::POST, &url, Some(&body), None).await?;
         Ok(data.session_id)

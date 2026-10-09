@@ -630,10 +630,12 @@ pub fn parameters_from_json(value: &serde_json::Value) -> Vec<SparkParameter> {
             let obj = item.as_object()?;
             let name = obj.get("name")?.as_str()?.to_string();
             let sql_type = obj.get("type").and_then(|v| v.as_str()).map(str::to_string);
-            let value = obj.get("value").map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Null => String::new(),
-                other => other.to_string(),
+            // JSON null -> no value field at all, which the server reads as SQL
+            // NULL (an empty stringValue would bind '' instead).
+            let value = obj.get("value").and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Null => None,
+                other => Some(other.to_string()),
             });
             Some(SparkParameter { name, sql_type, value })
         })
@@ -1276,6 +1278,28 @@ mod tests {
         assert_eq!(params[0].value.as_deref(), Some("5"));
         assert_eq!(params[0].sql_type.as_deref(), Some("INT"));
         assert_eq!(params[1].value.as_deref(), Some("3.5"));
+    }
+
+    #[test]
+    fn parameters_from_json_maps_null_to_no_value_not_empty_string() {
+        let json = serde_json::json!([{"name": "a", "value": null, "type": "STRING"}]);
+        let params = parameters_from_json(&json);
+        assert_eq!(params[0].value, None);
+        let mut w = Writer::new();
+        params[0].write(&mut w);
+        // field 4 (value struct) must be absent: name(2), type(3), stop only
+        let bytes = w.into_bytes();
+        let mut r = Reader::new(&bytes);
+        let mut ids = vec![];
+        loop {
+            let (ft, id) = r.read_field_begin().unwrap();
+            if ft == ttype::STOP {
+                break;
+            }
+            ids.push(id);
+            r.skip(ft).unwrap();
+        }
+        assert_eq!(ids, vec![2, 3]);
     }
 
     /// Regression test for the field-id fix on `(1281, ttype::STRING)` above

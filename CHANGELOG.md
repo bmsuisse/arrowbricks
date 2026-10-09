@@ -1,5 +1,37 @@
 # Changelog
 
+## 5.2.0 — 2026-10-09
+
+- `stream_query_json` encodes NDJSON in pages of up to 8192 rows instead of
+  one whole chunk at a time, cutting its peak memory by about a third (about
+  130 MB to 87 MB on a 300k x 8 result, level with `fetchall_arrow`) with no
+  change in speed or output.
+- Thrift: a rejected `ExecuteStatement` (bad SQL, bad parameter) now raises
+  `StatementError`, matching SEA, instead of the plain `ArrowbricksError`.
+- Thrift: a timeout or cancellation while `ExecuteStatement` itself is still
+  in flight (e.g. a cold connection) now cancels the statement once its
+  operation handle arrives, instead of leaving it running on the warehouse.
+- Thrift: a `None` named-parameter value is now bound as SQL NULL instead of
+  the empty string (SEA already did this).
+- SEA: pooled sessions are now created with the `catalog`/`schema` keys the
+  sessions API reads; the old `catalog_name`/`schema_name` were silently
+  ignored, so `schema=` had no effect whenever a session was in use.
+- Materialize Python rows directly from chunked columns, avoiding native
+  Arrow buffer concatenation before converting values to Python.
+- Write IPC directly to the destination with Python writes capped at 1 MiB,
+  avoiding a whole-result Rust buffer and Python copy. Handle short writes
+  and preserve exceptions raised by the destination.
+- Reject invalid streaming deadlines before starting work, with `ValueError`
+  instead of a Rust panic. Invalid `fetchmany` sizes no longer change cursor position.
+- Preserve schemas for schema-only IPC chunks and reconstruct empty SEA
+  schemas from SQL manifest types, including nested ARRAY/MAP/STRUCT fields.
+  Missing nullability metadata is treated conservatively as nullable;
+  unsupported manifest types raise an explicit error instead of losing columns.
+- Add opt-in real warehouse tests for both protocols, compression on/off,
+  paging, Python values, nested NDJSON, empty results, concurrency, errors,
+  and timeout recovery. Extend the interleaved benchmark to cover all fetch
+  modes and IPC export.
+
 ## 5.1.1 — 2026-10-07
 
 - Fix a hole in 5.0.2's `read_body`: the up-front buffer reservation came from

@@ -17,6 +17,7 @@ synchronous escape hatch, matching every other function in this package."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from operator import index
 from typing import TYPE_CHECKING, Any
 
 from . import _core
@@ -60,7 +61,9 @@ def _table_to_rows(table: Any) -> list[Row]:
         from arro3.core import Table
 
         table = Table.from_arrow(table)
-        columns = [table.column(i).combine_chunks().to_pylist() for i in range(table.num_columns)]
+        # ChunkedArray materializes values directly; concatenating Arrow
+        # buffers first adds a native copy that Python row conversion doesn't need.
+        columns = [table.column(i).to_pylist() for i in range(table.num_columns)]
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "fetchone/fetchmany/fetchall need arro3-core installed -- "
@@ -125,15 +128,14 @@ class Cursor:
         (a handful of rows, well under Databricks' own 25MiB INLINE result
         cap), setting this tries fetching it inline in the same round trip
         as the statement submission itself, skipping the separate chunk-fetch
-        entirely. If the result turns out too big, or has a column type this
-        can't convert inline (nested ARRAY/MAP/STRUCT, VARIANT), it
-        transparently re-runs the query the normal way instead -- meaning a
-        caller who sets this without actually expecting a small result pays
-        for the query twice. Leave this off unless you know the result is
-        small; it changes latency, not correctness, either way."""
+        entirely. A recognized server-side inline size-limit failure falls
+        back to a new external-links execution. If conversion fails after
+        the statement succeeds, it raises an error without resubmitting SQL.
+        Thrift ignores this option because it already supports direct results."""
         sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
 
         async def _gen() -> AsyncIterator[Any]:
+            _core._validate_timeout(total_timeout_s)
             # Cleared up front, not just on success -- found in code review
             # that a failed submit (statement FAILED/CANCELED, or
             # QueryTimeout) left these pointing at the *previous* statement's
@@ -238,6 +240,10 @@ class Cursor:
         return row
 
     async def fetchmany(self, size: int) -> list[Row]:
+        size = index(size)
+        if size < 0:
+            raise ValueError("size must be non-negative")
+        self._require_result()
         buffered = self._take_buffered(size)
         if len(buffered) == size:
             return buffered
@@ -282,6 +288,7 @@ class Cursor:
         Python wrapper around `fetchall()` the way this looked before."""
 
         async def _gen() -> AsyncIterator[Any]:
+            _core._validate_timeout(total_timeout_s)
             rows: list[Row] = list(self._take_buffered(len(self._row_buffer)))
             async for item in self.fetchall_arrow_streamed(total_timeout_s=total_timeout_s):
                 if item is HEARTBEAT:

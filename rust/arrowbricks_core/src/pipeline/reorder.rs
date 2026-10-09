@@ -114,6 +114,7 @@ impl ReorderBuffer {
 /// already shipped once (see the `result_compression` invariant above). The
 /// old `StreamReader`-based version failed loudly on this input instead
 /// ("Expected schema message, found empty stream"); this restores that.
+#[cfg(test)]
 fn decode_chunk(blob: &Bytes) -> Result<Vec<RecordBatch>, ApiError> {
     decode_ipc_stream(blob).map(|(batches, _)| batches)
 }
@@ -175,7 +176,11 @@ pub(crate) fn decode_ipc_stream(blob: &Bytes) -> Result<(Vec<RecordBatch>, Schem
 /// assumed; a chunk with fewer or exactly as many rows as declared is
 /// returned unchanged (the overwhelmingly common case).
 pub(crate) fn decode_chunk_item(blob: &Bytes, truncate_to: Option<i64>) -> Result<Vec<RecordBatch>, ApiError> {
-    let batches = decode_chunk(blob)?;
+    let (mut batches, schema) = decode_ipc_stream(blob)?;
+    // Preserve schema-only results for consumers that learn fields from batches.
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
     let Some(declared_row_count) = truncate_to.filter(|n| *n > 0) else {
         return Ok(batches);
     };

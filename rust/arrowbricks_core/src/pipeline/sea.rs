@@ -140,6 +140,18 @@ impl ResultStream {
                 }
             }
         }
+        // SEA returns no IPC chunks at all for an empty query. Preserve the
+        // manifest's typed columns instead of exporting a zero-column table.
+        if self.schema.is_none() && self.exhausted && !self.columns.is_empty() {
+            match crate::json_convert::empty_manifest_schema(&self.columns) {
+                Ok(schema) => self.schema = Some(schema),
+                Err(e) => {
+                    return guard.fail(ApiError::permanent(format!(
+                        "empty result has no Arrow schema and its manifest cannot be converted: {e}"
+                    )));
+                }
+            }
+        }
         guard.defuse();
         guard.reporter.end_fetch();
         if self.exhausted {

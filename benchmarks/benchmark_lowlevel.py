@@ -96,30 +96,39 @@ def ndjson(path):
         )
         for trial in range(5):
             start = time.perf_counter()
-            chunks = [chunk async for chunk in client.stream_ndjson_lines("SELECT synthetic")]
+            cpu_start = time.process_time()
+            rows = 0
+            pages = 0
+            digest = hashlib.sha256()
+            async for page in client.stream_ndjson_lines("SELECT synthetic"):
+                if page is _core.HEARTBEAT:
+                    continue
+                rows += len(page)
+                pages += 1
+                for line in page:
+                    digest.update(line.encode())
+                    digest.update(b"\n")
             elapsed = time.perf_counter() - start
-            if len(chunks) != 1 or len(chunks[0]) != ROWS:
-                raise RuntimeError("unexpected NDJSON chunk/row count")
+            cpu_s = time.process_time() - cpu_start
+            if rows != ROWS:
+                raise RuntimeError("unexpected NDJSON row count")
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             rss /= 1024 * 1024 if sys.platform == "darwin" else 1024
-            digest = hashlib.sha256()
-            for line in chunks[0]:
-                digest.update(line.encode())
-                digest.update(b"\n")
             if trial:
                 print(
                     json.dumps(
                         {
                             "trial": trial,
                             "seconds": elapsed,
+                            "cpu_s": cpu_s,
+                            "pages": pages,
                             "peak_rss_mib": rss,
-                            "rows": len(chunks[0]),
+                            "rows": rows,
                             "sha256": digest.hexdigest(),
                         }
                     ),
                     flush=True,
                 )
-            del chunks
 
     try:
         asyncio.run(measure())

@@ -135,9 +135,10 @@ async def await_with_heartbeat(
     import asyncio
 
     task: asyncio.Task[T] = asyncio.ensure_future(aw)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + total_timeout_s if total_timeout_s is not None else None
     try:
+        _core._validate_timeout(total_timeout_s)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + total_timeout_s if total_timeout_s is not None else None
         while not task.done():
             wait_for = interval_s if deadline is None else min(interval_s, max(deadline - loop.time(), 0.0))
             done, _ = await asyncio.wait({task}, timeout=wait_for)
@@ -209,8 +210,8 @@ async def stream_query_json(
     `QueryTimeout` once it elapses, firing a best-effort server-side cancel
     so the statement doesn't keep running on the warehouse.
 
-    Note this yields a whole chunk's rows at once -- Databricks' own chunk
-    sizing already bounds how much that is."""
+    JSON conversion materializes one network chunk at a time; this wrapper
+    then yields each row individually."""
     if non_finite_floats not in ("null", "string"):
         raise ValueError(f"non_finite_floats must be 'null' or 'string', got {non_finite_floats!r}")
     sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
