@@ -10,6 +10,8 @@
 //!   `pipeline.rs` (`CancelHandle`, `QueryStatsAccumulator`/`QueryStatsData`/
 //!   `EventSink`, `ChunkMeta`/`StatementSubmitResult`/`InlineOrExternal`/
 //!   `ChunkItem`, `ColumnDescription`).
+//! - `call_context` -- the per-call context (`lib.rs` keeps the caller's
+//!   asyncio event loop in it) that every task spawned for a call inherits.
 //! - `download` -- downloading/decompressing one cloud-fetch external link,
 //!   shared by both backends' chunk-fetch workers.
 //! - `sea` -- the REST Statement-Execution-API backend: session pooling,
@@ -37,6 +39,7 @@ use serde_json::Value;
 
 use crate::thrift;
 
+mod call_context;
 mod download;
 mod error;
 mod model;
@@ -44,6 +47,7 @@ mod sea;
 mod thrift_rpc;
 mod volume;
 
+pub use call_context::{CallContext, current_call_context, enter_call_context, in_call_context, with_call_context};
 pub(crate) use download::lz4_frame_decode_into;
 pub(crate) use error::join_error;
 pub use error::{ApiError, ApiErrorKind};

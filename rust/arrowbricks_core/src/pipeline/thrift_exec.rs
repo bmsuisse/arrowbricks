@@ -20,7 +20,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::client::{
-    ApiError, CancelHandle, ChunkItem, ColumnDescription, DbClient, QueryStatsAccumulator, join_error,
+    ApiError, CancelHandle, ChunkItem, ColumnDescription, DbClient, QueryStatsAccumulator, in_call_context, join_error,
     lz4_frame_decode_into,
 };
 use crate::thrift;
@@ -78,9 +78,9 @@ impl Drop for ThriftSessionOnDrop<'_> {
                 .thrift_checkin_session(self.catalog, self.schema, session.clone(), false);
         }
         let client = self.client.clone();
-        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
             client.thrift_close_session_raw(&session).await;
-        });
+        }));
     }
 }
 
@@ -101,13 +101,13 @@ impl Drop for AbandonedSubmitCancel {
             return;
         };
         let client = self.client.clone();
-        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
             if let Ok(Ok(resp)) = task.await
                 && let Some(operation) = resp.operation_handle
             {
                 client.cancel_statement(&CancelHandle::Thrift { operation }).await;
             }
-        });
+        }));
     }
 }
 
@@ -118,7 +118,7 @@ async fn submit_and_await_thrift_statement(
     parameters: Option<&Value>,
     stats: &Arc<QueryStatsAccumulator>,
 ) -> Result<ThriftStatementReady, ApiError> {
-    let task = pyo3_async_runtimes::tokio::get_runtime().spawn({
+    let task = pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context({
         let (client, session, statement, parameters, stats) = (
             client.clone(),
             session.clone(),
@@ -131,7 +131,7 @@ async fn submit_and_await_thrift_statement(
                 .thrift_execute_statement_raw(&session, &statement, parameters.as_ref(), &stats)
                 .await
         }
-    });
+    }));
     let mut abandoned = AbandonedSubmitCancel {
         client: client.clone(),
         task: Some(task),
@@ -414,9 +414,9 @@ pub(crate) async fn submit_thrift_and_start_fetch(
             // A discarded session is only forgotten by the pool; close it
             // server-side too instead of leaving it to the idle TTL.
             let client = client.clone();
-            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
                 client.thrift_close_session_raw(&session).await;
-            });
+            }));
         }
         None
     } else {
@@ -446,13 +446,13 @@ pub(crate) async fn submit_thrift_and_start_fetch(
 
     let concurrency = client.chunk_fetch_concurrency.max(1);
     let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
-    tokio::spawn(drive_thrift_fetch_loop(
+    tokio::spawn(in_call_context(drive_thrift_fetch_loop(
         client,
         ready,
         throwaway_session,
         tx,
         stats.clone(),
-    ));
+    )));
 
     let warehouse_wait_s = stats.warehouse_wait_s();
     Ok(ThriftSubmitResult {
@@ -679,7 +679,7 @@ async fn run_thrift_fetch_loop(
         let out_tx = tx.clone();
         let compressed_flag = compressed_flag.clone();
         let worker_stats = stats.clone();
-        worker_handles.push(tokio::spawn(async move {
+        worker_handles.push(tokio::spawn(in_call_context(async move {
             let work_loop = async {
                 loop {
                     let work = { link_rx.lock().await.recv().await };
@@ -700,7 +700,7 @@ async fn run_thrift_fetch_loop(
                 () = out_tx.closed() => {}
                 () = work_loop => {}
             }
-        }));
+        })));
     }
     // Only the workers hold the receiving end from here on: if every worker
     // has exited, `link_tx.send` fails instead of waiting forever for room in
