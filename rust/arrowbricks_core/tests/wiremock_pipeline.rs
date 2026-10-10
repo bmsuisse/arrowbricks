@@ -1084,7 +1084,7 @@ async fn prefer_inline_on_missing_data_array_errors_instead_of_resubmitting() {
         .mount(&server)
         .await;
 
-    let client = DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea);
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token").with_protocol(Protocol::Sea));
     let stats = QueryStatsAccumulator::default();
     // Not `.expect_err(...)` -- `InlineOrExternal` (the `Ok` side) doesn't
     // implement `Debug`.

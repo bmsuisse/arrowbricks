@@ -619,11 +619,22 @@ impl PyDbClient {
             ("warehouse_confirmed_running_ttl_s", warehouse_confirmed_running_ttl_s),
             ("retry_max_wait_s", retry_max_wait_s),
         ] {
-            if !seconds.is_finite() || seconds < 0.0 {
+            // Representable too, not just finite: `Duration::from_secs_f64` and
+            // `Instant::now() + d` both panic on values like 1e30.
+            let representable = std::time::Duration::try_from_secs_f64(seconds)
+                .ok()
+                .filter(|d| std::time::Instant::now().checked_add(*d).is_some());
+            if representable.is_none() {
                 return Err(PyValueError::new_err(format!(
-                    "{name} must be a finite, non-negative number of seconds, got {seconds}"
+                    "{name} must be a finite, non-negative, representable number of seconds, got {seconds}"
                 )));
             }
+        }
+        if chunk_fetch_concurrency > client::MAX_CHUNK_FETCH_CONCURRENCY {
+            return Err(PyValueError::new_err(format!(
+                "chunk_fetch_concurrency must be at most {}, got {chunk_fetch_concurrency}",
+                client::MAX_CHUNK_FETCH_CONCURRENCY
+            )));
         }
         // `retry_attempts - 1` in `DbClient::retry_call_tracked`'s loop would
         // underflow at 0 -- and 0 (or negative) attempts would mean "never

@@ -115,16 +115,11 @@ impl DbClient {
         if let Some(handle) = self.thrift_session_pool.take(&key) {
             return Some(handle);
         }
-        if !self.thrift_session_pool.reserve(&key) {
-            return None;
-        }
-        match self.thrift_open_session_raw(catalog, schema).await {
-            Ok(handle) => Some(handle),
-            Err(_) => {
-                self.thrift_session_pool.release(&key);
-                None
-            }
-        }
+        let reservation = self.thrift_session_pool.reserve_guard(&key)?;
+        // Dropped (releasing the slot) on error or if this future is cancelled.
+        let handle = self.thrift_open_session_raw(catalog, schema).await.ok()?;
+        reservation.defuse();
+        Some(handle)
     }
 
     pub(crate) fn thrift_checkin_session(

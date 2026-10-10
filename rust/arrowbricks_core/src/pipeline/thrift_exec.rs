@@ -408,7 +408,16 @@ pub(crate) async fn submit_thrift_and_start_fetch(
     // carried forward for that function to close once the fetch loop is
     // actually done with it.
     let throwaway_session = if from_pool {
-        client.thrift_checkin_session(catalog, schema, session, ready.is_ok());
+        let keep = ready.is_ok();
+        client.thrift_checkin_session(catalog, schema, session.clone(), keep);
+        if !keep {
+            // A discarded session is only forgotten by the pool; close it
+            // server-side too instead of leaving it to the idle TTL.
+            let client = client.clone();
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                client.thrift_close_session_raw(&session).await;
+            });
+        }
         None
     } else {
         match &ready {
@@ -703,7 +712,12 @@ async fn run_thrift_fetch_loop(
     // Direct results may already have confirmed it during submission. In
     // that case downloads can overlap the very first FetchResults RPC too.
     let mut pending_until_confirmed: Vec<ThriftLinkWork> = Vec::new();
-    loop {
+    'discover: loop {
+        // The consumer is gone (stream dropped / iterator abandoned): stop
+        // asking the server for more of a result nobody will read.
+        if tx.is_closed() {
+            break;
+        }
         let (row_set, has_more) = if let Some(v) = pending.take() {
             v
         } else {
@@ -804,7 +818,7 @@ async fn run_thrift_fetch_loop(
                 // normal condition; still handled without panicking
                 // regardless.
                 if link_tx.send(work).await.is_err() {
-                    break;
+                    break 'discover;
                 }
             } else {
                 // See this function's own comment above `metadata_confirmed`.
@@ -815,7 +829,7 @@ async fn run_thrift_fetch_loop(
         if metadata_confirmed {
             for work in pending_until_confirmed.drain(..) {
                 if link_tx.send(work).await.is_err() {
-                    break;
+                    break 'discover;
                 }
             }
         }

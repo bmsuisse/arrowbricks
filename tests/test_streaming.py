@@ -94,3 +94,29 @@ async def test_stream_query_json_survives_duplicate_index_and_a_gap(mock_server,
     rows = [json.loads(row) async for row in stream_query_json(client, "SELECT * FROM whatever")]
 
     assert sorted(r["id"] for r in rows) == [0, 1, 10, 11, 20, 21]
+
+
+@pytest.mark.parametrize(
+    ("sql", "limit", "offset", "expected"),
+    [
+        ("select 1", None, None, "select 1"),
+        ("select 1;", 5, None, "SELECT * FROM (select 1\n) _q LIMIT 5"),
+        ("select 1 ;  \n", 5, 2, "SELECT * FROM (select 1\n) _q LIMIT 5 OFFSET 2"),
+        ("select 1 -- c", 5, None, "SELECT * FROM (select 1 -- c\n) _q LIMIT 5"),
+        ("select 1", None, 3, "SELECT * FROM (select 1\n) _q OFFSET 3"),
+    ],
+)
+def test_windowed_sql_survives_trailing_semicolons_and_line_comments(sql, limit, offset, expected):
+    from arrowbricks._streaming import windowed_sql
+
+    assert windowed_sql(sql, row_limit=limit, offset=offset) == expected
+
+
+@pytest.mark.parametrize("bad", ["1; DROP TABLE x --", True, 1.5, -1])
+def test_windowed_sql_rejects_values_that_are_not_non_negative_ints(bad):
+    from arrowbricks._streaming import windowed_sql
+
+    with pytest.raises((TypeError, ValueError)):
+        windowed_sql("select 1", row_limit=bad, offset=None)
+    with pytest.raises((TypeError, ValueError)):
+        windowed_sql("select 1", row_limit=None, offset=bad)

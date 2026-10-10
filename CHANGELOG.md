@@ -2,6 +2,25 @@
 
 ## 5.2.0 — 2026-10-09
 
+- Cloud-fetch download errors no longer include the presigned URL (its
+  `sig=` query string used to end up in exception messages and logs).
+- Session pools: a call cancelled while a session is being created gives its
+  pool slot back, `close()` frees the slots of the sessions it closes, and a
+  session discarded after a failed statement is closed on the server
+  instead of lingering until its idle TTL. Applies to SEA and Thrift.
+- Thrift: stop fetching result links once the consumer is gone.
+- `ensure_warehouse_running` starts a warehouse it first sees STOPPING and
+  then STOPPED (it used to wait out the whole start timeout), and fails fast
+  on a deleted warehouse.
+- A 401/403 with a static `token=` fails immediately instead of retrying for
+  about 31 s; `token_provider` callables are still retried.
+- A split download no longer trusts the server's `Content-Range` total for
+  its buffer size (a bogus value could abort the process).
+- Absurd constructor arguments (`http_timeout=1e30`,
+  `chunk_fetch_concurrency=2**62`) raise `ValueError` instead of a panic;
+  `chunk_fetch_concurrency` is capped at 4096.
+- `row_limit`/`offset` accept only non-negative ints, and a query ending in
+  `;` or a `--` comment can now be windowed.
 - `stream_query_json` encodes NDJSON in pages of up to 8192 rows instead of
   one whole chunk at a time, cutting its peak memory by about a third (about
   130 MB to 87 MB on a 300k x 8 result, level with `fetchall_arrow`) with no

@@ -75,6 +75,13 @@ pub type TokenFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result
 
 pub trait TokenProvider: Send + Sync {
     fn get_token(&self) -> TokenFuture;
+
+    /// Whether a later call can return a different token. A 401/403 is only
+    /// worth retrying (re-fetching the token) when it can; a fixed token
+    /// would just hit the same rejection after the whole backoff schedule.
+    fn can_refresh(&self) -> bool {
+        true
+    }
 }
 
 struct StaticToken(String);
@@ -84,9 +91,17 @@ impl TokenProvider for StaticToken {
         let token = self.0.clone();
         Box::pin(async move { Ok(token) })
     }
+
+    fn can_refresh(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Upper bound accepted for `chunk_fetch_concurrency`: far past anything
+/// useful (the default is 64), and well under tokio's `Semaphore::MAX_PERMITS`
+/// that would otherwise panic.
+pub const MAX_CHUNK_FETCH_CONCURRENCY: usize = 4096;
 const RETRY_ATTEMPTS: u32 = 6;
 const RETRY_MAX_WAIT_S: f64 = 20.0;
 
@@ -365,8 +380,53 @@ impl<T> Pool<T> {
         }
     }
 
+    /// Takes every idle item and drops their reservations too -- otherwise a
+    /// client reused after `close()` would see `total` stuck at the old
+    /// count and `reserve` would refuse forever once it reached the cap.
     fn drain_idle(&self) -> Vec<T> {
-        self.idle.lock().unwrap().drain().flat_map(|(_, v)| v).collect()
+        let drained: Vec<(SessionKey, Vec<T>)> = self.idle.lock().unwrap().drain().collect();
+        let mut total = self.total.lock().unwrap();
+        let mut items = Vec::new();
+        for (key, v) in drained {
+            if let Some(count) = total.get_mut(&key) {
+                *count = count.saturating_sub(v.len());
+            }
+            items.extend(v);
+        }
+        items
+    }
+
+    /// `reserve` as an RAII guard: the slot is released again if the guard
+    /// is dropped without `defuse()` -- i.e. when the caller's future is
+    /// cancelled (timeout, `asyncio.wait_for`) while it is still creating
+    /// the session, which a plain `reserve`/`release` pair leaked.
+    fn reserve_guard<'a>(&'a self, key: &SessionKey) -> Option<Reservation<'a, T>> {
+        self.reserve(key).then(|| Reservation {
+            pool: self,
+            key: key.clone(),
+            armed: true,
+        })
+    }
+}
+
+struct Reservation<'a, T> {
+    pool: &'a Pool<T>,
+    key: SessionKey,
+    armed: bool,
+}
+
+impl<T> Reservation<'_, T> {
+    /// The session was created and now owns the slot (returned via `checkin`).
+    fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<T> Drop for Reservation<'_, T> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pool.release(&self.key);
+        }
     }
 }
 
@@ -599,7 +659,8 @@ impl DbClient {
             match f().await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    if attempt == self.retry_attempts - 1 || !e.transient {
+                    let hopeless_auth_retry = e.kind == ApiErrorKind::Auth && !self.token_provider.can_refresh();
+                    if attempt == self.retry_attempts - 1 || !e.transient || hopeless_auth_retry {
                         return Err(e);
                     }
                     if let Some(s) = stats {
@@ -673,24 +734,37 @@ impl DbClient {
         }
 
         let url = format!("{}/api/2.0/sql/warehouses/{}", self.host, self.warehouse_id);
-        let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None, None).await?;
-        if data.state == "RUNNING" {
-            self.note_warehouse_running();
-            return Ok(());
-        }
-        if data.state == "STOPPED" {
-            self.authed_json::<IgnoredAny>(reqwest::Method::POST, &format!("{url}/start"), None, None)
-                .await?;
-        }
-
+        let mut state = self
+            .authed_json::<WarehouseStatusBody>(reqwest::Method::GET, &url, None, None)
+            .await?
+            .state;
         let deadline = Instant::now() + self.warehouse_start_timeout;
-        while Instant::now() < deadline {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            let data: WarehouseStatusBody = self.authed_json(reqwest::Method::GET, &url, None, None).await?;
-            if data.state == "RUNNING" {
-                self.note_warehouse_running();
-                return Ok(());
+        loop {
+            match state.as_str() {
+                "RUNNING" => {
+                    self.note_warehouse_running();
+                    return Ok(());
+                }
+                // Also while waiting: a warehouse seen STOPPING on the first
+                // check only becomes STOPPED a moment later, and nothing
+                // would ever start it otherwise.
+                "STOPPED" => {
+                    self.authed_json::<IgnoredAny>(reqwest::Method::POST, &format!("{url}/start"), None, None)
+                        .await?;
+                }
+                "DELETING" | "DELETED" => {
+                    return Err(ApiError::permanent(format!("SQL warehouse is {state}")));
+                }
+                _ => {}
             }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+            state = self
+                .authed_json::<WarehouseStatusBody>(reqwest::Method::GET, &url, None, None)
+                .await?
+                .state;
         }
         // Falls through, same as Python: let statement submission surface
         // whatever's actually wrong instead of raising here.
@@ -768,5 +842,114 @@ mod tests {
     #[test]
     fn thrift_direct_results_max_bytes_is_the_measured_one_gib_ceiling() {
         assert_eq!(THRIFT_DIRECT_RESULTS_MAX_BYTES, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn reservation_guard_releases_its_slot_unless_defused() {
+        let pool: Pool<String> = Pool::default();
+        let key: SessionKey = (None, None);
+        for _ in 0..MAX_SESSIONS_PER_KEY * 2 {
+            // Dropped without `defuse` -- as when a caller is cancelled
+            // mid-create -- so the slot must come back every time.
+            assert!(pool.reserve_guard(&key).is_some());
+        }
+        let held: Vec<_> = (0..MAX_SESSIONS_PER_KEY)
+            .map(|_| pool.reserve_guard(&key).unwrap())
+            .collect();
+        assert!(pool.reserve_guard(&key).is_none(), "cap reached while all are held");
+        drop(held);
+        assert!(pool.reserve_guard(&key).is_some());
+    }
+
+    #[test]
+    fn drain_idle_frees_the_reservations_of_what_it_drains() {
+        let pool: Pool<String> = Pool::default();
+        let key: SessionKey = (Some("c".into()), None);
+        for i in 0..MAX_SESSIONS_PER_KEY {
+            pool.reserve_guard(&key).unwrap().defuse();
+            pool.checkin(key.clone(), format!("s{i}"), true);
+        }
+        assert!(!pool.reserve(&key), "full");
+        assert_eq!(pool.drain_idle().len(), MAX_SESSIONS_PER_KEY);
+        assert!(
+            pool.reserve(&key),
+            "a client reused after close() must be able to pool again"
+        );
+    }
+
+    /// A warehouse first seen STOPPING must still be started once it settles
+    /// at STOPPED (the old code only ever started one that was STOPPED on the
+    /// very first check, then waited out the whole start timeout).
+    #[tokio::test]
+    async fn ensure_warehouse_running_starts_a_warehouse_seen_stopping_then_stopped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let gets = Arc::new(AtomicUsize::new(0));
+        let gets_for_mock = gets.clone();
+        Mock::given(method("GET"))
+            .and(path("/api/2.0/sql/warehouses/wh"))
+            .respond_with(move |_: &wiremock::Request| {
+                let state = ["STOPPING", "STOPPED", "RUNNING"][gets_for_mock.fetch_add(1, Ordering::SeqCst).min(2)];
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"state": state}))
+            })
+            .mount(&server)
+            .await;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let starts_for_mock = starts.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/2.0/sql/warehouses/wh/start"))
+            .respond_with(move |_: &wiremock::Request| {
+                starts_for_mock.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+            })
+            .mount(&server)
+            .await;
+
+        let client = DbClient::new(&server.uri(), "wh", "tok").with_warehouse_start_timeout(60.0);
+        let t0 = Instant::now();
+        client.ensure_warehouse_running().await.unwrap();
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "STOPPED must trigger exactly one /start"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "must return on RUNNING, not on timeout"
+        );
+    }
+
+    /// A rejected static token can never succeed on retry, so it must fail at
+    /// once instead of sleeping through the whole 1+2+4+8+16s backoff.
+    #[tokio::test]
+    async fn a_rejected_static_token_fails_immediately_without_retrying() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_mock = calls.clone();
+        Mock::given(method("GET"))
+            .respond_with(move |_: &wiremock::Request| {
+                calls_for_mock.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(401).set_body_string("bad token")
+            })
+            .mount(&server)
+            .await;
+
+        let client = DbClient::new(&server.uri(), "wh", "stale");
+        let t0 = Instant::now();
+        let err = client.ensure_warehouse_running().await.unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::Auth);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no retry for a token that cannot change"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(2));
     }
 }

@@ -12,6 +12,7 @@ Python-side Arrow-to-JSON conversion step at all.
 from __future__ import annotations
 
 import contextlib
+import operator
 from collections.abc import AsyncIterator, Awaitable, Iterator
 from typing import Any, BinaryIO, TypeVar, cast
 
@@ -158,14 +159,35 @@ async def await_with_heartbeat(
 
 def windowed_sql(sql: str, *, row_limit: int | None, offset: int | None) -> str:
     """Pushes LIMIT/OFFSET into the SQL submitted to Databricks -- a query
-    should never fetch more rows from the warehouse than the caller wants."""
+    should never fetch more rows from the warehouse than the caller wants.
+
+    Only meaningful for a plain SELECT (the query is wrapped as a subquery).
+    `row_limit`/`offset` must be real, non-negative ints -- they are written
+    into the SQL text, so a string forwarded from a request is rejected
+    instead of injected."""
+    row_limit = _window_value("row_limit", row_limit)
+    offset = _window_value("offset", offset)
     if row_limit is None and not offset:
         return sql
+    # A trailing `;` or `-- comment` would otherwise break the wrapper
+    # (`(select 1;)`, or the comment swallowing the closing paren).
+    inner = sql.rstrip().rstrip(";").rstrip()
     if row_limit is None:
-        return f"SELECT * FROM ({sql}) _q OFFSET {offset}"  # noqa: S608
+        return f"SELECT * FROM ({inner}\n) _q OFFSET {offset}"  # noqa: S608
     if offset:
-        return f"SELECT * FROM ({sql}) _q LIMIT {row_limit} OFFSET {offset}"  # noqa: S608
-    return f"SELECT * FROM ({sql}) _q LIMIT {row_limit}"  # noqa: S608
+        return f"SELECT * FROM ({inner}\n) _q LIMIT {row_limit} OFFSET {offset}"  # noqa: S608
+    return f"SELECT * FROM ({inner}\n) _q LIMIT {row_limit}"  # noqa: S608
+
+
+def _window_value(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an int, not bool")
+    number = operator.index(value)  # TypeError for str/float
+    if number < 0:
+        raise ValueError(f"{name} must be non-negative, got {number}")
+    return number
 
 
 async def stream_query_json(

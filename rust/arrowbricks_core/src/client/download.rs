@@ -302,7 +302,12 @@ impl DbClient {
                 parts.push((index, bytes?));
             }
             parts.sort_unstable_by_key(|(index, _)| *index);
-            let mut out = bytes::BytesMut::with_capacity(total.unwrap_or(head.len() as u64) as usize);
+            // Size from what was actually received, never from `total`: that
+            // comes from the server's Content-Range header, and a bogus one
+            // would abort the process in `with_capacity` before the length
+            // check below could turn it into a normal error.
+            let received = head.len() + parts.iter().map(|(_, part)| part.len()).sum::<usize>();
+            let mut out = bytes::BytesMut::with_capacity(received);
             out.extend_from_slice(&head);
             for (_, part) in parts {
                 out.extend_from_slice(&part);
@@ -387,6 +392,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A bogus `Content-Range` total must become an ordinary error: it used to
+    /// size the output buffer up front, which aborted the whole process.
+    #[tokio::test]
+    async fn split_download_with_a_bogus_content_range_total_errors_instead_of_aborting() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        if socket.read_u8().await.map(|b| request.push(b)).is_err() {
+                            return;
+                        }
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    let range = request.lines().find(|s| s.starts_with("range:")).unwrap();
+                    let start: u64 = range
+                        .split_once("bytes=")
+                        .unwrap()
+                        .1
+                        .split_once('-')
+                        .unwrap()
+                        .0
+                        .parse()
+                        .unwrap();
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes {start}-{}/999999999999999\r\nConnection: close\r\n\r\n",
+                        start + 3,
+                    );
+                    let _ = socket.write_all(headers.as_bytes()).await;
+                    let _ = socket.write_all(b"abcd").await;
+                });
+            }
+        });
+        let client = Arc::new(
+            DbClient::new(&format!("http://{address}"), "wh", "token")
+                .with_retry_attempts(1)
+                .with_retry_max_wait_s(0.0),
+        );
+        let stats = Arc::new(QueryStatsAccumulator::default());
+        let result = client
+            .fetch_link_bytes_split(&format!("http://{address}/blob"), false, 4, 3, &stats)
+            .await;
+        assert!(
+            result.is_err(),
+            "a file shorter than its declared size must be an error"
+        );
     }
 
     #[tokio::test]

@@ -2102,3 +2102,192 @@ async fn thrift_abandoning_the_submit_poll_wait_closes_its_session() {
     wait_for_calls(&close_calls, 1).await;
     assert_eq!(close_calls.load(Ordering::SeqCst), 1);
 }
+
+// ---- session-pool lifecycle / abandoned-consumer regressions (full-repo review) ----
+
+async fn mount_close_session_counter(server: &MockServer) -> Arc<AtomicUsize> {
+    let c = Arc::new(AtomicUsize::new(0));
+    let c2 = c.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("CloseSession"))
+        .respond_with(move |_r: &Request| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(build_close_session_resp(), "application/x-thrift")
+        })
+        .mount(server)
+        .await;
+    c
+}
+
+#[tokio::test]
+async fn thrift_cancelled_session_creation_does_not_leak_the_pool_reservation() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    mount_close_operation_ok(&server).await;
+    let _close = mount_close_session_counter(&server).await;
+    let opens = Arc::new(AtomicUsize::new(0));
+    let o2 = opens.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("OpenSession"))
+        .respond_with(move |_r: &Request| {
+            let n = o2.fetch_add(1, Ordering::SeqCst);
+            let t = ResponseTemplate::new(200).set_body_raw(
+                build_open_session_resp(format!("s{n}").as_bytes(), b"sec"),
+                "application/x-thrift",
+            );
+            if n < MAX_SESSIONS_PER_KEY {
+                t.set_delay(std::time::Duration::from_secs(3))
+            } else {
+                t
+            }
+        })
+        .mount(&server)
+        .await;
+    let schema = test_schema();
+    let s2 = schema.clone();
+    let ex = Arc::new(AtomicUsize::new(0));
+    let ex2 = ex.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(move |_r: &Request| {
+            let n = ex2.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(
+                small_execute_statement_success(format!("op-{n}").into_bytes(), &s2),
+                "application/x-thrift",
+            )
+        })
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    for _ in 0..MAX_SESSIONS_PER_KEY {
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None),
+        )
+        .await;
+        assert!(r.is_err());
+    }
+    let before = opens.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        let mut st = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
+            .await
+            .unwrap();
+        st.fetchall_arrow().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let after = opens.load(Ordering::SeqCst);
+    // healthy pool: 1 open (reused). leaked: 2 opens (throwaway each).
+    assert_eq!(
+        after - before,
+        1,
+        "opens for 2 sequential stmts after {} cancelled creations",
+        MAX_SESSIONS_PER_KEY
+    );
+}
+
+#[tokio::test]
+async fn thrift_failed_statement_closes_its_discarded_pooled_session() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+    let close = mount_close_session_counter(&server).await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(
+                b"op-f",
+                b"s",
+                Some(DirectResultsSpec {
+                    operation_state: Some(operation_state::ERROR),
+                    operation_error: Some("bad sql".into()),
+                    ..Default::default()
+                }),
+            ),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let client = thrift_client(&server);
+    for _ in 0..5 {
+        let r = execute_lazy_thrift(client.clone(), "bad", None, None, None).await;
+        assert!(r.is_err());
+    }
+    wait_for_calls(&close, 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        close.load(Ordering::SeqCst),
+        5,
+        "CloseSession calls after 5 failed statements on pooled sessions"
+    );
+}
+
+#[tokio::test]
+async fn thrift_fetch_discovery_stops_once_the_consumer_is_gone() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+    let _c = mount_close_session_counter(&server).await;
+    let schema = test_schema();
+    let (schema_bytes, _b) = build_schema_and_batch_messages(&schema, &[(0, 1)]);
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(
+                b"op",
+                b"s",
+                Some(DirectResultsSpec {
+                    operation_state: Some(operation_state::FINISHED),
+                    metadata: Some((false, Some(schema_bytes))),
+                    ..Default::default()
+                }),
+            ),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let bytes = build_full_stream_bytes(&schema, 0, 5);
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex("^/_data/.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(bytes, "application/vnd.apache.arrow.stream"))
+        .mount(&server)
+        .await;
+    const N: usize = 60;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c2 = calls.clone();
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("FetchResults"))
+        .respond_with(move |_r: &Request| {
+            let n = c2.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200)
+                .set_body_raw(
+                    build_fetch_results_resp(&FetchSpec {
+                        has_more_rows: n + 1 < N,
+                        result_links: vec![(format!("{uri}/_data/c{n}"), 5)],
+                        metadata: Some((false, None)),
+                        ..Default::default()
+                    }),
+                    "application/x-thrift",
+                )
+                .set_delay(std::time::Duration::from_millis(30))
+        })
+        .mount(&server)
+        .await;
+    let client = thrift_client(&server);
+    let stream = execute_lazy_thrift(client, "SELECT 1", None, None, None).await.unwrap();
+    drop(stream);
+    let at_drop = calls.load(Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    let later = calls.load(Ordering::SeqCst);
+    assert!(
+        later <= at_drop + 3,
+        "FetchResults kept going: at_drop={at_drop} later={later}"
+    );
+}
