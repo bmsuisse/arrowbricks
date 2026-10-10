@@ -152,6 +152,8 @@ When `total_timeout_s` elapses or your code cancels the surrounding coroutine (`
 
 This covers both phases of a query: the submit/poll wait while the statement is still running (`Cursor.execute()`/`execute_streamed()`, and the start of `client.stream_query_json(...)`), and the chunk download afterwards (`Cursor.fetchall_streamed()`/`fetchall_arrow_streamed()`, the rest of `stream_query_json`). `stream_query_json`'s `total_timeout_s` is one budget across both phases. On `protocol="sea"` there is one short blind spot: the submit request itself can wait server-side for up to `wait_timeout` (default 30s) before Databricks returns a statement id, and a query abandoned inside that window can't be cancelled.
 
+Abandoning a result also stops the client-side work right away, for every fetch method (plain `fetchall_arrow()`/`fetchmany()` too): cancelling the task, closing a `stream_query_json` iterator early (what a web framework does when the HTTP client disconnects mid-response), or dropping a `Cursor` before its result is drained aborts the chunk downloads in flight, starts no new ones, and on Thrift closes the operation (`CloseOperation`). Nothing to opt into: cancel the task (or let your framework close the generator) and arrowbricks cleans up. Cancelling a FastAPI handler on client disconnect therefore stops the warehouse query (if it is still running) and the downloads (if it is not).
+
 ## Errors
 
 Every exception arrowbricks raises itself is an `ArrowbricksError` -- a `RuntimeError` subclass, so an `except RuntimeError` written before this hierarchy existed keeps catching everything unchanged. Three subclasses split by what actually changes what your code should do next:

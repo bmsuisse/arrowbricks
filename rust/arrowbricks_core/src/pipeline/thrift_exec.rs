@@ -626,17 +626,35 @@ async fn run_thrift_fetch_loop(
         let compressed_flag = compressed_flag.clone();
         let worker_stats = stats.clone();
         worker_handles.push(tokio::spawn(async move {
-            loop {
-                let work = { link_rx.lock().await.recv().await };
-                let Some(work) = work else { return };
-                let compressed = compressed_flag.load(std::sync::atomic::Ordering::Relaxed);
-                let result = fetch_thrift_link(&client, work, compressed, &worker_stats).await;
-                if out_tx.send(result).await.is_err() {
-                    return;
+            let work_loop = async {
+                loop {
+                    let work = { link_rx.lock().await.recv().await };
+                    let Some(work) = work else { return };
+                    let compressed = compressed_flag.load(std::sync::atomic::Ordering::Relaxed);
+                    let result = fetch_thrift_link(&client, work, compressed, &worker_stats).await;
+                    if out_tx.send(result).await.is_err() {
+                        return;
+                    }
                 }
+            };
+            // The consumer (`ResultStream`/`NdjsonStream`) dropping its
+            // receiver -- a cancelled or abandoned fetch -- stops this worker
+            // at once, aborting its in-flight download, instead of finishing
+            // a chunk nobody will read. See `queue_link`.
+            tokio::select! {
+                biased;
+                () = out_tx.closed() => {}
+                () = work_loop => {}
             }
         }));
     }
+    // Only the workers hold the receiving end from here on: if every worker
+    // has exited, `link_tx.send` fails instead of waiting forever for room in
+    // a queue nobody drains -- which used to hang this task (and skip the
+    // `CloseOperation`/`CloseSession` cleanup in `drive_thrift_fetch_loop`)
+    // whenever a consumer abandoned a result with more than about
+    // `2 * concurrency` links left to queue.
+    drop(link_rx);
 
     let mut chunk_index: i64 = 0;
     let mut pending = initial_rowset;
@@ -658,11 +676,20 @@ async fn run_thrift_fetch_loop(
     // Direct results may already have confirmed it during submission. In
     // that case downloads can overlap the very first FetchResults RPC too.
     let mut pending_until_confirmed: Vec<ThriftLinkWork> = Vec::new();
-    loop {
+    'discover: loop {
         let (row_set, has_more) = if let Some(v) = pending.take() {
             v
         } else {
-            match client.thrift_fetch_results_raw(operation, stats).await {
+            // Stop discovering as soon as the consumer is gone (see
+            // `queue_link`) -- no further `FetchResults` round trips for a
+            // result nobody reads; `drive_thrift_fetch_loop` then closes the
+            // operation.
+            let fetched = tokio::select! {
+                biased;
+                () = tx.closed() => break 'discover,
+                fetched = client.thrift_fetch_results_raw(operation, stats) => fetched,
+            };
+            match fetched {
                 Ok(fr) => {
                     if let Some(e) = fr.status.error() {
                         let _ = tx
@@ -752,14 +779,11 @@ async fn run_thrift_fetch_loop(
                 // every worker is currently busy, so this await is exactly
                 // the same "peak buffered stays at ~concurrency" trade-off
                 // `fetch_chunks_with_backpressure`'s own doc comment
-                // describes. The receiving end only ever closes once every
-                // worker returns, which only happens after this sender side
-                // is dropped -- so a closed-channel send here would mean
-                // every worker already exited (e.g. all panicked), not a
-                // normal condition; still handled without panicking
-                // regardless.
-                if link_tx.send(work).await.is_err() {
-                    break;
+                // describes. `false` means the consumer is gone or every
+                // worker already exited (e.g. all panicked) -- stop
+                // discovering either way, see `queue_link`.
+                if !queue_link(&link_tx, work, tx).await {
+                    break 'discover;
                 }
             } else {
                 // See this function's own comment above `metadata_confirmed`.
@@ -769,8 +793,8 @@ async fn run_thrift_fetch_loop(
 
         if metadata_confirmed {
             for work in pending_until_confirmed.drain(..) {
-                if link_tx.send(work).await.is_err() {
-                    break;
+                if !queue_link(&link_tx, work, tx).await {
+                    break 'discover;
                 }
             }
         }
@@ -783,7 +807,7 @@ async fn run_thrift_fetch_loop(
     // Final flush for the never-confirmed case -- see `metadata_confirmed`'s
     // own comment above.
     for work in pending_until_confirmed.drain(..) {
-        if link_tx.send(work).await.is_err() {
+        if !queue_link(&link_tx, work, tx).await {
             break;
         }
     }
@@ -791,6 +815,28 @@ async fn run_thrift_fetch_loop(
     drop(link_tx); // lets every worker's `recv()` return `None` once the queue drains
     if let Some(e) = first_worker_panic(worker_handles).await {
         let _ = tx.send(Err(e)).await;
+    }
+}
+
+/// Hands one discovered link to the download workers, unless the consumer
+/// has dropped its end of `out` (a cancelled, timed-out or abandoned
+/// `ResultStream`/`NdjsonStream`) first. Returns `false` when discovery
+/// should stop: the consumer is gone, or every worker has already exited.
+///
+/// Without the `out.closed()` arm, an abandoned result kept this producer
+/// issuing `FetchResults` and queueing links for the whole statement, and --
+/// once the workers had noticed the closed channel and exited -- blocked
+/// forever on a full link queue, so `drive_thrift_fetch_loop` never reached
+/// `CloseOperation`/`CloseSession` and its task leaked.
+async fn queue_link(
+    link_tx: &mpsc::Sender<ThriftLinkWork>,
+    work: ThriftLinkWork,
+    out: &mpsc::Sender<Result<ChunkItem, ApiError>>,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = out.closed() => false,
+        sent = link_tx.send(work) => sent.is_ok(),
     }
 }
 
