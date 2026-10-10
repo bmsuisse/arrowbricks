@@ -9,6 +9,10 @@ preservation, error propagation, LZ4 compression, and session reuse."""
 
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import AsyncGenerator
+
 import pytest
 import thrift_mock as tm
 
@@ -276,3 +280,62 @@ async def test_thrift_is_the_default_protocol_when_omitted(mock_thrift_server):
     rows = await cursor.fetchall()
 
     assert [r[0] for r in rows] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_thrift_stream_stopped_early_aborts_downloads_and_closes_the_operation(mock_thrift_server):
+    """A consumer that stops reading `stream_query_json` after the first rows
+    (an SSE client that disconnected, say) must not leave the background
+    fetch running: the in-flight download is aborted, no further one starts,
+    and the operation is closed promptly. Regression test: with more links
+    left than the download workers and their queue could hold, the fetch
+    loop used to block forever, so `CloseOperation` never went out."""
+    server = mock_thrift_server(WAREHOUSE_ID)
+    _install_open_session(server)
+
+    n_links, rows_per_link = 8, 5
+    schema_bytes, _ = tm.build_schema_and_batches([(0, 1)])
+    links = [(f"{server.host}/_data/chunk-{i}", rows_per_link) for i in range(n_links)]
+    server.handler.execute_statement = lambda req: tm.execute_statement_resp(
+        op_guid=b"op-early-stop",
+        direct=tm.DirectResults(
+            operation_state=tm.OperationState.FINISHED_STATE,
+            lz4_compressed=False,
+            arrow_schema=schema_bytes,
+            fetch=tm.fetch_results_resp(has_more_rows=False, result_links=links),
+        ),
+    )
+    close_calls: list[object] = []
+
+    def _close_operation(req):
+        close_calls.append(req)
+        return tm.ttypes.TCloseOperationResp(status=tm.ok_status())
+
+    server.handler.close_operation = _close_operation
+    started: list[int] = []
+
+    def _serve_chunk(m):
+        i = int(m.group(1))
+        started.append(i)
+        if i > 0:
+            time.sleep(2.0)  # still in flight when the consumer stops
+        return tm.build_full_ipc_stream(i * rows_per_link, (i + 1) * rows_per_link)
+
+    server.add_data_route(r"^/_data/chunk-(\d+)$", _serve_chunk)
+
+    client = DatabricksClient(
+        server.host, WAREHOUSE_ID, token="test-token", protocol="thrift", chunk_fetch_concurrency=1
+    )
+    stream = client.stream_query_json("SELECT * FROM t")
+    assert isinstance(stream, AsyncGenerator)  # what a framework calls aclose() on
+    async for item in stream:
+        if isinstance(item, str):
+            break
+    await stream.aclose()
+
+    for _ in range(100):
+        if close_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert len(close_calls) == 1, "CloseOperation must go out promptly after the consumer stops reading"
+    assert len(started) <= 2, f"no download may start after the consumer stopped, saw {sorted(started)}"

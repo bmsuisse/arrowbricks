@@ -1798,3 +1798,116 @@ async fn abandoning_the_submit_poll_wait_releases_the_session_reservation() {
         "every abandoned attempt must release its reservation, so each one can create a session"
     );
 }
+
+/// A raw cloud-fetch blob server for `sea_dropping_a_partly_read_result_aborts_in_flight_downloads`:
+/// `/blob-0` is served in full; any other path gets its headers and first
+/// few bytes, then the connection is held open until the *client* hangs
+/// up, which is signalled on `hung_up` (`started` fires once such a stalled
+/// download is in flight). wiremock can't show a client abandoning a
+/// response mid-body, hence a bare socket, same as `client/download.rs`'s own
+/// truncated-response tests.
+async fn spawn_stalling_blob_server(body: Vec<u8>) -> (String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let hung_up = Arc::new(tokio::sync::Notify::new());
+    let (started_srv, hung_up_srv) = (started.clone(), hung_up.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let body = body.clone();
+            let (started, hung_up) = (started_srv.clone(), hung_up_srv.clone());
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    match socket.read_u8().await {
+                        Ok(b) => request.push(b),
+                        Err(_) => return,
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                if request.starts_with(b"GET /blob-0 ") {
+                    socket.write_all(&body).await.unwrap();
+                    let _ = socket.shutdown().await;
+                    return;
+                }
+                socket.write_all(&body[..10]).await.unwrap();
+                started.notify_one();
+                let mut buf = [0u8; 64];
+                loop {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                hung_up.notify_one();
+            });
+        }
+    });
+    (base, started, hung_up)
+}
+
+/// Dropping a partly-read `ResultStream` (a cancelled or abandoned fetch)
+/// must abort the chunk download already in flight, not let it run to
+/// completion -- here that would mean waiting out the full `http_timeout`
+/// on a download that never finishes. Before this was fixed the worker
+/// only noticed the dropped consumer when it tried to hand over a finished
+/// chunk.
+#[tokio::test]
+async fn sea_dropping_a_partly_read_result_aborts_in_flight_downloads() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    let (blob_base, started, hung_up) = spawn_stalling_blob_server(build_chunk_bytes(0, 5)).await;
+    let chunks: Vec<_> = (0..3).map(|i| json!({"chunk_index": i, "row_count": 5})).collect();
+    Mock::given(method("POST"))
+        .and(path("/api/2.0/sql/statements"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "statement_id": STATEMENT_ID,
+            "status": {"state": "SUCCEEDED"},
+            "manifest": {
+                "chunks": chunks,
+                "schema": {"columns": [
+                    {"name": "id", "type_name": "LONG"},
+                    {"name": "label", "type_name": "STRING"},
+                ]},
+            },
+        })))
+        .mount(&server)
+        .await;
+    for i in 0..3 {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/2.0/sql/statements/{STATEMENT_ID}/result/chunks/{i}"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "external_links": [{"external_link": format!("{blob_base}/blob-{i}")}]
+            })))
+            .mount(&server)
+            .await;
+    }
+
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_protocol(Protocol::Sea)
+            .with_concurrency(1),
+    );
+    let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
+    let (batches, _schema) = stream.fetchmany_arrow(1).await.unwrap();
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("the next chunk's download must be in flight before the drop");
+
+    drop(stream);
+    tokio::time::timeout(std::time::Duration::from_secs(2), hung_up.notified())
+        .await
+        .expect("dropping the result must abort the in-flight download promptly");
+}

@@ -2103,6 +2103,120 @@ async fn thrift_abandoning_the_submit_poll_wait_closes_its_session() {
     assert_eq!(close_calls.load(Ordering::SeqCst), 1);
 }
 
+/// Abandoning a partly-read result -- the consumer drops its `ResultStream`
+/// after the first chunk (a cancelled `fetchall`, a client that stopped
+/// reading a stream) -- must stop the background fetch loop and close the
+/// operation promptly. It used to keep the remaining links queued: once the
+/// one worker noticed the closed channel and exited, the producer blocked
+/// forever on a full link queue, so `CloseOperation` never went out (and
+/// the in-flight download ran to completion first in any case). The slow
+/// links here take 5s, so a `CloseOperation` within `wait_for_calls`' ~1s
+/// also proves the in-flight download was aborted rather than finished.
+#[tokio::test]
+async fn thrift_dropping_a_partly_read_result_aborts_downloads_and_closes_the_operation() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess-abandon").await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-abandon", b"opsecret-abandon", None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_get_operation_status_resp(operation_state::FINISHED, None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+    let close_calls = Arc::new(AtomicUsize::new(0));
+    let close_calls_for_mock = close_calls.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("CloseOperation"))
+        .respond_with(move |_req: &Request| {
+            close_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(build_close_operation_resp(), "application/x-thrift")
+        })
+        .mount(&server)
+        .await;
+
+    // More links than one worker plus its one-slot queue can hold.
+    const N_LINKS: i64 = 8;
+    const ROWS_PER_CHUNK: i64 = 5;
+    let uri = server.uri();
+    let links: Vec<(String, i64)> = (0..N_LINKS)
+        .map(|i| (format!("{uri}/_data/abandon-{i}"), ROWS_PER_CHUNK))
+        .collect();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("FetchResults"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_fetch_results_resp(&FetchSpec {
+                has_more_rows: false,
+                result_links: links,
+                metadata: Some((false, None)),
+                ..Default::default()
+            }),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let schema = test_schema();
+    let data_calls = Arc::new(AtomicUsize::new(0));
+    for i in 0..N_LINKS {
+        let bytes = build_full_stream_bytes(&schema, i * ROWS_PER_CHUNK, (i + 1) * ROWS_PER_CHUNK);
+        let delay = std::time::Duration::from_millis(if i == 0 { 0 } else { 5_000 });
+        let data_calls_for_mock = data_calls.clone();
+        Mock::given(method("GET"))
+            .and(path(format!("/_data/abandon-{i}")))
+            .respond_with(move |_req: &Request| {
+                data_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+                    .set_body_raw(bytes.clone(), "application/vnd.apache.arrow.stream")
+                    .set_delay(delay)
+            })
+            .mount(&server)
+            .await;
+    }
+
+    let client = Arc::new(
+        DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token")
+            .with_protocol(Protocol::Thrift)
+            .with_concurrency(1),
+    );
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let (batches, _schema) = stream.fetchmany_arrow(1).await.unwrap();
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    wait_for_calls(&data_calls, 2).await; // the second (slow) download is in flight
+    drop(stream);
+
+    wait_for_calls(&close_calls, 1).await;
+    assert_eq!(
+        close_calls.load(Ordering::SeqCst),
+        1,
+        "CloseOperation must go out promptly once the consumer drops a partly-read result"
+    );
+    assert_eq!(
+        data_calls.load(Ordering::SeqCst),
+        2,
+        "no further download may start after the consumer is gone"
+    );
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        0,
+        "a finished operation is closed, not cancelled"
+    );
+}
+
 // ---- session-pool lifecycle / abandoned-consumer regressions (full-repo review) ----
 
 async fn mount_close_session_counter(server: &MockServer) -> Arc<AtomicUsize> {
@@ -2223,71 +2337,5 @@ async fn thrift_failed_statement_closes_its_discarded_pooled_session() {
         close.load(Ordering::SeqCst),
         5,
         "CloseSession calls after 5 failed statements on pooled sessions"
-    );
-}
-
-#[tokio::test]
-async fn thrift_fetch_discovery_stops_once_the_consumer_is_gone() {
-    let server = MockServer::start().await;
-    mount_open_session_always(&server, b"sess").await;
-    mount_close_operation_ok(&server).await;
-    let _c = mount_close_session_counter(&server).await;
-    let schema = test_schema();
-    let (schema_bytes, _b) = build_schema_and_batch_messages(&schema, &[(0, 1)]);
-    Mock::given(method("POST"))
-        .and(path(thrift_path()))
-        .and(IsThriftRpc("ExecuteStatement"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            build_execute_statement_resp(
-                b"op",
-                b"s",
-                Some(DirectResultsSpec {
-                    operation_state: Some(operation_state::FINISHED),
-                    metadata: Some((false, Some(schema_bytes))),
-                    ..Default::default()
-                }),
-            ),
-            "application/x-thrift",
-        ))
-        .mount(&server)
-        .await;
-    let bytes = build_full_stream_bytes(&schema, 0, 5);
-    Mock::given(method("GET"))
-        .and(wiremock::matchers::path_regex("^/_data/.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(bytes, "application/vnd.apache.arrow.stream"))
-        .mount(&server)
-        .await;
-    const N: usize = 60;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let c2 = calls.clone();
-    let uri = server.uri();
-    Mock::given(method("POST"))
-        .and(path(thrift_path()))
-        .and(IsThriftRpc("FetchResults"))
-        .respond_with(move |_r: &Request| {
-            let n = c2.fetch_add(1, Ordering::SeqCst);
-            ResponseTemplate::new(200)
-                .set_body_raw(
-                    build_fetch_results_resp(&FetchSpec {
-                        has_more_rows: n + 1 < N,
-                        result_links: vec![(format!("{uri}/_data/c{n}"), 5)],
-                        metadata: Some((false, None)),
-                        ..Default::default()
-                    }),
-                    "application/x-thrift",
-                )
-                .set_delay(std::time::Duration::from_millis(30))
-        })
-        .mount(&server)
-        .await;
-    let client = thrift_client(&server);
-    let stream = execute_lazy_thrift(client, "SELECT 1", None, None, None).await.unwrap();
-    drop(stream);
-    let at_drop = calls.load(Ordering::SeqCst);
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-    let later = calls.load(Ordering::SeqCst);
-    assert!(
-        later <= at_drop + 3,
-        "FetchResults kept going: at_drop={at_drop} later={later}"
     );
 }

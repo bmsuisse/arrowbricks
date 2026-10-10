@@ -8,7 +8,6 @@
   pool slot back, `close()` frees the slots of the sessions it closes, and a
   session discarded after a failed statement is closed on the server
   instead of lingering until its idle TTL. Applies to SEA and Thrift.
-- Thrift: stop fetching result links once the consumer is gone.
 - `ensure_warehouse_running` starts a warehouse it first sees STOPPING and
   then STOPPED (it used to wait out the whole start timeout), and fails fast
   on a deleted warehouse.
@@ -50,6 +49,29 @@
   paging, Python values, nested NDJSON, empty results, concurrency, errors,
   and timeout recovery. Extend the interleaved benchmark to cover all fetch
   modes and IPC export.
+
+## 5.1.2 — 2026-10-10
+
+- Stop the background fetch as soon as a result is abandoned. Cancelling
+  the task that awaits a fetch, closing a `stream_query_json` iterator
+  (what a web framework does when the client disconnects), or dropping a
+  `Cursor` before its result is drained used to leave the chunk downloads
+  already in flight running to completion (up to `chunk_fetch_concurrency`
+  of them), and workers could start new ones after the consumer was gone.
+  In-flight downloads are now aborted right away, on both protocols.
+- Thrift: closing the operation after an abandoned fetch no longer hangs.
+  With more links left than the download workers and their queue could hold
+  (about `2 * chunk_fetch_concurrency`; 128 by default), the fetch loop
+  blocked forever, so `CloseOperation` (and `CloseSession` for a throwaway
+  session) never went out, and the task, its client handle and its
+  connection pool were never freed. The loop now also stops issuing
+  `FetchResults` once nobody reads the result.
+- Unchanged: server-side cancel (`CancelOperation` / SEA `POST .../cancel`)
+  still fires when a still-running statement is abandoned, as since 3.2.0.
+- Tests: `wiremock_thrift.rs`/`wiremock_pipeline.rs` drop a partly read
+  result with a download in flight, and `test_thrift_pipeline.py` stops
+  reading `stream_query_json` after the first rows. All three fail on 5.1.1.
+- No API changes.
 
 ## 5.1.1 — 2026-10-07
 

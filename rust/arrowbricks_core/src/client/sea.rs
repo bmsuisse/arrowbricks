@@ -554,38 +554,49 @@ impl DbClient {
                 let statement_id = statement_id.clone();
                 let stats = stats.clone();
                 handles.push(tokio::spawn(async move {
-                    loop {
-                        let meta = { queue.lock().unwrap().pop_front() };
-                        let Some(meta) = meta else { return Ok(()) };
-                        let fetched = if meta.pre_resolved_links.is_empty() {
-                            client
-                                .fetch_chunk_index(&statement_id, meta.chunk_index, compressed, &stats)
-                                .await
-                        } else {
-                            client
-                                .fetch_pre_resolved_links(&meta.pre_resolved_links, compressed, &stats)
-                                .await
-                        };
-                        match fetched {
-                            Ok(blobs) => {
-                                // One blob ⇒ `meta.row_count` (the whole chunk_index's
-                                // declared count) and "this blob's count" are the same
-                                // number -- see `ChunkItem::truncate_to`'s own doc comment.
-                                let truncate_to = if blobs.len() == 1 { meta.row_count } else { None };
-                                for blob in blobs {
-                                    let item = ChunkItem {
-                                        blob,
-                                        row_count: meta.row_count,
-                                        chunk_index: meta.chunk_index,
-                                        truncate_to,
-                                    };
-                                    if worker_tx.send(Ok(item)).await.is_err() {
-                                        return Ok(());
+                    let work_loop = async {
+                        loop {
+                            let meta = { queue.lock().unwrap().pop_front() };
+                            let Some(meta) = meta else { return Ok(()) };
+                            let fetched = if meta.pre_resolved_links.is_empty() {
+                                client
+                                    .fetch_chunk_index(&statement_id, meta.chunk_index, compressed, &stats)
+                                    .await
+                            } else {
+                                client
+                                    .fetch_pre_resolved_links(&meta.pre_resolved_links, compressed, &stats)
+                                    .await
+                            };
+                            match fetched {
+                                Ok(blobs) => {
+                                    // One blob ⇒ `meta.row_count` (the whole chunk_index's
+                                    // declared count) and "this blob's count" are the same
+                                    // number -- see `ChunkItem::truncate_to`'s own doc comment.
+                                    let truncate_to = if blobs.len() == 1 { meta.row_count } else { None };
+                                    for blob in blobs {
+                                        let item = ChunkItem {
+                                            blob,
+                                            row_count: meta.row_count,
+                                            chunk_index: meta.chunk_index,
+                                            truncate_to,
+                                        };
+                                        if worker_tx.send(Ok(item)).await.is_err() {
+                                            return Ok(());
+                                        }
                                     }
                                 }
+                                Err(e) => return Err(e),
                             }
-                            Err(e) => return Err(e),
                         }
+                    };
+                    // The consumer dropping its receiver (a cancelled,
+                    // timed-out or abandoned fetch) stops this worker at
+                    // once, aborting its in-flight download instead of
+                    // finishing -- and then starting -- chunks nobody reads.
+                    tokio::select! {
+                        biased;
+                        () = worker_tx.closed() => Ok(()),
+                        res = work_loop => res,
                     }
                 }));
             }
