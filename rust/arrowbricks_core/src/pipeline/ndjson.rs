@@ -6,6 +6,7 @@
 //! `Infinity`/`-Infinity`) string-patching arrow-json's own fixed encoding
 //! needs help with.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::Arc;
 
@@ -234,16 +235,19 @@ fn replace_nth_top_level_null(line: &str, field_index: usize, replacement: &str)
     line.to_string()
 }
 
-/// Chunk-granularity (not row-count-granularity) counterpart to
-/// `ResultStream` (`pipeline/sea.rs`): pulls, decodes, and NDJSON-encodes
-/// exactly one reordered chunk per `next_chunk()` call rather than buffering
-/// ahead to satisfy a row count. Backs `stream_query_json` end to end --
+/// Page-granularity counterpart to `ResultStream` (`pipeline/sea.rs`): pulls
+/// and decodes one reordered chunk at a time, then NDJSON-encodes it a
+/// bounded page of rows per `next_chunk()` call rather than buffering ahead
+/// to satisfy a row count. Backs `stream_query_json` end to end --
 /// unlike the Arrow-Table pipelines in `pipeline/sea.rs`/`pipeline/thrift_exec.rs`,
 /// there's no further Python-side conversion step.
 pub struct NdjsonStream {
     pub statement_id: String,
     pub num_chunks: usize,
     reorder: ReorderBuffer,
+    /// Decoded batches of the chunk currently being paged out (see
+    /// `NDJSON_PAGE_ROWS`).
+    pending: VecDeque<RecordBatch>,
     non_finite_as_string: bool,
     /// See `ResultStream`'s identically-named fields -- same cancellation/
     /// observability contract, just backing `stream_ndjson_lines` instead.
@@ -253,46 +257,89 @@ pub struct NdjsonStream {
 }
 
 impl NdjsonStream {
-    /// Pulls the next chunk in logical (chunk_index) order, decodes it, and
-    /// NDJSON-encodes it (all on a blocking thread, since both decode and
-    /// JSON encoding are CPU work) -- `None` once the source is exhausted.
-    /// One network chunk in, one line per row out, matching
-    /// `fetch_arrow_chunks_for_statement`'s old per-chunk yield.
+    /// Returns the next page of NDJSON lines (at most about `NDJSON_PAGE_ROWS`
+    /// rows, never spanning two chunks), pulling and decoding the next chunk
+    /// in logical (chunk_index) order only once the previous one is fully
+    /// paged out -- `None` once the source is exhausted. Encoding a bounded
+    /// page at a time (on a blocking thread, since JSON encoding is CPU work)
+    /// keeps the chunk's decoded batches, the Rust `Vec<String>` and the
+    /// Python `list[str]` from all being whole-chunk-sized at once.
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<String>>, ApiError> {
         let mut guard = ReportOnDrop::new(&mut self.reporter, self.stats.as_ref());
-        match self.reorder.next().await {
-            Ok(Some(item)) => {
-                let non_finite_as_string = self.non_finite_as_string;
-                let truncate_to = item.truncate_to;
-                let decoded = tokio::task::spawn_blocking(move || {
-                    let batches = decode_chunk_item(&item.blob, truncate_to)?;
-                    encode_ndjson_lines(&batches, non_finite_as_string)
-                })
-                .await
-                .map_err(join_error);
-                match decoded {
-                    Ok(Ok(lines)) => {
-                        guard.defuse();
-                        guard.reporter.end_fetch();
-                        Ok(Some(lines))
-                    }
-                    Ok(Err(e)) | Err(e) => {
-                        guard.defuse();
-                        guard.fail(e)
+        if self.pending.is_empty() {
+            match self.reorder.next().await {
+                Ok(Some(item)) => {
+                    let truncate_to = item.truncate_to;
+                    let decoded = tokio::task::spawn_blocking(move || decode_chunk_item(&item.blob, truncate_to))
+                        .await
+                        .map_err(join_error);
+                    match decoded {
+                        Ok(Ok(batches)) => self.pending = batches.into(),
+                        Ok(Err(e)) | Err(e) => {
+                            guard.defuse();
+                            return guard.fail(e);
+                        }
                     }
                 }
+                Ok(None) => {
+                    guard.defuse();
+                    guard.reporter.finish("success", guard.stats);
+                    return Ok(None);
+                }
+                Err(e) => {
+                    guard.defuse();
+                    return guard.fail(e);
+                }
             }
-            Ok(None) => {
+        }
+
+        let page = take_page(&mut self.pending, NDJSON_PAGE_ROWS);
+        let non_finite_as_string = self.non_finite_as_string;
+        let encoded = tokio::task::spawn_blocking(move || encode_ndjson_lines(&page, non_finite_as_string))
+            .await
+            .map_err(join_error);
+        match encoded {
+            Ok(Ok(lines)) => {
                 guard.defuse();
-                guard.reporter.finish("success", guard.stats);
-                Ok(None)
+                guard.reporter.end_fetch();
+                Ok(Some(lines))
             }
-            Err(e) => {
+            Ok(Err(e)) | Err(e) => {
                 guard.defuse();
                 guard.fail(e)
             }
         }
     }
+}
+
+/// Rows of NDJSON handed to the caller per `next_chunk` call.
+const NDJSON_PAGE_ROWS: usize = 8192;
+
+/// Removes and returns batches totalling at most `max_rows` rows from the
+/// front of `pending` (slicing the batch that straddles the limit and putting
+/// its remainder back), always at least one batch so a zero-row, schema-only
+/// chunk still yields one (empty) page.
+fn take_page(pending: &mut VecDeque<RecordBatch>, max_rows: usize) -> Vec<RecordBatch> {
+    let mut page = Vec::new();
+    let mut rows = 0usize;
+    while let Some(batch) = pending.pop_front() {
+        let room = max_rows - rows;
+        if batch.num_rows() > room {
+            if room == 0 {
+                pending.push_front(batch);
+                break;
+            }
+            pending.push_front(batch.slice(room, batch.num_rows() - room));
+            page.push(batch.slice(0, room));
+            break;
+        }
+        rows += batch.num_rows();
+        page.push(batch);
+        if rows >= max_rows {
+            break;
+        }
+    }
+    page
 }
 
 /// Submit -> poll -> start background chunk fetching for the chunk-at-a-time
@@ -369,6 +416,7 @@ pub async fn execute_ndjson_stream(
             )
         };
     Ok(NdjsonStream {
+        pending: VecDeque::new(),
         statement_id: statement_id.clone(),
         num_chunks: num_chunks.unwrap_or(0),
         reorder: ReorderBuffer::new(rx),
@@ -564,6 +612,53 @@ mod tests {
     /// needs arrow-array's `chrono-tz` feature, which pyo3-arrow used to
     /// enable implicitly; without it this errors ("only offset based
     /// timezones supported").
+    #[test]
+    fn take_page_slices_the_straddling_batch_and_keeps_every_row_in_order() {
+        use arrow_array::Int64Array;
+        use std::sync::Arc as A;
+        let schema = A::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let mk = |r: std::ops::Range<i64>| {
+            RecordBatch::try_new(schema.clone(), vec![A::new(Int64Array::from_iter_values(r))]).unwrap()
+        };
+        let mut pending: VecDeque<RecordBatch> = vec![mk(0..5), mk(5..12), mk(12..13)].into();
+        let mut seen = Vec::new();
+        let mut page_sizes = Vec::new();
+        while !pending.is_empty() {
+            let page = take_page(&mut pending, 4);
+            let n: usize = page.iter().map(RecordBatch::num_rows).sum();
+            assert!(n <= 4 && n > 0);
+            page_sizes.push(n);
+            for b in &page {
+                seen.extend(
+                    b.column(0)
+                        .as_primitive::<arrow_array::types::Int64Type>()
+                        .values()
+                        .iter()
+                        .copied(),
+                );
+            }
+        }
+        assert_eq!(seen, (0..13).collect::<Vec<_>>());
+        assert_eq!(page_sizes, vec![4, 4, 4, 1]);
+    }
+
+    #[test]
+    fn take_page_yields_one_empty_page_for_a_schema_only_chunk() {
+        let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let mut pending: VecDeque<RecordBatch> = vec![RecordBatch::new_empty(schema)].into();
+        let page = take_page(&mut pending, 4);
+        assert_eq!(page.len(), 1);
+        assert!(pending.is_empty());
+    }
+
     #[test]
     fn encode_ndjson_lines_handles_a_named_timezone() {
         use arrow_array::TimestampMicrosecondArray;

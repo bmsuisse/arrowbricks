@@ -1,5 +1,55 @@
 # Changelog
 
+## 5.2.0 — 2026-10-09
+
+- Cloud-fetch download errors no longer include the presigned URL (its
+  `sig=` query string used to end up in exception messages and logs).
+- Session pools: a call cancelled while a session is being created gives its
+  pool slot back, `close()` frees the slots of the sessions it closes, and a
+  session discarded after a failed statement is closed on the server
+  instead of lingering until its idle TTL. Applies to SEA and Thrift.
+- `ensure_warehouse_running` starts a warehouse it first sees STOPPING and
+  then STOPPED (it used to wait out the whole start timeout), and fails fast
+  on a deleted warehouse.
+- A 401/403 with a static `token=` fails immediately instead of retrying for
+  about 31 s; `token_provider` callables are still retried.
+- A split download no longer trusts the server's `Content-Range` total for
+  its buffer size (a bogus value could abort the process).
+- Absurd constructor arguments (`http_timeout=1e30`,
+  `chunk_fetch_concurrency=2**62`) raise `ValueError` instead of a panic;
+  `chunk_fetch_concurrency` is capped at 4096.
+- `row_limit`/`offset` accept only non-negative ints, and a query ending in
+  `;` or a `--` comment can now be windowed.
+- `stream_query_json` encodes NDJSON in pages of up to 8192 rows instead of
+  one whole chunk at a time, cutting its peak memory by about a third (about
+  130 MB to 87 MB on a 300k x 8 result, level with `fetchall_arrow`) with no
+  change in speed or output.
+- Thrift: a rejected `ExecuteStatement` (bad SQL, bad parameter) now raises
+  `StatementError`, matching SEA, instead of the plain `ArrowbricksError`.
+- Thrift: a timeout or cancellation while `ExecuteStatement` itself is still
+  in flight (e.g. a cold connection) now cancels the statement once its
+  operation handle arrives, instead of leaving it running on the warehouse.
+- Thrift: a `None` named-parameter value is now bound as SQL NULL instead of
+  the empty string (SEA already did this).
+- SEA: pooled sessions are now created with the `catalog`/`schema` keys the
+  sessions API reads; the old `catalog_name`/`schema_name` were silently
+  ignored, so `schema=` had no effect whenever a session was in use.
+- Materialize Python rows directly from chunked columns, avoiding native
+  Arrow buffer concatenation before converting values to Python.
+- Write IPC directly to the destination with Python writes capped at 1 MiB,
+  avoiding a whole-result Rust buffer and Python copy. Handle short writes
+  and preserve exceptions raised by the destination.
+- Reject invalid streaming deadlines before starting work, with `ValueError`
+  instead of a Rust panic. Invalid `fetchmany` sizes no longer change cursor position.
+- Preserve schemas for schema-only IPC chunks and reconstruct empty SEA
+  schemas from SQL manifest types, including nested ARRAY/MAP/STRUCT fields.
+  Missing nullability metadata is treated conservatively as nullable;
+  unsupported manifest types raise an explicit error instead of losing columns.
+- Add opt-in real warehouse tests for both protocols, compression on/off,
+  paging, Python values, nested NDJSON, empty results, concurrency, errors,
+  and timeout recovery. Extend the interleaved benchmark to cover all fetch
+  modes and IPC export.
+
 ## 5.1.2 — 2026-10-10
 
 - Stop the background fetch as soon as a result is abandoned. Cancelling

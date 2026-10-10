@@ -12,6 +12,7 @@ Python-side Arrow-to-JSON conversion step at all.
 from __future__ import annotations
 
 import contextlib
+import operator
 from collections.abc import AsyncIterator, Awaitable, Iterator
 from typing import Any, BinaryIO, TypeVar, cast
 
@@ -135,9 +136,10 @@ async def await_with_heartbeat(
     import asyncio
 
     task: asyncio.Task[T] = asyncio.ensure_future(aw)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + total_timeout_s if total_timeout_s is not None else None
     try:
+        _core._validate_timeout(total_timeout_s)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + total_timeout_s if total_timeout_s is not None else None
         while not task.done():
             wait_for = interval_s if deadline is None else min(interval_s, max(deadline - loop.time(), 0.0))
             done, _ = await asyncio.wait({task}, timeout=wait_for)
@@ -157,14 +159,35 @@ async def await_with_heartbeat(
 
 def windowed_sql(sql: str, *, row_limit: int | None, offset: int | None) -> str:
     """Pushes LIMIT/OFFSET into the SQL submitted to Databricks -- a query
-    should never fetch more rows from the warehouse than the caller wants."""
+    should never fetch more rows from the warehouse than the caller wants.
+
+    Only meaningful for a plain SELECT (the query is wrapped as a subquery).
+    `row_limit`/`offset` must be real, non-negative ints -- they are written
+    into the SQL text, so a string forwarded from a request is rejected
+    instead of injected."""
+    row_limit = _window_value("row_limit", row_limit)
+    offset = _window_value("offset", offset)
     if row_limit is None and not offset:
         return sql
+    # A trailing `;` or `-- comment` would otherwise break the wrapper
+    # (`(select 1;)`, or the comment swallowing the closing paren).
+    inner = sql.rstrip().rstrip(";").rstrip()
     if row_limit is None:
-        return f"SELECT * FROM ({sql}) _q OFFSET {offset}"  # noqa: S608
+        return f"SELECT * FROM ({inner}\n) _q OFFSET {offset}"  # noqa: S608
     if offset:
-        return f"SELECT * FROM ({sql}) _q LIMIT {row_limit} OFFSET {offset}"  # noqa: S608
-    return f"SELECT * FROM ({sql}) _q LIMIT {row_limit}"  # noqa: S608
+        return f"SELECT * FROM ({inner}\n) _q LIMIT {row_limit} OFFSET {offset}"  # noqa: S608
+    return f"SELECT * FROM ({inner}\n) _q LIMIT {row_limit}"  # noqa: S608
+
+
+def _window_value(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an int, not bool")
+    number = operator.index(value)  # TypeError for str/float
+    if number < 0:
+        raise ValueError(f"{name} must be non-negative, got {number}")
+    return number
 
 
 async def stream_query_json(
@@ -209,8 +232,8 @@ async def stream_query_json(
     `QueryTimeout` once it elapses, firing a best-effort server-side cancel
     so the statement doesn't keep running on the warehouse.
 
-    Note this yields a whole chunk's rows at once -- Databricks' own chunk
-    sizing already bounds how much that is."""
+    JSON conversion materializes one network chunk at a time; this wrapper
+    then yields each row individually."""
     if non_finite_floats not in ("null", "string"):
         raise ValueError(f"non_finite_floats must be 'null' or 'string', got {non_finite_floats!r}")
     sql = windowed_sql(sql, row_limit=row_limit, offset=offset)

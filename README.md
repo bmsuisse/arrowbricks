@@ -331,6 +331,36 @@ can run concurrently on separate Python threads.
 
 `write_ipc_stream` (and everything in this package that serializes Arrow-IPC bytes) always writes **uncompressed** bodies. A compressed body (arro3's own default is `compression="LZ4"`) is transparently decompressed by some Arrow readers (e.g. DuckDB's) but not necessarily by every other Arrow IPC reader -- notably, `duckdb-wasm`'s browser-side decoder silently fails to parse LZ4-compressed bodies. Since arrowbricks' bytes might end up read by anything, plain uncompressed is the safe default.
 
+IPC output is written incrementally, with each Python `write()` call capped at
+1 MiB. Short writes are handled; the destination remains open and is not flushed
+by arrowbricks. A write failure can leave partial output, so discard it before retrying.
+
+## Real warehouse verification
+
+The opt-in live suite generates synthetic data with read-only SQL. It covers
+Thrift and SEA, compression enabled and disabled, Arrow paging, Python values,
+nested NDJSON, empty schemas, concurrent queries, errors, and timeout recovery.
+Set `DATABRICKS_HOST`, `DATABRICKS_WAREHOUSE_ID`, and `DATABRICKS_TOKEN` in the
+environment or the repository's ignored `.env`, then run:
+
+```bash
+ARROWBRICKS_LIVE=1 uv run pytest tests/live -q
+```
+
+To compare two package directories on the same warehouse, use
+`examples/benchmark_versions.py --baseline /path/to/old --candidate /path/to/new`.
+`--mode` selects `arrow`, `paging`, `rows`, `ndjson`, or `ipc`.
+The benchmark alternates execution order, discards warm-ups, checks row counts,
+and measures each version in its own process. `--verify-ipc` additionally compares
+Arrow content for `arrow`/`ipc` modes; use an ordered query with stable results.
+Samples also include process CPU time and the core's warehouse-wait,
+submit-to-ready, and fetch timings. These help distinguish local processing
+overhead from warehouse and download variability; core fetch time is not pure
+network time and excludes time spent consuming rows in Python.
+Peak RSS includes retained allocator memory and is specific to the host platform.
+`--transform-only` isolates row conversion or IPC serialization after downloading
+real data (`--mode rows` or `--mode ipc`), to distinguish CPU work from network noise.
+
 ## License
 
 MIT

@@ -97,17 +97,19 @@ def test_equal_worker_checksums_publish_only_metrics(benchmark, monkeypatch, cap
     assert all(child.stdin.closed and child.actions == ["wait"] for child in children)
 
 
-@pytest.mark.parametrize("failure", ["missing", "different", "exit"])
+@pytest.mark.parametrize("failure", ["missing", "different", "exit", "worker_error"])
 def test_failed_pair_emits_no_metrics_or_digest_and_reaps_children(benchmark, monkeypatch, capsys, failure):
     bad = sample("different-private-digest")
     if failure == "missing":
         bad.pop("checksum")
+    elif failure == "worker_error":
+        bad = {"error_type": "TransientError"}
     children = [
         FakeChild([sample(), sample()], stubborn=True),
         FakeChild([sample()] if failure == "exit" else [sample(), bad]),
     ]
     install_children(benchmark, monkeypatch, children)
-    with pytest.raises(RuntimeError, match="exited without a result|checksums differ"):
+    with pytest.raises(RuntimeError, match="exited without a result|checksums differ|worker failed"):
         benchmark.main()
     output = capsys.readouterr()
     assert output.out == output.err == ""
@@ -125,5 +127,5 @@ def test_worker_exception_suppresses_sensitive_details(benchmark, monkeypatch, c
         benchmark.main()
     assert error.value.code == 1
     output = capsys.readouterr()
-    assert output.out == ""
+    assert json.loads(output.out) == {"error_type": "RuntimeError"}
     assert output.err == "benchmark worker failed (RuntimeError)\n"

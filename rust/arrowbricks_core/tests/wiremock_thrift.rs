@@ -1987,6 +1987,40 @@ async fn thrift_abandoning_the_submit_poll_wait_fires_cancel_operation() {
     assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
 }
 
+/// The caller is dropped while `ExecuteStatement` itself is still in flight
+/// (cold connection, slow submit): no handle exists yet, but the server may
+/// already have accepted the statement, so it must be cancelled as soon as
+/// the response with its handle arrives.
+#[tokio::test]
+async fn thrift_abandoning_during_execute_statement_still_cancels_the_operation() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(
+                    build_execute_statement_resp(b"op-slow", b"opsecret-slow", None),
+                    "application/x-thrift",
+                )
+                .set_delay(std::time::Duration::from_millis(600)),
+        )
+        .mount(&server)
+        .await;
+    let cancel_calls = mount_cancel_operation_ok(&server).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        execute_lazy_thrift(thrift_client(&server), "SELECT * FROM t", None, None, None),
+    )
+    .await;
+    assert!(result.is_err(), "the submit is slower than the timeout");
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn thrift_polled_terminal_error_does_not_fire_cancel_operation() {
     let server = MockServer::start().await;
@@ -2180,5 +2214,128 @@ async fn thrift_dropping_a_partly_read_result_aborts_downloads_and_closes_the_op
         cancel_calls.load(Ordering::SeqCst),
         0,
         "a finished operation is closed, not cancelled"
+    );
+}
+
+// ---- session-pool lifecycle / abandoned-consumer regressions (full-repo review) ----
+
+async fn mount_close_session_counter(server: &MockServer) -> Arc<AtomicUsize> {
+    let c = Arc::new(AtomicUsize::new(0));
+    let c2 = c.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("CloseSession"))
+        .respond_with(move |_r: &Request| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(build_close_session_resp(), "application/x-thrift")
+        })
+        .mount(server)
+        .await;
+    c
+}
+
+#[tokio::test]
+async fn thrift_cancelled_session_creation_does_not_leak_the_pool_reservation() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    mount_close_operation_ok(&server).await;
+    let _close = mount_close_session_counter(&server).await;
+    let opens = Arc::new(AtomicUsize::new(0));
+    let o2 = opens.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("OpenSession"))
+        .respond_with(move |_r: &Request| {
+            let n = o2.fetch_add(1, Ordering::SeqCst);
+            let t = ResponseTemplate::new(200).set_body_raw(
+                build_open_session_resp(format!("s{n}").as_bytes(), b"sec"),
+                "application/x-thrift",
+            );
+            if n < MAX_SESSIONS_PER_KEY {
+                t.set_delay(std::time::Duration::from_secs(3))
+            } else {
+                t
+            }
+        })
+        .mount(&server)
+        .await;
+    let schema = test_schema();
+    let s2 = schema.clone();
+    let ex = Arc::new(AtomicUsize::new(0));
+    let ex2 = ex.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(move |_r: &Request| {
+            let n = ex2.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(
+                small_execute_statement_success(format!("op-{n}").into_bytes(), &s2),
+                "application/x-thrift",
+            )
+        })
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    for _ in 0..MAX_SESSIONS_PER_KEY {
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None),
+        )
+        .await;
+        assert!(r.is_err());
+    }
+    let before = opens.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        let mut st = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
+            .await
+            .unwrap();
+        st.fetchall_arrow().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    let after = opens.load(Ordering::SeqCst);
+    // healthy pool: 1 open (reused). leaked: 2 opens (throwaway each).
+    assert_eq!(
+        after - before,
+        1,
+        "opens for 2 sequential stmts after {} cancelled creations",
+        MAX_SESSIONS_PER_KEY
+    );
+}
+
+#[tokio::test]
+async fn thrift_failed_statement_closes_its_discarded_pooled_session() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+    let close = mount_close_session_counter(&server).await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(
+                b"op-f",
+                b"s",
+                Some(DirectResultsSpec {
+                    operation_state: Some(operation_state::ERROR),
+                    operation_error: Some("bad sql".into()),
+                    ..Default::default()
+                }),
+            ),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    let client = thrift_client(&server);
+    for _ in 0..5 {
+        let r = execute_lazy_thrift(client.clone(), "bad", None, None, None).await;
+        assert!(r.is_err());
+    }
+    wait_for_calls(&close, 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        close.load(Ordering::SeqCst),
+        5,
+        "CloseSession calls after 5 failed statements on pooled sessions"
     );
 }

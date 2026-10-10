@@ -19,6 +19,47 @@ import pytest
 from arrowbricks import _core as arrowbricks_core
 
 
+def test_write_ipc_stream_bounds_writes_and_handles_short_writes():
+    table = core.Table.from_pydict({"text": core.Array(["x" * 256] * 10000, type=core.DataType.string())})
+
+    class ShortWriter:
+        def __init__(self):
+            self.output = io.BytesIO()
+
+        def write(self, data):
+            assert len(data) <= 1024 * 1024, "output must not duplicate the entire IPC stream in Python"
+            accepted = min(len(data), 65536)
+            return self.output.write(data[:accepted])
+
+    sink = ShortWriter()
+    arrowbricks_core.write_ipc_stream(table, sink)
+    actual = core.Table.from_arrow(arrowbricks_core.read_ipc_stream(sink.output.getvalue()))
+    assert actual["text"].to_pylist() == ["x" * 256] * 10000
+
+
+def test_write_ipc_stream_propagates_sink_failure():
+    table = core.Table.from_pydict({"id": core.Array([1], type=core.DataType.int64())})
+
+    class FailedWriter:
+        def write(self, data):
+            raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        arrowbricks_core.write_ipc_stream(table, FailedWriter())
+
+
+@pytest.mark.parametrize("count", [0, 10**9])
+def test_write_ipc_stream_rejects_invalid_write_counts(count):
+    table = core.Table.from_pydict({"id": core.Array([1], type=core.DataType.int64())})
+
+    class InvalidWriter:
+        def write(self, data):
+            return count
+
+    with pytest.raises(OSError, match="byte count"):
+        arrowbricks_core.write_ipc_stream(table, InvalidWriter())
+
+
 def test_replayed_tables_share_the_immutable_input_and_outlive_it():
     table = core.Table.from_pydict({"label": core.Array(["alpha", "beta", None], type=core.DataType.string())})
     buf = io.BytesIO()

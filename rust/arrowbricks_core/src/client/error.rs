@@ -121,7 +121,10 @@ impl ApiError {
         // right.
         let transient = idempotent && (e.is_decode() || (e.is_request() && !e.is_connect() && !e.is_timeout()));
         Self {
-            message: e.to_string(),
+            // Strip the URL: reqwest appends it to the message, and for a
+            // cloud-fetch download it is a presigned link whose query string
+            // (`sig=...`) is a bearer capability for the result file.
+            message: e.without_url().to_string(),
             transient,
             kind: ApiErrorKind::Other,
         }
@@ -163,5 +166,22 @@ pub(crate) fn join_error(e: tokio::task::JoinError) -> ApiError {
         message: format!("task panicked: {e}"),
         transient: false,
         kind: ApiErrorKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn from_reqwest_message_never_contains_the_request_url() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:9/blob?sv=1&se=2&sig=SECRET")
+            .send()
+            .await
+            .unwrap_err();
+        let msg = ApiError::from_reqwest(err, true).message;
+        assert!(!msg.contains("SECRET") && !msg.contains("127.0.0.1"), "{msg}");
     }
 }

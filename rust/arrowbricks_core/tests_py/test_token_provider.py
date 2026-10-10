@@ -255,7 +255,7 @@ def test_client_rejects_both_token_and_token_provider():
     "kwarg",
     ["http_timeout", "warehouse_start_timeout", "warehouse_confirmed_running_ttl_s", "retry_max_wait_s"],
 )
-@pytest.mark.parametrize("bad_value", [-1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("bad_value", [-1.0, float("nan"), float("inf"), 1e30])
 def test_client_rejects_invalid_duration_kwargs_with_value_error(kwarg: str, bad_value: float):
     """Regression test: the first three of these kwargs feed Rust's
     Duration::from_secs_f64, which panics on negative/NaN/infinite input -- a
@@ -273,4 +273,18 @@ def test_client_rejects_invalid_duration_kwargs_with_value_error(kwarg: str, bad
             token="fake",
             protocol="sea",
             **{kwarg: bad_value},
+        )
+
+
+@pytest.mark.parametrize("bad_value", [2**62, 4097])
+def test_client_rejects_absurd_chunk_fetch_concurrency_with_value_error(bad_value: int):
+    """2**62 used to panic in tokio's Semaphore::new (PanicException), and a
+    merely huge value would spawn that many download workers."""
+    with pytest.raises(ValueError, match="chunk_fetch_concurrency"):
+        arrowbricks_core.Client(
+            host="https://example.com",
+            warehouse_id=WAREHOUSE_ID,
+            token="fake",
+            protocol="sea",
+            chunk_fetch_concurrency=bad_value,
         )

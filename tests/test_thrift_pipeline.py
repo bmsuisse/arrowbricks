@@ -16,7 +16,7 @@ from collections.abc import AsyncGenerator
 import pytest
 import thrift_mock as tm
 
-from arrowbricks import DatabricksClient
+from arrowbricks import DatabricksClient, StatementError
 from arrowbricks.cursor import Cursor
 
 WAREHOUSE_ID = "wh-thrift-123"
@@ -143,6 +143,22 @@ async def test_thrift_failed_statement_raises_via_direct_results(mock_thrift_ser
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="thrift")
     cursor = Cursor(client)
     with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
+        await cursor.execute("not valid sql")
+
+
+@pytest.mark.asyncio
+async def test_thrift_rejected_execute_statement_raises_statement_error(mock_thrift_server):
+    """A TStatus error on ExecuteStatement itself (bad SQL / bad parameter) is a
+    statement failure -- same `StatementError` SEA raises, not the plain base."""
+    server = mock_thrift_server(WAREHOUSE_ID)
+    _install_open_session(server)
+    server.handler.execute_statement = lambda req: tm.ttypes.TExecuteStatementResp(
+        status=tm.error_status("PARSE_SYNTAX_ERROR: bad sql")
+    )
+
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="thrift")
+    cursor = Cursor(client)
+    with pytest.raises(StatementError, match="PARSE_SYNTAX_ERROR"):
         await cursor.execute("not valid sql")
 
 

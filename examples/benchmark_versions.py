@@ -56,7 +56,8 @@ async def worker(args) -> None:
 
     sys.path.insert(0, str(Path(args.worker).resolve()))
     import arrowbricks
-    from arrowbricks import connect
+    from arrowbricks import HEARTBEAT, connect, stream_query_json, write_ipc_stream
+    from arrowbricks.cursor import _table_to_rows
 
     package = Path(arrowbricks.__file__).resolve()
     if not package.is_relative_to(Path(args.worker).resolve()):
@@ -77,11 +78,50 @@ async def worker(args) -> None:
             events.clear()
             cursor = conn.cursor()
             start = time.perf_counter()
-            await cursor.execute(args.sql)
-            ready = time.perf_counter()
-            table = await cursor.fetchall_arrow()
+            cpu_start = time.process_time()
+            table = None
+            result = None
+            first_result = None
+            if args.mode == "ndjson":
+                ready = start
+                rows = 0
+                async for line in stream_query_json(conn.client, args.sql):
+                    if line is not HEARTBEAT:
+                        if first_result is None:
+                            first_result = time.perf_counter()
+                        rows += 1
+            else:
+                await cursor.execute(args.sql)
+                ready = time.perf_counter()
+                if args.transform_only:
+                    table = await cursor.fetchall_arrow()
+                    start = ready = time.perf_counter()
+                    cpu_start = time.process_time()
+                if args.mode == "rows":
+                    result = _table_to_rows(table) if args.transform_only else await cursor.fetchall()
+                    rows = len(result)
+                elif args.mode == "paging":
+                    rows = 0
+                    while True:
+                        table = await cursor.fetchmany_arrow(10000)
+                        if not table.num_rows:
+                            break
+                        if first_result is None:
+                            first_result = time.perf_counter()
+                        rows += table.num_rows
+                        del table
+                    table = None
+                else:
+                    if table is None:
+                        table = await cursor.fetchall_arrow()
+                    rows = table.num_rows
+                    if args.mode == "ipc":
+                        class Sink:
+                            def write(self, data):
+                                return len(data)
+                        write_ipc_stream(table, Sink())
             done = time.perf_counter()
-            rows = table.num_rows
+            cpu_s = time.process_time() - cpu_start
             if args.expected_rows is not None and rows != args.expected_rows:
                 raise RuntimeError(f"expected {args.expected_rows} rows, received {rows}")
             checksum = ipc_checksum(table) if args.verify_ipc else None
@@ -90,8 +130,15 @@ async def worker(args) -> None:
                 json.dumps(
                     {
                         "total_s": done - start,
+                        "cpu_s": cpu_s,
+                        "warehouse_wait_s": events[-1].warehouse_wait_s if events else None,
+                        "submit_to_ready_s": events[-1].submit_to_ready_s if events else None,
+                        "core_fetch_s": events[-1].fetch_s if events else None,
                         "execute_s": ready - start,
                         "fetch_s": done - ready,
+                        "first_result_s": (first_result or done) - start,
+                        "mode": args.mode,
+                        "transform_only": args.transform_only,
                         "rows": rows,
                         "chunks": events[-1].num_chunks if events else None,
                         "bytes_downloaded": events[-1].bytes_downloaded if events else None,
@@ -101,7 +148,7 @@ async def worker(args) -> None:
                 ),
                 flush=True,
             )
-            del table, cursor
+            del table, cursor, result
 
 
 def main() -> None:
@@ -116,13 +163,22 @@ def main() -> None:
     parser.add_argument("--protocol", choices=["thrift", "sea"], default="thrift")
     parser.add_argument("--concurrency", type=int, default=64)
     parser.add_argument("--verify-ipc", action="store_true", help="compare IPC checksums privately after timing")
+    parser.add_argument("--mode", choices=["arrow", "paging", "rows", "ndjson", "ipc"], default="arrow")
+    parser.add_argument(
+        "--transform-only", action="store_true", help="time rows/IPC conversion after real data is fetched"
+    )
     args = parser.parse_args()
+    if args.transform_only and args.mode not in ("rows", "ipc"):
+        parser.error("--transform-only requires --mode rows or ipc")
+    if args.verify_ipc and args.mode not in ("arrow", "ipc"):
+        parser.error("--verify-ipc requires --mode arrow or ipc; use tests/live for value checks on other modes")
     load_dotenv()
     if args.worker:
         try:
             asyncio.run(worker(args))
         except Exception as error:
             # Warehouse errors can include SQL, values or signed URLs.
+            print(json.dumps({"error_type": type(error).__name__}), flush=True)
             print(f"benchmark worker failed ({type(error).__name__})", file=sys.stderr)
             raise SystemExit(1) from None
         return
@@ -143,11 +199,15 @@ def main() -> None:
                 args.protocol,
                 "--concurrency",
                 str(args.concurrency),
+                "--mode",
+                args.mode,
             ]
             if args.expected_rows is not None:
                 cmd.extend(["--expected-rows", str(args.expected_rows)])
             if args.verify_ipc:
                 cmd.append("--verify-ipc")
+            if args.transform_only:
+                cmd.append("--transform-only")
             children[label] = subprocess.Popen(  # noqa: S603
                 cmd,
                 stdin=subprocess.PIPE,
@@ -168,6 +228,8 @@ def main() -> None:
                 if not line:
                     raise RuntimeError(f"{label} worker exited without a result")
                 sample = json.loads(line)
+                if "error_type" in sample:
+                    raise RuntimeError(f"{label} worker failed ({sample['error_type']})")
                 checksums.append(sample.pop("checksum", None))
                 round_results.append(sample)
                 if round_index >= args.warmups:

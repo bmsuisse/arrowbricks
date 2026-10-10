@@ -84,16 +84,61 @@ impl Drop for ThriftSessionOnDrop<'_> {
     }
 }
 
+/// Runs `ExecuteStatement` on its own task so that dropping the caller
+/// mid-RPC (a timeout or cancellation) does not strand the statement: the
+/// server may already have accepted it, but until the response arrives there
+/// is no operation handle to cancel. If the future is dropped before the
+/// response is consumed, a follow-up task waits for the RPC to finish and
+/// cancels whatever operation it returns.
+struct AbandonedSubmitCancel {
+    client: Arc<DbClient>,
+    task: Option<tokio::task::JoinHandle<Result<thrift::ExecuteStatementResp, ApiError>>>,
+}
+
+impl Drop for AbandonedSubmitCancel {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            if let Ok(Ok(resp)) = task.await
+                && let Some(operation) = resp.operation_handle
+            {
+                client.cancel_statement(&CancelHandle::Thrift { operation }).await;
+            }
+        });
+    }
+}
+
 async fn submit_and_await_thrift_statement(
     client: &Arc<DbClient>,
     session: &thrift::SessionHandle,
     statement: &str,
     parameters: Option<&Value>,
-    stats: &QueryStatsAccumulator,
+    stats: &Arc<QueryStatsAccumulator>,
 ) -> Result<ThriftStatementReady, ApiError> {
-    let resp = client
-        .thrift_execute_statement_raw(session, statement, parameters, stats)
-        .await?;
+    let task = pyo3_async_runtimes::tokio::get_runtime().spawn({
+        let (client, session, statement, parameters, stats) = (
+            client.clone(),
+            session.clone(),
+            statement.to_string(),
+            parameters.cloned(),
+            stats.clone(),
+        );
+        async move {
+            client
+                .thrift_execute_statement_raw(&session, &statement, parameters.as_ref(), &stats)
+                .await
+        }
+    });
+    let mut abandoned = AbandonedSubmitCancel {
+        client: client.clone(),
+        task: Some(task),
+    };
+    let joined = abandoned.task.as_mut().expect("just set").await;
+    abandoned.task = None;
+    let resp = joined.map_err(|e| ApiError::permanent(format!("Thrift ExecuteStatement task failed: {e}")))??;
 
     let operation = resp
         .operation_handle
@@ -363,7 +408,16 @@ pub(crate) async fn submit_thrift_and_start_fetch(
     // carried forward for that function to close once the fetch loop is
     // actually done with it.
     let throwaway_session = if from_pool {
-        client.thrift_checkin_session(catalog, schema, session, ready.is_ok());
+        let keep = ready.is_ok();
+        client.thrift_checkin_session(catalog, schema, session.clone(), keep);
+        if !keep {
+            // A discarded session is only forgotten by the pool; close it
+            // server-side too instead of leaving it to the idle TTL.
+            let client = client.clone();
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                client.thrift_close_session_raw(&session).await;
+            });
+        }
         None
     } else {
         match &ready {

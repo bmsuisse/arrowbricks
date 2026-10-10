@@ -144,10 +144,10 @@ impl DbClient {
         let url = format!("{}/api/2.0/sql/sessions", self.host);
         let mut body = json!({ "warehouse_id": self.warehouse_id });
         if let Some(c) = catalog {
-            body["catalog_name"] = json!(c);
+            body["catalog"] = json!(c);
         }
         if let Some(s) = schema {
-            body["schema_name"] = json!(s);
+            body["schema"] = json!(s);
         }
         let data: SessionCreateBody = self.authed_json(reqwest::Method::POST, &url, Some(&body), None).await?;
         Ok(data.session_id)
@@ -173,16 +173,11 @@ impl DbClient {
         if let Some(id) = self.session_pool.take(&key) {
             return Some(id);
         }
-        if !self.session_pool.reserve(&key) {
-            return None;
-        }
-        match self.create_session(catalog, schema).await {
-            Ok(id) => Some(id),
-            Err(_) => {
-                self.session_pool.release(&key);
-                None
-            }
-        }
+        let reservation = self.session_pool.reserve_guard(&key)?;
+        // Dropped (releasing the slot) on error or if this future is cancelled.
+        let id = self.create_session(catalog, schema).await.ok()?;
+        reservation.defuse();
+        Some(id)
     }
 
     /// Returns a session to the pool for reuse (`keep = true`, the statement
@@ -216,7 +211,7 @@ impl DbClient {
     /// verbatim, same as the Python original does no validation of its own
     /// shape either.
     pub async fn execute_arrow_statement(
-        &self,
+        self: &Arc<Self>,
         statement: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
@@ -267,7 +262,7 @@ impl DbClient {
     /// small result pays for two full statement executions on the (common,
     /// for them) fallback path instead of one.
     pub async fn execute_arrow_statement_prefer_inline(
-        &self,
+        self: &Arc<Self>,
         statement: &str,
         catalog: Option<&str>,
         schema: Option<&str>,
@@ -346,7 +341,7 @@ impl DbClient {
     /// field). The session, if any, is returned to the pool on a clean
     /// terminal state and discarded on any error.
     async fn submit_and_poll(
-        &self,
+        self: &Arc<Self>,
         mut body: Value,
         catalog: Option<&str>,
         schema: Option<&str>,
@@ -431,7 +426,7 @@ impl DbClient {
     }
 
     async fn execute_statement(
-        &self,
+        self: &Arc<Self>,
         statement: &str,
         format: &str,
         catalog: Option<&str>,
@@ -544,7 +539,9 @@ impl DbClient {
         compressed: bool,
         stats: Arc<QueryStatsAccumulator>,
     ) -> mpsc::Receiver<Result<ChunkItem, ApiError>> {
-        let concurrency = self.chunk_fetch_concurrency.max(1);
+        // Never more workers than chunks: the rest would start, find the
+        // queue empty and exit, for nothing.
+        let concurrency = self.chunk_fetch_concurrency.clamp(1, chunk_metas.len().max(1));
         let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
         let queue = std::sync::Arc::new(Mutex::new(VecDeque::from(chunk_metas)));
 
@@ -627,7 +624,7 @@ impl DbClient {
 /// reservation for that key leaks, and after `MAX_SESSIONS_PER_KEY` such
 /// drops every later query for the key runs session-less.
 struct SessionCheckin<'a> {
-    client: &'a DbClient,
+    client: &'a Arc<DbClient>,
     catalog: Option<&'a str>,
     schema: Option<&'a str>,
     session_id: Option<String>,
@@ -636,7 +633,15 @@ struct SessionCheckin<'a> {
 impl SessionCheckin<'_> {
     fn finish(&mut self, keep: bool) {
         if let Some(id) = self.session_id.take() {
-            self.client.checkin_session(self.catalog, self.schema, id, keep);
+            self.client.checkin_session(self.catalog, self.schema, id.clone(), keep);
+            if !keep {
+                // Discarded sessions are closed server-side too, not left to
+                // the idle TTL (see `session_pool`'s doc comment).
+                let client = self.client.clone();
+                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                    client.delete_session(&id).await;
+                });
+            }
         }
     }
 }
