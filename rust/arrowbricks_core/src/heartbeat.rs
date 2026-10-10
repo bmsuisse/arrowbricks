@@ -143,7 +143,7 @@ impl<T: Send + 'static> HeartbeatWait<T> {
         F: std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
     {
         Self {
-            handle: Some(pyo3_async_runtimes::tokio::get_runtime().spawn(fut)),
+            handle: Some(pyo3_async_runtimes::tokio::get_runtime().spawn(crate::client::in_call_context(fut))),
             deadline: total_timeout_s.map(|s| Instant::now() + Duration::from_secs_f64(s)),
             total_timeout_s,
             heartbeat_interval,
@@ -282,7 +282,8 @@ impl<T: Send + 'static> HeartbeatStream<T> {
         F: FnOnce() -> NextItemFuture<T>,
     {
         if self.current.is_none() {
-            self.current = Some(pyo3_async_runtimes::tokio::get_runtime().spawn(spawn_next()));
+            self.current =
+                Some(pyo3_async_runtimes::tokio::get_runtime().spawn(crate::client::in_call_context(spawn_next())));
         }
 
         let wait_for = check_deadline_or_wait(

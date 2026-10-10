@@ -288,6 +288,102 @@ fn heartbeat_singleton(py: Python<'_>) -> PyResult<Py<PyHeartbeat>> {
     Ok(cell.clone_ref(py))
 }
 
+/// Captures the running asyncio event loop (and `contextvars`) of the Python
+/// code calling a public method, as `TaskLocals` plus the same value wrapped
+/// as this call's `client::CallContext`. Called synchronously by every
+/// public async method (directly, or via `future_into_py_in_call`) while the
+/// caller's coroutine is running, so a loop is always there to find. Fails
+/// (like `pyo3_async_runtimes::tokio::future_into_py` itself) when called
+/// with no running loop.
+fn capture_call(py: Python<'_>) -> PyResult<(TaskLocals, client::CallContext)> {
+    let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
+    let ctx: client::CallContext = Arc::new(locals.clone());
+    Ok((locals, ctx))
+}
+
+/// `pyo3_async_runtimes::tokio::future_into_py`, plus: `fut` -- and every
+/// task this crate spawns on its behalf, see `client::in_call_context` --
+/// runs with the caller's event loop as its call context, captured here, at
+/// the moment the Python awaitable is created. That is what lets an async
+/// `token_provider` run on the right loop no matter which task asks for a
+/// token (see `PyTokenProvider`). Every public async method goes through
+/// this, not `future_into_py`.
+fn future_into_py_in_call<'py, F, T>(py: Python<'py>, fut: F) -> PyResult<Bound<'py, PyAny>>
+where
+    F: std::future::Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
+    let (locals, ctx) = capture_call(py)?;
+    pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, client::with_call_context(Some(ctx), fut))
+}
+
+/// `true` if `locals`' event loop has been closed -- awaiting a coroutine on
+/// it would fail with "Event loop is closed". A failed check counts as open.
+fn loop_is_closed(py: Python<'_>, locals: &TaskLocals) -> bool {
+    locals
+        .event_loop(py)
+        .call_method0(pyo3::intern!(py, "is_closed"))
+        .and_then(|r| r.is_truthy())
+        .unwrap_or(false)
+}
+
+/// Picks the asyncio event loop a Python callback's coroutine (an async
+/// `token_provider` or `on_event`) runs on. In order:
+///
+/// 1. The loop of the call this request belongs to -- `client::CallContext`,
+///    set by `future_into_py_in_call` when the Python awaitable was created
+///    and carried into every task spawned for that call. This is the normal
+///    case, from the outer task and from chunk workers, the Thrift fetch
+///    loop or a heartbeat-wrapped submit alike.
+/// 2. Whatever `pyo3_async_runtimes` finds from the current task or thread
+///    (`get_current_locals`) -- e.g. `on_event` fired from a `Drop` on the
+///    Python thread while its loop runs.
+/// 3. The last loop found by 1 or 2 -- only for work that runs outside any
+///    call, such as cleanup spawned from a `Drop` on a thread with no loop.
+///
+/// A loop that has been closed is skipped at 1 and 3 (a `Cursor` executed
+/// in one `asyncio.run()` and fetched in the next).
+///
+/// Before 5.2.1, `PyTokenProvider` used only 2 and 3. On a cold client
+/// whose first token request came from a spawned task -- every statement
+/// `stream_query_json` submits, since its submit runs inside a
+/// `HeartbeatWait` task -- there was nothing to find: "no running event
+/// loop". And with one client used from several loops at once, 3 could
+/// hand one loop's request to another loop.
+struct LoopResolver {
+    last_known: Mutex<Option<TaskLocals>>,
+}
+
+impl LoopResolver {
+    fn new() -> Self {
+        Self {
+            last_known: Mutex::new(None),
+        }
+    }
+
+    /// Must be called attached, from the task (or thread) making the
+    /// request -- both 1 and 2 above read task-locals.
+    fn resolve(&self, py: Python<'_>) -> Option<TaskLocals> {
+        let found = client::current_call_context()
+            .and_then(|ctx| ctx.downcast_ref::<TaskLocals>().cloned())
+            .filter(|locals| !loop_is_closed(py, locals))
+            .or_else(|| pyo3_async_runtimes::tokio::get_current_locals(py).ok());
+        // Locked only while attached and never across an `.await`, so the
+        // lock order is always GIL -> this mutex.
+        let mut last_known = self
+            .last_known
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match found {
+            Some(locals) => {
+                *last_known = Some(locals.clone());
+                Some(locals)
+            }
+            None => last_known.clone().filter(|locals| !loop_is_closed(py, locals)),
+        }
+    }
+}
+
 /// Bridges a Python `token_provider` callable (sync or async, matching
 /// `TokenProvider = Callable[[], str | Awaitable[str]]`) into Rust's
 /// `client::TokenProvider` trait. Calling it re-attaches to the GIL only for
@@ -296,86 +392,76 @@ fn heartbeat_singleton(py: Python<'_>) -> PyResult<Py<PyHeartbeat>> {
 /// since `future_into_py`'s machinery already detaches the GIL around
 /// whatever this future awaits.
 ///
-/// `get_token` isn't only ever called from the outermost task
-/// `future_into_py` wraps -- `execute()`'s `ResultSet` spawns chunk-fetch
-/// worker tasks (`fetch_chunks_with_backpressure`) that each call an
-/// authenticated endpoint (chunk-index resolution) too, and those inner
-/// `tokio::spawn`ed tasks don't inherit the outer task's asyncio-event-loop
-/// context. Calling `pyo3_async_runtimes::tokio::into_future` from one of
-/// them fails with "no running event loop" -- caught by testing an async
-/// `token_provider` against a multi-chunk result, not by the eager/sync
-/// cases alone. Fix: capture the current task's `TaskLocals` (guaranteed to
-/// be the outer context, since `execute_arrow_statement` always needs a
-/// token before any worker is spawned) and cache it, so later calls --
-/// including from worker tasks -- run inside `pyo3_async_runtimes::tokio::scope`
-/// with that same captured context instead of trying to discover one from
-/// whatever task happens to call.
-///
-/// The capture re-runs on **every** call from a context that has its own
-/// loop, not just the first ever -- found in code review that caching only
-/// once-if-`None` pins the `DbClient` (which persists across many separate
-/// `execute()` calls, by design -- see its own doc comment) to whichever
-/// event loop happened to be running the very first time a token was ever
-/// requested. A second, later `asyncio.run()` (or any fresh loop -- a
-/// restarted worker, a new pytest-asyncio test) then scopes the awaited
-/// provider onto a loop that's already closed, failing with "Event loop is
-/// closed" instead of just using the current one. Re-capturing costs
-/// nothing extra from a worker task (its own attempt fails, same as before,
-/// falling through to whatever's cached) since the outer call for *this*
-/// statement already refreshed the cache before any worker was spawned.
+/// A sync provider is simply called, on whichever tokio thread asks. An
+/// async provider's coroutine has to run on an asyncio event loop, and
+/// `get_token` is not only called from the outer task of a public method:
+/// chunk-fetch workers (`fetch_chunks_with_backpressure`), the Thrift fetch
+/// loop, `HeartbeatWait`'s submit task (all of `stream_query_json`), and
+/// best-effort cancels all run in tasks this crate spawns, where no loop is
+/// current. `LoopResolver` (see its doc comment) finds the loop of the call
+/// the request belongs to, captured when that call's Python awaitable was
+/// created and carried into every spawned task by `client::CallContext`.
+/// Because the loop belongs to the call, not to the client, one
+/// `DatabricksClient` works from several loops in turn (separate
+/// `asyncio.run()`s) or at once (one loop per thread), each request's
+/// coroutine running on its own caller's loop with its caller's
+/// `contextvars`. See `tests/test_token_provider_event_loop.py`.
 struct PyTokenProvider {
     callable: Py<PyAny>,
-    locals: Mutex<Option<TaskLocals>>,
+    loops: Arc<LoopResolver>,
 }
 
 impl TokenProvider for PyTokenProvider {
     fn get_token(&self) -> TokenFuture {
-        // One `attach` for both: neither call below crosses an `.await`, so
-        // there's no need to pay for two separate GIL-attach round trips.
-        let (callable, locals) = {
-            let mut guard = self.locals.lock().unwrap();
-            Python::attach(|py| {
-                let callable = self.callable.clone_ref(py);
-                // Unconditional, not `if guard.is_none()` -- see this
-                // struct's own doc comment for why. Best-effort: if this
-                // particular call isn't in a context with a running loop
-                // either (a worker task), leave whatever's already cached
-                // alone and fall through to using that (or the no-scope
-                // path below, if nothing has ever been captured at all).
-                if let Ok(captured) = pyo3_async_runtimes::tokio::get_current_locals(py) {
-                    *guard = Some(captured);
-                }
-                (callable, guard.clone())
-            })
-        };
+        let callable = Python::attach(|py| self.callable.clone_ref(py));
+        let loops = self.loops.clone();
 
         Box::pin(async move {
-            // Same one-`attach` reasoning as above: calling the token
-            // callable and checking `__await__` on its result never cross
-            // an `.await` either.
-            let (called, is_awaitable): (Py<PyAny>, bool) = Python::attach(|py| {
+            // One `attach` for the call, the awaitable check and (async
+            // provider only) picking the loop: none of it crosses an
+            // `.await`. `resolve` reads task-locals, so it has to run here,
+            // in the task that asked for the token -- this future is polled
+            // by that task.
+            let (called, locals): (Py<PyAny>, Option<Option<TaskLocals>>) = Python::attach(|py| {
                 let bound = callable.bind(py).call0()?;
                 // Mirrors Python's own `inspect.isawaitable(result)` check
                 // in `_bearer_token`: a plain sync callable's return value
                 // has no `__await__`, an async callable's coroutine/Future
                 // does.
-                let is_awaitable = bound.hasattr("__await__")?;
-                Ok::<_, PyErr>((bound.unbind(), is_awaitable))
+                let locals = if bound.hasattr("__await__")? {
+                    Some(loops.resolve(py))
+                } else {
+                    None
+                };
+                Ok::<_, PyErr>((bound.unbind(), locals))
             })
             .map_err(py_err_to_api_error)?;
 
-            let result_obj: Py<PyAny> = if is_awaitable {
-                let awaited = async move {
-                    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(called.bind(py).clone()))
-                        .map_err(py_err_to_api_error)?;
-                    fut.await.map_err(py_err_to_api_error)
-                };
-                match locals {
-                    Some(l) => pyo3_async_runtimes::tokio::scope(l, awaited).await?,
-                    None => awaited.await?,
+            let result_obj: Py<PyAny> = match locals {
+                None => called,
+                Some(Some(locals)) => {
+                    let fut = Python::attach(|py| {
+                        pyo3_async_runtimes::into_future_with_locals(&locals, called.bind(py).clone())
+                    })
+                    .map_err(py_err_to_api_error)?;
+                    fut.await.map_err(py_err_to_api_error)?
                 }
-            } else {
-                called
+                Some(None) => {
+                    // Only reachable for a request outside any call, on a
+                    // thread with no loop, before any loop was ever seen.
+                    // Close the coroutine so Python doesn't warn that it was
+                    // never awaited.
+                    Python::attach(|py| {
+                        let _ = called.bind(py).call_method0(pyo3::intern!(py, "close"));
+                    });
+                    return Err(ApiError {
+                        message: "token_provider returned an awaitable, but no running asyncio event loop \
+                                  is known to await it on"
+                            .to_string(),
+                        transient: false,
+                        kind: ApiErrorKind::Auth,
+                    });
+                }
             };
 
             Python::attach(|py| result_obj.bind(py).extract::<String>()).map_err(py_err_to_api_error)
@@ -454,32 +540,26 @@ impl PyQueryStats {
 /// Bridges a Python `on_event` callable (sync or async, matching
 /// `Callable[[QueryStats], None | Awaitable[None]]`) into Rust's
 /// `client::EventSink` trait -- mirrors `PyTokenProvider`'s own sync/async
-/// detection and `TaskLocals`-caching approach almost exactly, with one
-/// deliberate difference driven by `EventSink`'s own fire-and-forget
-/// contract: `on_event` here is a plain, *synchronous* method. It captures
-/// whatever `TaskLocals` the *calling* context has right now (cheap, no
+/// detection and picks the loop for an async callback the same way
+/// (`LoopResolver`), with one deliberate difference driven by `EventSink`'s
+/// own fire-and-forget contract: `on_event` here is a plain, *synchronous*
+/// method. It resolves the loop in the *calling* task right now (cheap, no
 /// `.await`), then spawns the actual dispatch (which may itself need to
 /// await an async callback) onto the background runtime and returns
 /// immediately -- a slow or raising `on_event` must never block or fail the
 /// query that already has its result.
 ///
-/// **Known limitation, not fully closable without deeper changes:** an
-/// *async* `on_event` fired from `pipeline.rs`'s `Drop`-triggered
-/// abandonment path (the `total_timeout_s`/cancellation case -- see
-/// `PoisonOnDrop`/`ReportOnDrop`'s own doc comments) runs inside a task on
-/// `pyo3_async_runtimes`'s background runtime that was never scoped to any
-/// asyncio event loop, so capturing `TaskLocals` *at that exact moment*
-/// always fails -- same root cause as `PyTokenProvider`'s own doc comment
-/// describes for chunk-fetch worker tasks. This falls back to whatever was
-/// cached by an *earlier*, successful capture (e.g. a prior query on the
-/// same client that reported success/error from a real event-loop context),
-/// which works once a client has dispatched at least one such event, but
-/// means a *sync* `on_event` (recommended -- it never needs a loop at all)
-/// is the only fully reliable choice for observing a client's very first
-/// query if that query is also the one that gets cancelled/timed out.
+/// The `Drop`-triggered abandonment path (`total_timeout_s`/cancellation --
+/// see `PoisonOnDrop`/`ReportOnDrop`'s own doc comments) runs in a task on
+/// `pyo3_async_runtimes`'s background runtime. Since 5.2.1 that task carries
+/// the call's context like every other spawned task, so the callback's loop
+/// is found there too. Only a result dropped outside any call (garbage
+/// collected on a thread with no running loop) falls back to the last loop
+/// seen; a *sync* `on_event` never needs a loop at all and stays the most
+/// reliable choice.
 struct PyEventSink {
     callable: Py<PyAny>,
-    locals: Mutex<Option<TaskLocals>>,
+    loops: LoopResolver,
 }
 
 impl PyEventSink {
@@ -498,14 +578,17 @@ impl PyEventSink {
                 Ok::<_, PyErr>((bound.unbind(), is_awaitable))
             })?;
             if is_awaitable {
-                let awaited = async move {
-                    let fut = Python::attach(|py| pyo3_async_runtimes::tokio::into_future(called.bind(py).clone()))?;
-                    fut.await
-                };
-                match locals {
-                    Some(l) => pyo3_async_runtimes::tokio::scope(l, awaited).await?,
-                    None => awaited.await?,
-                };
+                let fut = Python::attach(|py| match &locals {
+                    Some(l) => pyo3_async_runtimes::into_future_with_locals(l, called.bind(py).clone()),
+                    None => {
+                        // No loop to run it on (see this struct's doc
+                        // comment); close it so Python doesn't warn that it
+                        // was never awaited.
+                        let _ = called.bind(py).call_method0(pyo3::intern!(py, "close"));
+                        Err(PyRuntimeError::new_err("no running event loop for an async on_event"))
+                    }
+                })?;
+                fut.await?;
             }
             Ok(())
         }
@@ -520,16 +603,9 @@ impl PyEventSink {
 
 impl EventSink for PyEventSink {
     fn on_event(&self, stats: QueryStatsData) {
-        let (callable, locals) = {
-            let mut guard = self.locals.lock().unwrap();
-            Python::attach(|py| {
-                let callable = self.callable.clone_ref(py);
-                if let Ok(captured) = pyo3_async_runtimes::tokio::get_current_locals(py) {
-                    *guard = Some(captured);
-                }
-                (callable, guard.clone())
-            })
-        };
+        // Resolved here, synchronously, in the task (or on the thread) that
+        // finished the query -- `dispatch` runs in a task of its own.
+        let (callable, locals) = Python::attach(|py| (self.callable.clone_ref(py), self.loops.resolve(py)));
         // Fire-and-forget: intentionally not awaited, and not bound via
         // `let _ = ...` either (that specific pattern trips clippy's
         // `let_underscore_future`, which reasonably worries it's a
@@ -663,7 +739,7 @@ impl PyDbClient {
             (None, Some(callable)) => {
                 let provider: Arc<dyn TokenProvider> = Arc::new(PyTokenProvider {
                     callable,
-                    locals: Mutex::new(None),
+                    loops: Arc::new(LoopResolver::new()),
                 });
                 DbClient::with_token_provider(&host, &warehouse_id, provider)
             }
@@ -682,7 +758,7 @@ impl PyDbClient {
         if let Some(callable) = on_event {
             let sink: Arc<dyn EventSink> = Arc::new(PyEventSink {
                 callable,
-                locals: Mutex::new(None),
+                loops: LoopResolver::new(),
             });
             db_client = db_client.with_on_event(sink);
         }
@@ -722,7 +798,7 @@ impl PyDbClient {
         let client = self.inner.clone();
         let client_for_result = client.clone();
         let parameters = parameters_to_value(py, parameters)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             let stream = if client.protocol == Protocol::Thrift {
                 pipeline::execute_lazy_thrift(client, &statement, catalog.as_deref(), schema.as_deref(), parameters)
                     .await
@@ -762,7 +838,7 @@ impl PyDbClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
         let data = bytes::Bytes::from(data);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             client
                 .upload_volume_file(&volume_path, data)
                 .await
@@ -775,7 +851,7 @@ impl PyDbClient {
     /// staging cleanup.
     fn delete_volume_file<'py>(&self, py: Python<'py>, volume_path: String) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             client
                 .delete_volume_file(&volume_path)
                 .await
@@ -792,7 +868,7 @@ impl PyDbClient {
     /// reap.
     fn close_sessions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             client.close_all_sessions().await;
             client.close_all_thrift_sessions().await;
             Ok(())
@@ -881,7 +957,7 @@ impl PyResultSet {
     /// exhausted first (matching `_ResultSet.fetchmany_arrow`'s contract).
     fn fetchmany_arrow<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             let mut stream = inner.lock().await;
             let (batches, schema) = stream.fetchmany_arrow(n).await.map_err(api_error_to_pyerr)?;
             batches_to_pytable(batches, schema)
@@ -891,7 +967,7 @@ impl PyResultSet {
     /// Drains everything remaining into one `Table`.
     fn fetchall_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             let mut stream = inner.lock().await;
             let (batches, schema) = stream.fetchall_arrow().await.map_err(api_error_to_pyerr)?;
             batches_to_pytable(batches, schema)
@@ -903,18 +979,31 @@ impl PyResultSet {
     /// connection through the full download, not just `execute_streamed`'s
     /// initial wait for the statement to become ready. Downloading many
     /// chunks for a large result can itself take a while.
+    ///
+    /// Not async itself, but the fetch starts right here, so the caller's
+    /// event loop is captured here too (see `future_into_py_in_call`): the
+    /// spawned fetch and its cancel hook both run in that call context.
+    /// With no running loop the context is simply empty, as for a sync
+    /// `token_provider` it never matters.
     #[pyo3(signature = (total_timeout_s=None))]
-    fn fetchall_arrow_streamed(&self, total_timeout_s: Option<f64>) -> PyResult<PyFetchallArrowStreamedIter> {
+    fn fetchall_arrow_streamed(
+        &self,
+        py: Python<'_>,
+        total_timeout_s: Option<f64>,
+    ) -> PyResult<PyFetchallArrowStreamedIter> {
         _validate_timeout(total_timeout_s)?;
-        let inner = self.inner.clone();
-        let fut = async move { inner.lock().await.fetchall_arrow().await };
-        let wait = HeartbeatWait::new(fut, total_timeout_s).with_cancel(pipeline::cancel_hook(
-            self.client.clone(),
-            self.cancel_handle.clone(),
-            self.stats.clone(),
-        ));
-        Ok(PyFetchallArrowStreamedIter {
-            wait: Arc::new(AsyncMutex::new(Some(wait))),
+        let ctx = capture_call(py).ok().map(|(_, ctx)| ctx);
+        client::enter_call_context(ctx, || {
+            let inner = self.inner.clone();
+            let fut = async move { inner.lock().await.fetchall_arrow().await };
+            let wait = HeartbeatWait::new(fut, total_timeout_s).with_cancel(pipeline::cancel_hook(
+                self.client.clone(),
+                self.cancel_handle.clone(),
+                self.stats.clone(),
+            ));
+            Ok(PyFetchallArrowStreamedIter {
+                wait: Arc::new(AsyncMutex::new(Some(wait))),
+            })
         })
     }
 
@@ -926,7 +1015,7 @@ impl PyResultSet {
     /// here, so no Arrow library is needed to read it.
     fn schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             let stream = inner.lock().await;
             Ok(stream.schema.as_ref().map(|s| {
                 s.fields()
@@ -954,7 +1043,7 @@ impl PyFetchallArrowStreamedIter {
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let wait = self.wait.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             let mut guard = wait.lock().await;
             let Some(w) = guard.as_mut() else {
                 return Err(PyStopAsyncIteration::new_err(()));
@@ -1023,7 +1112,7 @@ impl PyNdjsonStreamIter {
 
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let state = self.state.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py_in_call(py, async move {
             let mut guard = state.lock().await;
             loop {
                 match &mut *guard {

@@ -124,6 +124,8 @@ This example takes `sql` straight from the request for brevity -- arrowbricks do
 
 arrowbricks has no opinion on *how* you get a token and no cloud-SDK dependency of its own. If your provider is expensive to call, cache/refresh inside it -- arrowbricks does no caching on your behalf.
 
+A sync provider is called on one of arrowbricks' own worker threads. An async provider's coroutine runs on the event loop of the code that started the call (the `await cursor.execute(...)`, `async for ... in client.stream_query_json(...)`, and so on), with that code's `contextvars`, even when the token is needed by a background chunk download. One client can therefore be shared across event loops: successive `asyncio.run()` calls, or one loop per thread at the same time.
+
 ```python
 conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
 ```

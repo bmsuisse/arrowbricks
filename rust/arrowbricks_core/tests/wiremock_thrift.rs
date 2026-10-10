@@ -2339,3 +2339,90 @@ async fn thrift_failed_statement_closes_its_discarded_pooled_session() {
         "CloseSession calls after 5 failed statements on pooled sessions"
     );
 }
+
+// ============================================================================
+// Call context (5.2.1) -- see the matching section of `wiremock_pipeline.rs`.
+// Here the token requests come from the heartbeat-wrapped submit and the
+// Thrift fetch loop (`FetchResults`, `CloseOperation`), all spawned tasks.
+// ============================================================================
+
+#[tokio::test]
+async fn thrift_streamed_query_requests_every_token_in_the_callers_call_context() {
+    let server = MockServer::start().await;
+    mount_open_session_always(&server, b"sess").await;
+    mount_close_operation_ok(&server).await;
+
+    let schema = test_schema();
+    const N_BATCHES: i64 = 2;
+    const CHUNKS_PER_BATCH: i64 = 2;
+    const ROWS_PER_CHUNK: i64 = 5;
+    let total_chunks = N_BATCHES * CHUNKS_PER_BATCH;
+
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_execute_statement_resp(b"op-ctx", b"opsecret-ctx", None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("GetOperationStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            build_get_operation_status_resp(operation_state::FINISHED, None),
+            "application/x-thrift",
+        ))
+        .mount(&server)
+        .await;
+    for i in 0..total_chunks {
+        Mock::given(method("GET"))
+            .and(path(format!("/_data/chunk-{i}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                build_full_stream_bytes(&schema, i * ROWS_PER_CHUNK, (i + 1) * ROWS_PER_CHUNK),
+                "application/vnd.apache.arrow.stream",
+            ))
+            .mount(&server)
+            .await;
+    }
+    let fetch_calls = Arc::new(AtomicUsize::new(0));
+    let fetch_calls_for_mock = fetch_calls.clone();
+    let uri = server.uri();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("FetchResults"))
+        .respond_with(move |_req: &Request| {
+            let n = fetch_calls_for_mock.fetch_add(1, Ordering::SeqCst) as i64;
+            let base = n * CHUNKS_PER_BATCH;
+            let links: Vec<(String, i64)> = (0..CHUNKS_PER_BATCH)
+                .map(|j| (format!("{uri}/_data/chunk-{}", base + j), ROWS_PER_CHUNK))
+                .collect();
+            ResponseTemplate::new(200).set_body_raw(
+                build_fetch_results_resp(&FetchSpec {
+                    has_more_rows: n + 1 < N_BATCHES,
+                    result_links: links,
+                    metadata: Some((false, None)),
+                    ..Default::default()
+                }),
+                "application/x-thrift",
+            )
+        })
+        .mount(&server)
+        .await;
+
+    let token = common::ContextCheckingToken::new(42);
+    let client = Arc::new(
+        DbClient::with_token_provider(&server.uri(), WAREHOUSE_ID, token.clone())
+            .with_concurrency(2)
+            .with_protocol(Protocol::Thrift),
+    );
+
+    let lines = common::stream_ndjson_in_context(client, token.context()).await;
+
+    assert_eq!(lines.len() as i64, total_chunks * ROWS_PER_CHUNK);
+    assert_eq!(fetch_calls.load(Ordering::SeqCst) as i64, N_BATCHES);
+    // warehouse status + OpenSession + ExecuteStatement + GetOperationStatus
+    // + one FetchResults per batch
+    token.assert_all_in_context(4 + N_BATCHES as usize);
+}

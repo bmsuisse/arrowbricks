@@ -235,6 +235,46 @@ def test_async_token_provider_survives_a_new_event_loop_across_separate_asyncio_
         server.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_async_token_provider_on_a_cold_client_streams_ndjson_lines():
+    """Regression test for 5.2.1: `stream_ndjson_lines` (what
+    `stream_query_json` uses) submits its statement from a task the core
+    spawns, so on a client that had never run `execute()` the very first
+    token request came from a task with no event loop -- `AuthError:
+    RuntimeError: no running event loop`. The loop is now captured when the
+    iterator's `__anext__` awaitable is created and travels with the call
+    into every task it spawns. Also checks the coroutine ran on this test's
+    own loop, not some other one."""
+    seen: list = []
+    loops: list = []
+
+    async def provider() -> str:
+        loops.append(asyncio.get_running_loop())
+        await asyncio.sleep(0)
+        return f"async-{len(loops)}"
+
+    server, port = _start_server(n_chunks=4, rows_per_chunk=5, seen_tokens=seen)
+    try:
+        client = arrowbricks_core.Client(
+            host=f"http://127.0.0.1:{port}",
+            warehouse_id=WAREHOUSE_ID,
+            token_provider=provider,
+            chunk_fetch_concurrency=2,
+            protocol="sea",
+        )
+        lines = []
+        async for item in client.stream_ndjson_lines("SELECT * FROM t"):
+            if item is not arrowbricks_core.HEARTBEAT:
+                lines.extend(item)
+        assert [json.loads(line)["id"] for line in lines] == list(range(20))
+        # warehouse status + SEA session creation + submit + one chunk-index resolve per chunk
+        assert len(seen) == 3 + 4
+        assert len(loops) == len(seen)
+        assert all(lp is asyncio.get_running_loop() for lp in loops)
+    finally:
+        server.shutdown()
+
+
 def test_client_requires_token_or_token_provider():
     with pytest.raises(ValueError, match="token"):
         arrowbricks_core.Client(host="https://example.com", warehouse_id=WAREHOUSE_ID, protocol="sea")

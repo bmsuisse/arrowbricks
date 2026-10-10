@@ -1911,3 +1911,96 @@ async fn sea_dropping_a_partly_read_result_aborts_in_flight_downloads() {
         .await
         .expect("dropping the result must abort the in-flight download promptly");
 }
+
+// ============================================================================
+// Call context (5.2.1): every token request made for a call -- including the
+// ones from tasks spawned for it (the heartbeat-wrapped submit, chunk
+// workers, a cancel fired after the call's own task is gone) -- must see the
+// context the entry point set. `lib.rs` keeps the caller's asyncio event loop
+// there; without it, an async `token_provider` on a cold client failed with
+// "no running event loop" (`stream_query_json`'s submit runs in a spawned
+// task). See `tests/test_token_provider_event_loop.py` for the Python side.
+// ============================================================================
+
+#[tokio::test]
+async fn sea_streamed_query_requests_every_token_in_the_callers_call_context() {
+    let server = MockServer::start().await;
+    install_mock_warehouse(&server, 4, 5, false).await;
+    let token = common::ContextCheckingToken::new(42);
+    let client = Arc::new(
+        DbClient::with_token_provider(&server.uri(), WAREHOUSE_ID, token.clone())
+            .with_concurrency(2)
+            .with_protocol(Protocol::Sea),
+    );
+
+    let lines = common::stream_ndjson_in_context(client, token.context()).await;
+
+    assert_eq!(lines.len(), 20);
+    // warehouse status + session + submit + one link resolution per chunk
+    token.assert_all_in_context(3 + 4);
+}
+
+#[tokio::test]
+async fn sea_lazy_fetch_workers_request_tokens_in_the_callers_call_context() {
+    let server = MockServer::start().await;
+    install_mock_warehouse(&server, 6, 5, true).await;
+    let token = common::ContextCheckingToken::new(7);
+    let client = Arc::new(
+        DbClient::with_token_provider(&server.uri(), WAREHOUSE_ID, token.clone())
+            .with_concurrency(2)
+            .with_protocol(Protocol::Sea),
+    );
+
+    let batches = arrowbricks_core::client::with_call_context(Some(token.context()), async move {
+        let mut stream = execute_lazy(client, "SELECT * FROM t", None, None, None).await.unwrap();
+        stream.fetchall_arrow().await.unwrap().0
+    })
+    .await;
+
+    assert_ids_in_order(&batches, 30);
+    token.assert_all_in_context(3 + 6);
+}
+
+#[tokio::test]
+async fn sea_cancel_hook_keeps_the_call_context_it_was_built_in() {
+    // `fetchall_arrow_streamed` builds its `HeartbeatWait` and cancel hook
+    // synchronously, inside the call context; the wait can then be dropped
+    // with no task around it at all (the Python iterator garbage-collected).
+    // The cancel it fires still needs a token from the right context.
+    let server = MockServer::start().await;
+    mount_slow_single_chunk_statement(&server).await;
+    let cancel_calls = mount_cancel_statement_ok(&server).await;
+    let token = common::ContextCheckingToken::new(9);
+    let client = Arc::new(
+        DbClient::with_token_provider(&server.uri(), WAREHOUSE_ID, token.clone()).with_protocol(Protocol::Sea),
+    );
+    let stream = arrowbricks_core::client::with_call_context(
+        Some(token.context()),
+        execute_lazy(client.clone(), "SELECT * FROM t", None, None, None),
+    )
+    .await
+    .unwrap();
+    let cancel_handle = stream.cancel_handle.clone();
+    let stats = stream.stats.clone();
+    let inner = Arc::new(tokio::sync::Mutex::new(stream));
+
+    let mut wait = arrowbricks_core::client::enter_call_context(Some(token.context()), || {
+        let inner = inner.clone();
+        HeartbeatWait::with_interval(
+            async move { inner.lock().await.fetchall_arrow().await },
+            None,
+            std::time::Duration::from_millis(20),
+        )
+        .with_cancel(cancel_hook(client.clone(), cancel_handle, stats.clone()))
+    });
+    match wait.tick().await.unwrap() {
+        Some(Tick::Heartbeat) => {}
+        other => panic!("expected a heartbeat while the 500ms chunk download is still in flight: {other:?}"),
+    }
+    drop(wait); // outside any call context
+
+    wait_for_calls(&cancel_calls, 1).await;
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+    // warehouse status + session + submit + link resolution + cancel
+    token.assert_all_in_context(5);
+}

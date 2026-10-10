@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use super::DbClient;
 use super::POLL_INTERVAL;
+use super::call_context::in_call_context;
 use super::error::{ApiError, join_error};
 use super::model::{
     CancelHandle, ChunkItem, ChunkMeta, ColumnDescription, InlineOrExternal, QueryStatsAccumulator,
@@ -545,7 +546,7 @@ impl DbClient {
         let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
         let queue = std::sync::Arc::new(Mutex::new(VecDeque::from(chunk_metas)));
 
-        tokio::spawn(async move {
+        tokio::spawn(in_call_context(async move {
             let mut handles = Vec::with_capacity(concurrency);
             for _ in 0..concurrency {
                 let client = self.clone();
@@ -553,7 +554,7 @@ impl DbClient {
                 let worker_tx = tx.clone();
                 let statement_id = statement_id.clone();
                 let stats = stats.clone();
-                handles.push(tokio::spawn(async move {
+                handles.push(tokio::spawn(in_call_context(async move {
                     let work_loop = async {
                         loop {
                             let meta = { queue.lock().unwrap().pop_front() };
@@ -598,7 +599,7 @@ impl DbClient {
                         () = worker_tx.closed() => Ok(()),
                         res = work_loop => res,
                     }
-                }));
+                })));
             }
 
             // `tx` itself (not a clone) stays alive across the join below, so
@@ -607,7 +608,7 @@ impl DbClient {
             if let Some(e) = join_first_error(handles).await {
                 let _ = tx.send(Err(e)).await;
             }
-        });
+        }));
 
         rx
     }
@@ -638,9 +639,9 @@ impl SessionCheckin<'_> {
                 // Discarded sessions are closed server-side too, not left to
                 // the idle TTL (see `session_pool`'s doc comment).
                 let client = self.client.clone();
-                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
                     client.delete_session(&id).await;
-                });
+                }));
             }
         }
     }

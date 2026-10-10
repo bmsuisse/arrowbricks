@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::client::{ApiError, CancelHandle, DbClient, QueryStatsAccumulator, QueryStatsData};
+use crate::client::{
+    ApiError, CancelHandle, DbClient, QueryStatsAccumulator, QueryStatsData, current_call_context, in_call_context,
+    with_call_context,
+};
 
 /// Builds the closure `heartbeat::HeartbeatWait::with_cancel`/
 /// `heartbeat::HeartbeatStream::with_cancel` fire on `total_timeout_s`/
@@ -35,13 +38,18 @@ pub fn cancel_hook(
     handle: CancelHandle,
     stats: Arc<QueryStatsAccumulator>,
 ) -> impl FnOnce(bool) + Send + 'static {
+    // Captured now, while the hook is built inside the call: the hook can
+    // fire from a `Drop` with no task around it (the Python iterator being
+    // garbage-collected), and the cancel request still needs a token.
+    let built_in = current_call_context();
     move |is_timeout: bool| {
         stats.store_outcome_if_unset(is_timeout);
+        let ctx = current_call_context().or(built_in);
         // Bare statement, not `let _ = ...` -- see `PyEventSink::on_event`'s
         // identical comment on why (clippy's `let_underscore_future`).
-        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        pyo3_async_runtimes::tokio::get_runtime().spawn(with_call_context(ctx, async move {
             client.cancel_statement(&handle).await;
-        });
+        }));
     }
 }
 
@@ -62,9 +70,9 @@ impl Drop for CancelInFlightOnDrop<'_> {
     fn drop(&mut self) {
         if let Some(handle) = self.stats.take_in_flight() {
             let client = self.client.clone();
-            pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
                 client.cancel_statement(&handle).await;
-            });
+            }));
         }
     }
 }

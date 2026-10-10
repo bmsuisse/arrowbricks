@@ -1,5 +1,33 @@
 # Changelog
 
+## 5.2.1 — 2026-10-10
+
+- Fix an async `token_provider` failing with `AuthError: RuntimeError: no
+  running event loop` on a client that had not run any query yet.
+  `stream_query_json` was the usual trigger: since 3.2.0 its statement is
+  submitted from a background task, and the provider used to look for its
+  event loop in whichever task first asked for a token. Once any
+  `execute()` had run on the client, the loop it found then was reused,
+  which is why it only hit cold clients.
+- The event loop (and `contextvars`) is now captured when you call the
+  method, where your loop is running, and travels with the query into
+  every background task it starts: the submit, chunk downloads, the Thrift
+  fetch loop, and best-effort cancels. Each token request therefore runs on
+  the loop of the query that needs it, also when one client is used from
+  several loops at once (one per thread) -- before, a token for one loop's
+  query could be fetched on another loop.
+- Sync `token_provider`s are unchanged. An async `on_event` callback picks
+  its event loop the same way now, so it also fires for a cold client's
+  first query when that query times out or is cancelled (it used to need an
+  earlier query on the same client to have reported first).
+- Tests: `tests/test_token_provider_event_loop.py` (both protocols; every
+  public entry point on a cold client, two successive `asyncio.run()`s,
+  `asyncio.run()` in a thread, two threads at once, and a timed-out stream
+  whose cancel and async `on_event` must still run),
+  `tests_py/test_token_provider.py`, and call-context tests in
+  `call_context.rs`, `wiremock_pipeline.rs` and `wiremock_thrift.rs`. The
+  cold-client streaming tests fail on 5.2.0.
+- No API changes.
 ## 5.2.0 — 2026-10-09
 
 - Cloud-fetch download errors no longer include the presigned URL (its
