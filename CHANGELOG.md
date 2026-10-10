@@ -2,18 +2,23 @@
 
 ## 5.2.2 — 2026-10-10
 
-- Thrift: a pooled session that went stale no longer fails the next statement
-  (issue #14). When Databricks invalidates an idle session (for example after
-  the warehouse auto-stops and restarts), `ExecuteStatement` on it is
-  rejected with `INVALID_STATE: Invalid SessionHandle: ...`, a
-  `HTTP 400` the statement never got past. arrowbricks used to drop that
-  session and raise. It now also discards the key's other idle sessions
-  (they went stale together) and retries the statement once on a freshly
-  opened session. Only a session taken from the idle pool is retried, only
-  for that error, and only once; any other rejection (bad SQL, auth, ...)
-  still fails on the first attempt. The error shape was reproduced against a
-  real warehouse by closing a session and reusing it; a real auto-stop was
-  not triggered.
+- Thrift: a pooled session the server no longer knows no longer fails the
+  next statement (issue #14). When Databricks rejects `ExecuteStatement` on
+  an idle pooled session with `INVALID_STATE: Invalid SessionHandle: ...`
+  (`HTTP 400`; the statement never ran), arrowbricks used to drop the session
+  and raise. It now also discards the key's other idle sessions (they go
+  stale together) and retries the statement once on a newly opened pooled
+  session. Only a session taken from the idle pool is retried, only for that
+  error, and only once; any other rejection (bad SQL, auth, ...) still fails
+  on the first attempt.
+  What was and was not shown: the error is real and the fix works against the
+  real warehouse (closing the pooled session server-side makes 5.2.1 fail and
+  5.2.2 recover). The suspected trigger, a warehouse auto-stop, did **not**
+  invalidate sessions on the serverless Pro warehouse we tested (409 s idle
+  until auto-stop, 60 s more stopped, then the old session worked), so this
+  is a defensive fix for whatever does invalidate a session (session expiry,
+  an administrator or another client closing it, other warehouse types),
+  not a confirmed cure for the auto-stop report.
 
 ## 5.2.1 — 2026-10-10
 
