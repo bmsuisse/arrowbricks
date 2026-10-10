@@ -1,5 +1,20 @@
 # Changelog
 
+## 5.2.2 — 2026-10-10
+
+- Thrift: a pooled session that went stale no longer fails the next statement
+  (issue #14). When Databricks invalidates an idle session (for example after
+  the warehouse auto-stops and restarts), `ExecuteStatement` on it is
+  rejected with `INVALID_STATE: Invalid SessionHandle: ...`, a
+  `HTTP 400` the statement never got past. arrowbricks used to drop that
+  session and raise. It now also discards the key's other idle sessions
+  (they went stale together) and retries the statement once on a freshly
+  opened session. Only a session taken from the idle pool is retried, only
+  for that error, and only once; any other rejection (bad SQL, auth, ...)
+  still fails on the first attempt. The error shape was reproduced against a
+  real warehouse by closing a session and reusing it; a real auto-stop was
+  not triggered.
+
 ## 5.2.1 — 2026-10-10
 
 - Fix an async `token_provider` failing with `AuthError: RuntimeError: no

@@ -400,6 +400,17 @@ impl<T> Pool<T> {
         items
     }
 
+    /// Takes the idle items of one key (and frees their reservations) -- used
+    /// when one of them proved stale, since the rest of that key's idle
+    /// sessions went stale with it (a warehouse restart invalidates them all).
+    fn drain_key(&self, key: &SessionKey) -> Vec<T> {
+        let items = self.idle.lock().unwrap().remove(key).unwrap_or_default();
+        if let Some(count) = self.total.lock().unwrap().get_mut(key) {
+            *count = count.saturating_sub(items.len());
+        }
+        items
+    }
+
     /// `reserve` as an RAII guard: the slot is released again if the guard
     /// is dropped without `defuse()` -- i.e. when the caller's future is
     /// cancelled (timeout, `asyncio.wait_for`) while it is still creating

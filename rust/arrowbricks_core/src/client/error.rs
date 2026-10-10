@@ -130,6 +130,15 @@ impl ApiError {
         }
     }
 
+    /// The server rejected a request because the session it names no longer
+    /// exists (closed, or invalidated by a warehouse stop/restart). Observed
+    /// against a real warehouse: `HTTP 400` with a Thrift exception body
+    /// `INVALID_STATE: Invalid SessionHandle: SessionHandle [..]`. Nothing ran,
+    /// so the request is safe to repeat on a fresh session.
+    pub(crate) fn is_stale_session(&self) -> bool {
+        self.message.contains("Invalid SessionHandle")
+    }
+
     /// `idempotent` only gates the 5xx case -- 401/403/408/429 mean the
     /// request was rejected before any processing started (auth failure,
     /// rate limit, client-side timeout), safe to retry regardless of method.

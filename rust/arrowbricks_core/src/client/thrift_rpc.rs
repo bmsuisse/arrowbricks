@@ -106,20 +106,23 @@ impl DbClient {
     /// `thrift_session_pool`'s doc comment): `None` means the caller must
     /// open its own throwaway session for this one call (Thrift has no
     /// session-less submission mode to fall back to).
+    ///
+    /// The `bool` is `true` for a session taken from the idle pool (it may have
+    /// gone stale since it was last used) and `false` for one opened just now.
     pub(crate) async fn thrift_checkout_session(
         &self,
         catalog: Option<&str>,
         schema: Option<&str>,
-    ) -> Option<thrift::SessionHandle> {
+    ) -> Option<(thrift::SessionHandle, bool)> {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
         if let Some(handle) = self.thrift_session_pool.take(&key) {
-            return Some(handle);
+            return Some((handle, true));
         }
         let reservation = self.thrift_session_pool.reserve_guard(&key)?;
         // Dropped (releasing the slot) on error or if this future is cancelled.
         let handle = self.thrift_open_session_raw(catalog, schema).await.ok()?;
         reservation.defuse();
-        Some(handle)
+        Some((handle, false))
     }
 
     pub(crate) fn thrift_checkin_session(
@@ -131,6 +134,26 @@ impl DbClient {
     ) {
         let key = (catalog.map(str::to_string), schema.map(str::to_string));
         self.thrift_session_pool.checkin(key, session, keep);
+    }
+
+    /// Forgets (and closes, best effort) every idle session for this key --
+    /// called when one of them turned out to be stale.
+    pub(crate) fn thrift_discard_idle_sessions(
+        self: &std::sync::Arc<Self>,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+    ) {
+        let key = (catalog.map(str::to_string), schema.map(str::to_string));
+        let stale = self.thrift_session_pool.drain_key(&key);
+        if stale.is_empty() {
+            return;
+        }
+        let client = self.clone();
+        pyo3_async_runtimes::tokio::get_runtime().spawn(super::in_call_context(async move {
+            for session in stale {
+                client.thrift_close_session_raw(&session).await;
+            }
+        }));
     }
 
     /// Best-effort close of every currently-idle pooled Thrift session --

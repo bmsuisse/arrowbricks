@@ -375,58 +375,79 @@ pub(crate) async fn submit_thrift_and_start_fetch(
     stats.add_warehouse_wait_s(warehouse_t0.elapsed().as_secs_f64());
 
     let submit_t0 = Instant::now();
-    let pooled = client.thrift_checkout_session(catalog, schema).await;
-    let (session, from_pool) = match pooled {
-        Some(s) => (s, true),
-        None => match client.thrift_open_session_raw(catalog, schema).await {
-            Ok(s) => (s, false),
-            Err(e) => {
-                report_submit_error(&client, "thrift", submit_t0.elapsed().as_secs_f64(), &stats);
-                return Err(e);
-            }
-        },
-    };
+    // A session taken from the idle pool may have gone stale since its last
+    // use (the warehouse auto-stopped and restarted, say). The server then
+    // rejects the statement before running it, so it is safe to retry once on
+    // a freshly opened session. See `ApiError::is_stale_session`.
+    let mut retried = false;
+    let (session, from_pool, ready) = loop {
+        // On the retry the idle pool for this key was just emptied, so this
+        // opens (and pools) a fresh session rather than reusing a stale one.
+        let pooled = client.thrift_checkout_session(catalog, schema).await;
+        let (session, from_pool, reused) = match pooled {
+            Some((s, reused)) => (s, true, reused),
+            None => match client.thrift_open_session_raw(catalog, schema).await {
+                Ok(s) => (s, false, false),
+                Err(e) => {
+                    report_submit_error(&client, "thrift", submit_t0.elapsed().as_secs_f64(), &stats);
+                    return Err(e);
+                }
+            },
+        };
 
-    let mut session_guard = ThriftSessionOnDrop {
-        client: &client,
-        catalog,
-        schema,
-        session: Some(session.clone()),
-        from_pool,
+        let mut session_guard = ThriftSessionOnDrop {
+            client: &client,
+            catalog,
+            schema,
+            session: Some(session.clone()),
+            from_pool,
+        };
+        let ready = submit_and_await_thrift_statement(&client, &session, statement, parameters.as_ref(), &stats).await;
+        session_guard.session = None;
+        drop(session_guard);
+
+        // Exactly one of these arms ever touches `session` -- a pooled session
+        // is checked in right away (safe: that only makes it available for a
+        // *different* operation, see `execute_lazy_thrift`'s own doc comment);
+        // a throwaway session that failed to even reach a terminal state is
+        // closed right here, since it'll never be handed to
+        // `drive_thrift_fetch_loop`; a throwaway session that succeeded is
+        // carried forward for that function to close once the fetch loop is
+        // actually done with it.
+        if from_pool {
+            let keep = ready.is_ok();
+            client.thrift_checkin_session(catalog, schema, session.clone(), keep);
+            if !keep {
+                // A discarded session is only forgotten by the pool; close it
+                // server-side too instead of leaving it to the idle TTL.
+                let client = client.clone();
+                let discarded = session.clone();
+                pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
+                    client.thrift_close_session_raw(&discarded).await;
+                }));
+            }
+        } else if ready.is_err() {
+            client.thrift_close_session_raw(&session).await;
+        }
+
+        if let Err(e) = &ready
+            && reused
+            && !retried
+            && e.is_stale_session()
+        {
+            // Its idle siblings went stale with it.
+            client.thrift_discard_idle_sessions(catalog, schema);
+            stats.retry_count.fetch_add(1, Ordering::Relaxed);
+            retried = true;
+            continue;
+        }
+        break (session, from_pool, ready);
     };
-    let ready = submit_and_await_thrift_statement(&client, &session, statement, parameters.as_ref(), &stats).await;
-    session_guard.session = None;
-    drop(session_guard);
     let submit_to_ready_s = submit_t0.elapsed().as_secs_f64();
-
-    // Exactly one of these two arms ever touches `session` -- a pooled
-    // session is checked in right away (safe: that only makes it available
-    // for a *different* operation, see `execute_lazy_thrift`'s own doc
-    // comment); a throwaway session that failed to even reach a terminal
-    // state is closed right here, since it'll never be handed to
-    // `drive_thrift_fetch_loop`; a throwaway session that succeeded is
-    // carried forward for that function to close once the fetch loop is
-    // actually done with it.
-    let throwaway_session = if from_pool {
-        let keep = ready.is_ok();
-        client.thrift_checkin_session(catalog, schema, session.clone(), keep);
-        if !keep {
-            // A discarded session is only forgotten by the pool; close it
-            // server-side too instead of leaving it to the idle TTL.
-            let client = client.clone();
-            pyo3_async_runtimes::tokio::get_runtime().spawn(in_call_context(async move {
-                client.thrift_close_session_raw(&session).await;
-            }));
-        }
-        None
+    let throwaway_session = if !from_pool && ready.is_ok() {
+        Some(session)
     } else {
-        match &ready {
-            Ok(_) => Some(session),
-            Err(_) => {
-                client.thrift_close_session_raw(&session).await;
-                None
-            }
-        }
+        None
     };
     let ready = match ready {
         Ok(r) => r,

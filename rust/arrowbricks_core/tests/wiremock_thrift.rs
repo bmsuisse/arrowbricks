@@ -2340,7 +2340,7 @@ async fn thrift_failed_statement_closes_its_discarded_pooled_session() {
     );
 }
 
-// ============================================================================
+// =====================================================================
 // Call context (5.2.1) -- see the matching section of `wiremock_pipeline.rs`.
 // Here the token requests come from the heartbeat-wrapped submit and the
 // Thrift fetch loop (`FetchResults`, `CloseOperation`), all spawned tasks.
@@ -2425,4 +2425,104 @@ async fn thrift_streamed_query_requests_every_token_in_the_callers_call_context(
     // warehouse status + OpenSession + ExecuteStatement + GetOperationStatus
     // + one FetchResults per batch
     token.assert_all_in_context(4 + N_BATCHES as usize);
+}
+
+// ---- issue #14: a stale pooled session is replaced, once ----
+
+/// Mounts counting `OpenSession`/`ExecuteStatement` mocks. `ExecuteStatement`
+/// call number `fail_on` (0-based) answers `HTTP 400` with `fail_body`, the
+/// shape a real warehouse returns for a session it no longer knows
+/// (`INVALID_STATE: Invalid SessionHandle: ...`, reproduced live).
+async fn mount_counted_submit(
+    server: &MockServer,
+    fail_on: usize,
+    fail_body: &'static str,
+) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let opens = Arc::new(AtomicUsize::new(0));
+    let opens_for_mock = opens.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("OpenSession"))
+        .respond_with(move |_: &Request| {
+            let n = opens_for_mock.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_raw(
+                build_open_session_resp(format!("s{n}").as_bytes(), b"sec"),
+                "application/x-thrift",
+            )
+        })
+        .mount(server)
+        .await;
+    let schema = test_schema();
+    let executes = Arc::new(AtomicUsize::new(0));
+    let executes_for_mock = executes.clone();
+    Mock::given(method("POST"))
+        .and(path(thrift_path()))
+        .and(IsThriftRpc("ExecuteStatement"))
+        .respond_with(move |_: &Request| {
+            let n = executes_for_mock.fetch_add(1, Ordering::SeqCst);
+            if n == fail_on {
+                ResponseTemplate::new(400).set_body_string(fail_body)
+            } else {
+                ResponseTemplate::new(200).set_body_raw(
+                    small_execute_statement_success(format!("op-{n}").into_bytes(), &schema),
+                    "application/x-thrift",
+                )
+            }
+        })
+        .mount(server)
+        .await;
+    mount_close_operation_ok(server).await;
+    mount_close_session_counter(server).await;
+    (opens, executes)
+}
+
+#[tokio::test]
+async fn thrift_retries_once_on_a_fresh_session_when_a_pooled_one_went_stale() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    let (opens, executes) = mount_counted_submit(
+        &server,
+        1,
+        "INVALID_STATE: Invalid SessionHandle: SessionHandle [01f1c49c-2f22-1b64-af6b-5d6be1eb8de4].",
+    )
+    .await;
+    let client = thrift_client(&server);
+
+    let mut first = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
+        .await
+        .unwrap();
+    first.fetchall_arrow().await.unwrap();
+    assert_eq!(opens.load(Ordering::SeqCst), 1, "first query opens the pooled session");
+
+    // Second query reuses that session; the server says it is gone.
+    let mut second = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
+        .await
+        .expect("a stale pooled session must be replaced, not surfaced");
+    second.fetchall_arrow().await.unwrap();
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        2,
+        "exactly one fresh session for the retry"
+    );
+    assert_eq!(executes.load(Ordering::SeqCst), 3, "one failed attempt, one retry");
+}
+
+#[tokio::test]
+async fn thrift_does_not_retry_a_rejected_statement_that_is_not_a_stale_session() {
+    let server = MockServer::start().await;
+    mount_warehouse_running(&server).await;
+    let (opens, executes) = mount_counted_submit(&server, 1, "PARSE_SYNTAX_ERROR: bad sql").await;
+    let client = thrift_client(&server);
+
+    let mut first = execute_lazy_thrift(client.clone(), "SELECT 1", None, None, None)
+        .await
+        .unwrap();
+    first.fetchall_arrow().await.unwrap();
+    assert!(
+        execute_lazy_thrift(client.clone(), "bad", None, None, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(executes.load(Ordering::SeqCst), 2, "an ordinary error is not retried");
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
 }
