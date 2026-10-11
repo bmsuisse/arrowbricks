@@ -29,6 +29,8 @@ mod thrift_exec;
 pub(crate) use reorder::decode_ipc_stream;
 
 pub use ndjson::{NdjsonStream, execute_ndjson_stream};
+pub(crate) use sea::execute_lazy_with_concurrency;
 pub use sea::{ExecuteResult, ResultStream, execute_lazy, execute_lazy_prefer_inline, run_pipeline};
 pub use stats::cancel_hook;
 pub use thrift_exec::execute_lazy_thrift;
+pub(crate) use thrift_exec::execute_lazy_thrift_with_concurrency;

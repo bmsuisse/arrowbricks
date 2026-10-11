@@ -28,23 +28,25 @@ import textwrap
 from pathlib import Path
 
 
-def load_dotenv() -> None:
+def load_dotenv(env_file: Path | None = None) -> None:
     """Minimal `.env` loader (KEY=VALUE per line, `#` comments, optional
     quotes) -- no dependency needed for one optional convenience. Searches
     the current directory upward so this works whether you run it from the
     repo root or from `examples/`. Existing environment variables always
     win, matching every real dotenv library's own precedence."""
-    for directory in [Path.cwd(), *Path.cwd().parents]:
-        env_file = directory / ".env"
-        if not env_file.is_file():
-            continue
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+    if env_file is None:
+        env_file = next(
+            (directory / ".env" for directory in [Path.cwd(), *Path.cwd().parents] if (directory / ".env").is_file()),
+            None,
+        )
+    if env_file is None:
         return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
 DEFAULT_SQL = "SELECT id, id * 2 AS doubled, CAST(id AS STRING) AS label FROM range(200000)"
