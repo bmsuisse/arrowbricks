@@ -74,10 +74,11 @@ async def _run(args: argparse.Namespace, sql: str) -> int:
     except (ValueError, OverflowError, TypeError) as exc:
         _configuration_error(str(exc))
         return 2
+    # Locale encoding and newline translation must not change the byte budget.
     if result.lstrip().startswith("{"):
-        sys.stderr.write(result)
+        sys.stderr.buffer.write(result.encode("utf-8"))
         return 1
-    sys.stdout.write(result)
+    sys.stdout.buffer.write(result.encode("utf-8"))
     return 0
 
 
