@@ -123,6 +123,9 @@ Unicode/nested, ordinary ASCII, control strings and oversized scalar/nested
 strings. Output budgets and fixtures were unchanged between each pair.
 The primary metric was the geometric mean of candidate/baseline median times
 for 10 KB previews; full-output timings were recorded separately.
+The committed benchmark reproduces these fixtures and iteration counts with
+`cargo run --manifest-path rust/arrowbricks_core/Cargo.toml --release
+--no-default-features --example agent_render_bench -- --agent-only`.
 
 Machine contention caused substantial variation on other workloads, so these
 measurements establish a focused control-escaping improvement, not a general

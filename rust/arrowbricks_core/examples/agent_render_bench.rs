@@ -12,8 +12,20 @@ fn batch(columns: Vec<ArrayRef>) -> RecordBatch {
         .collect();
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
 }
-fn direct(b: &RecordBatch, bytes: usize) -> String {
-    let mut renderer = MarkdownRenderer::new(b.schema(), 1000, bytes, 500).unwrap();
+fn direct(b: &RecordBatch, bytes: usize, interrupts: bool) -> String {
+    let mut renderer = if interrupts {
+        MarkdownRenderer::new_with_interrupt(
+            b.schema(),
+            1000,
+            bytes,
+            500,
+            Instant::now() + std::time::Duration::from_secs(60),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    } else {
+        MarkdownRenderer::new(b.schema(), 1000, bytes, 500)
+    }
+    .unwrap();
     renderer.push_batch(b).unwrap();
     renderer.finish(true)
 }
@@ -77,6 +89,7 @@ fn time(mut f: impl FnMut(), loops: usize) -> f64 {
     start.elapsed().as_secs_f64() * 1e6 / loops as f64
 }
 fn main() {
+    let agent_only = std::env::args().any(|arg| arg == "--agent-only");
     let n = 1000;
     let numeric = batch(vec![
         Arc::new(Int64Array::from_iter_values(0..n)),
@@ -88,6 +101,13 @@ fn main() {
             (0..n).map(|_| Some(vec![Some(1), None, Some(3)])),
         )),
     ]);
+    let ascii = batch(vec![Arc::new(StringArray::from(vec![
+        "ordinary query results without markup ".repeat(20); n as usize
+    ]))]);
+    let controls = batch(vec![Arc::new(StringArray::from(vec![
+        "a\0\u{0001}b\t\n".repeat(30);
+        n as usize
+    ]))]);
     let huge = batch(vec![Arc::new(StringArray::from(vec!["🦀".repeat(1_000_000)]))]);
     let mut builder = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
     builder.values().append_value("🦀".repeat(2_500_000));
@@ -96,21 +116,27 @@ fn main() {
     for (name, b, loops) in [
         ("numeric", numeric, 1000),
         ("unicode_nested", unicode, 100),
+        ("ascii_strings", ascii, 100),
+        ("controls", controls, 100),
         ("4MB_string", huge, 20),
         ("10MB_nested_string", nested_huge, 10),
     ] {
         let bounded = time(
             || {
-                black_box(direct(&b, 10_000));
+                black_box(direct(&b, 10_000, agent_only));
             },
-            loops,
+            if agent_only { 10000 } else { loops },
         );
         let full = time(
             || {
-                black_box(direct(&b, 2_000_000));
+                black_box(direct(&b, 2_000_000, agent_only));
             },
             loops,
         );
+        if agent_only {
+            println!("{name}: direct_10KB={bounded:.2}us direct_2MB={full:.2}us");
+            continue;
+        }
         let json_render = time(
             || {
                 black_box(json_markdown(&b, 10_000));
