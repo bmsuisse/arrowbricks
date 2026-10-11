@@ -1,3 +1,4 @@
+pub mod agent;
 #[cfg(all(target_os = "linux", target_env = "gnu", feature = "large-block-alloc"))]
 mod alloc;
 mod arrow_ffi;
@@ -824,6 +825,43 @@ impl PyDbClient {
                 client: client_for_result,
                 inner: Arc::new(AsyncMutex::new(stream)),
             })
+        })
+    }
+
+    /// Returns bounded typed Markdown, or actionable JSON for a query failure.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (statement, *, max_rows=1000, max_bytes=10000, max_cell_chars=500, total_timeout_s=60.0, catalog=None, schema=None, parameters=None))]
+    fn query_agent<'py>(
+        &self,
+        py: Python<'py>,
+        statement: String,
+        max_rows: usize,
+        max_bytes: usize,
+        max_cell_chars: usize,
+        total_timeout_s: f64,
+        catalog: Option<String>,
+        schema: Option<String>,
+        parameters: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = agent::AgentOptions {
+            max_rows,
+            max_bytes,
+            max_cell_chars,
+            total_timeout_s,
+        };
+        options.validate().map_err(PyValueError::new_err)?;
+        let client = self.inner.clone();
+        let parameters = parameters_to_value(py, parameters)?;
+        future_into_py_in_call(py, async move {
+            Ok(agent::query(
+                client,
+                &statement,
+                catalog.as_deref(),
+                schema.as_deref(),
+                parameters,
+                options,
+            )
+            .await)
         })
     }
 

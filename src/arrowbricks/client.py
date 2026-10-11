@@ -146,6 +146,38 @@ class DatabricksClient:
         any other failure."""
         await self._core_client.delete_volume_file(volume_path)
 
+    async def query_agent(
+        self,
+        sql: str,
+        *,
+        max_rows: int = 1000,
+        max_bytes: int = 10000,
+        max_cell_chars: int = 500,
+        total_timeout_s: float = 60.0,
+        catalog: str | None = None,
+        schema: str | None = None,
+        params: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Return bounded typed Markdown, or actionable JSON on query failure.
+
+        Budgets cover rows, the entire UTF-8 output, cell characters and one
+        deadline across submission and fetching. The completeness footer marks
+        clipping and gives an exact total only after exhausting the result.
+        Invalid budgets raise before submitting SQL; asyncio cancellation remains
+        cancellation. SQL is sent unchanged, with best-effort server cancellation
+        when stopped. Output limits do not limit the warehouse's scan cost.
+        """
+        return await self._core_client.query_agent(
+            sql,
+            max_rows=max_rows,
+            max_bytes=max_bytes,
+            max_cell_chars=max_cell_chars,
+            total_timeout_s=total_timeout_s,
+            catalog=catalog,
+            schema=schema,
+            parameters=params,
+        )
+
     def stream_query_json(
         self,
         sql: str,

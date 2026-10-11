@@ -1,0 +1,224 @@
+[
+  {
+    "protocol": "thrift",
+    "cases": [
+      {
+        "name": "scalar",
+        "elapsed_ms": 1341.9079160084948,
+        "output_bytes": 105
+      },
+      {
+        "name": "empty",
+        "elapsed_ms": 157.4787920108065,
+        "output_bytes": 72
+      },
+      {
+        "name": "null_and_string",
+        "elapsed_ms": 300.63604199676774,
+        "output_bytes": 109
+      },
+      {
+        "name": "unicode",
+        "elapsed_ms": 283.8065830001142,
+        "output_bytes": 96
+      },
+      {
+        "name": "escaped",
+        "elapsed_ms": 241.3269160024356,
+        "output_bytes": 101
+      },
+      {
+        "name": "decimal_date_timestamp",
+        "elapsed_ms": 257.57091701962054,
+        "output_bytes": 193
+      },
+      {
+        "name": "nested",
+        "elapsed_ms": 260.91262500267476,
+        "output_bytes": 336
+      },
+      {
+        "name": "duplicate_names",
+        "elapsed_ms": 225.93966600834392,
+        "output_bytes": 108
+      },
+      {
+        "name": "row_cap",
+        "elapsed_ms": 325.28800002182834,
+        "output_bytes": 141
+      },
+      {
+        "name": "byte_cap",
+        "elapsed_ms": 298.24716699658893,
+        "output_bytes": 461
+      },
+      {
+        "name": "cell_cap",
+        "elapsed_ms": 246.40270799864084,
+        "output_bytes": 235
+      },
+      {
+        "name": "parameter",
+        "elapsed_ms": 239.39204099588096,
+        "output_bytes": 75
+      },
+      {
+        "name": "bad_syntax",
+        "elapsed_ms": 285.13791697332636,
+        "output_bytes": 302
+      },
+      {
+        "name": "missing_column",
+        "elapsed_ms": 495.8870419941377,
+        "output_bytes": 415
+      },
+      {
+        "name": "missing_table",
+        "elapsed_ms": 700.1652919861954,
+        "output_bytes": 671
+      },
+      {
+        "name": "deadline",
+        "elapsed_ms": 7.438458997057751,
+        "output_bytes": 169
+      },
+      {
+        "name": "usable_after_timeout",
+        "elapsed_ms": 404.8590839956887,
+        "output_bytes": 70
+      }
+    ],
+    "benchmark": {
+      "runs": 5,
+      "agent_median_ms": 226.7377079988364,
+      "ndjson_median_ms": 285.25483299745247,
+      "agent_times_ms": [
+        301.94054200546816,
+        196.23570799012668,
+        201.42254198435694,
+        262.8801250248216,
+        226.7377079988364
+      ],
+      "ndjson_times_ms": [
+        210.18229197943583,
+        316.53254097909667,
+        201.72274997457862,
+        285.25483299745247,
+        298.7476249982137
+      ],
+      "agent_output_bytes": 2039,
+      "ndjson_output_bytes": 3625
+    }
+  },
+  {
+    "protocol": "sea",
+    "cases": [
+      {
+        "name": "scalar",
+        "elapsed_ms": 1110.3250829910394,
+        "output_bytes": 105
+      },
+      {
+        "name": "empty",
+        "elapsed_ms": 264.764333027415,
+        "output_bytes": 72
+      },
+      {
+        "name": "null_and_string",
+        "elapsed_ms": 336.42845798749477,
+        "output_bytes": 109
+      },
+      {
+        "name": "unicode",
+        "elapsed_ms": 408.3903749997262,
+        "output_bytes": 96
+      },
+      {
+        "name": "escaped",
+        "elapsed_ms": 394.22037499025464,
+        "output_bytes": 101
+      },
+      {
+        "name": "decimal_date_timestamp",
+        "elapsed_ms": 464.1876250097994,
+        "output_bytes": 193
+      },
+      {
+        "name": "nested",
+        "elapsed_ms": 541.7655830096919,
+        "output_bytes": 336
+      },
+      {
+        "name": "duplicate_names",
+        "elapsed_ms": 368.48062500939704,
+        "output_bytes": 108
+      },
+      {
+        "name": "row_cap",
+        "elapsed_ms": 429.87066600471735,
+        "output_bytes": 141
+      },
+      {
+        "name": "byte_cap",
+        "elapsed_ms": 632.6807499863207,
+        "output_bytes": 461
+      },
+      {
+        "name": "cell_cap",
+        "elapsed_ms": 507.9108340141829,
+        "output_bytes": 235
+      },
+      {
+        "name": "parameter",
+        "elapsed_ms": 350.0217910041101,
+        "output_bytes": 75
+      },
+      {
+        "name": "bad_syntax",
+        "elapsed_ms": 282.3261250159703,
+        "output_bytes": 320
+      },
+      {
+        "name": "missing_column",
+        "elapsed_ms": 641.7892090103123,
+        "output_bytes": 433
+      },
+      {
+        "name": "missing_table",
+        "elapsed_ms": 509.0609159960877,
+        "output_bytes": 689
+      },
+      {
+        "name": "deadline",
+        "elapsed_ms": 7.051874999888241,
+        "output_bytes": 169
+      },
+      {
+        "name": "usable_after_timeout",
+        "elapsed_ms": 539.2264580004849,
+        "output_bytes": 70
+      }
+    ],
+    "benchmark": {
+      "runs": 5,
+      "agent_median_ms": 393.2192500215024,
+      "ndjson_median_ms": 375.13741600560024,
+      "agent_times_ms": [
+        452.51450000796467,
+        377.06587501452304,
+        450.6364580010995,
+        345.07416700944304,
+        393.2192500215024
+      ],
+      "ndjson_times_ms": [
+        371.6611670097336,
+        375.13741600560024,
+        392.3700829909649,
+        343.30258300178684,
+        393.98350002011284
+      ],
+      "agent_output_bytes": 2039,
+      "ndjson_output_bytes": 3625
+    }
+  }
+]

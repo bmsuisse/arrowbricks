@@ -59,6 +59,7 @@ const MAX_CHUNKS_PER_FETCH_BATCH: usize = 32;
 /// `fetchmany(100)` loop over a huge result never pulls more chunks than it
 /// consumes).
 pub struct ResultStream {
+    pub(crate) defer_completion: bool,
     pub statement_id: String,
     pub num_chunks: usize,
     pub schema: Option<SchemaRef>,
@@ -154,7 +155,7 @@ impl ResultStream {
         }
         guard.defuse();
         guard.reporter.end_fetch();
-        if self.exhausted {
+        if self.exhausted && !self.defer_completion {
             guard.reporter.finish("success", guard.stats);
         }
         Ok(())
@@ -249,6 +250,17 @@ pub async fn execute_lazy(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
+    execute_lazy_with_concurrency(client, statement, catalog, schema, parameters, None).await
+}
+
+pub(crate) async fn execute_lazy_with_concurrency(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+    concurrency: Option<usize>,
+) -> Result<ResultStream, ApiError> {
     let stats = Arc::new(QueryStatsAccumulator::default());
     let (submitted, submit_to_ready_s) =
         submit_sea_and_report(&client, statement, catalog, schema, parameters, &stats).await?;
@@ -259,6 +271,7 @@ pub async fn execute_lazy(
         stats,
         warehouse_wait_s,
         submit_to_ready_s,
+        concurrency,
     ))
 }
 
@@ -268,15 +281,18 @@ fn result_stream_from_submitted(
     stats: Arc<QueryStatsAccumulator>,
     warehouse_wait_s: f64,
     submit_to_ready_s: f64,
+    concurrency: Option<usize>,
 ) -> ResultStream {
     let num_chunks = submitted.chunk_metas.len();
-    let rx = client.clone().fetch_chunks_with_backpressure(
+    let rx = client.clone().fetch_chunks_with_backpressure_limit(
         submitted.statement_id.clone(),
         submitted.chunk_metas,
         submitted.compressed,
         stats.clone(),
+        concurrency.unwrap_or(client.chunk_fetch_concurrency),
     );
     ResultStream {
+        defer_completion: false,
         statement_id: submitted.statement_id.clone(),
         num_chunks,
         schema: None,
@@ -291,6 +307,7 @@ fn result_stream_from_submitted(
         },
         stats,
         reporter: StatsReporter {
+            concurrency_used: None,
             client,
             statement_id: submitted.statement_id,
             protocol: "sea",
@@ -362,6 +379,7 @@ pub async fn execute_lazy_prefer_inline(
                 stats.clone(),
                 stats.warehouse_wait_s(),
                 submit_to_ready_s,
+                None,
             ));
         }
         InlineOrExternal::Inline {
@@ -381,6 +399,7 @@ pub async fn execute_lazy_prefer_inline(
             // never calls `self.reorder.next()` at all for this stream.
             let (_tx, rx) = mpsc::channel(1);
             Ok(ResultStream {
+                defer_completion: false,
                 statement_id: statement_id.clone(),
                 num_chunks: 1,
                 schema,
@@ -403,6 +422,7 @@ pub async fn execute_lazy_prefer_inline(
                 },
                 stats: stats.clone(),
                 reporter: StatsReporter {
+                    concurrency_used: None,
                     client,
                     statement_id,
                     protocol: "sea",

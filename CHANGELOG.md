@@ -1,5 +1,21 @@
 # Changelog
 
+## 6.0.0 — 2026-10-11
+
+- Add an explicit `DatabricksClient.query_agent` interface returning compact,
+  typed Markdown on success and actionable JSON diagnostics on failure.
+  Query execution, bounded Arrow rendering and cancellation stay in Rust;
+  no required Python dependencies are added.
+- Agent output has configurable row, UTF-8 byte and cell limits, with an
+  explicit completeness footer. It stops fetching a bounded prefix instead
+  of downloading the whole result to count it. Existing fetch APIs are unchanged.
+- Add the `arrowbricks` CLI and `python -m arrowbricks`, with compact Markdown
+  on stdout, JSON diagnostics on stderr, and SQL arguments, files and stdin.
+- Add agent-mode examples, automated coverage on both protocols, and
+  reproducible renderer and live SQL warehouse verification.
+- Ship `skills/arrowbricks/SKILL.md` with agent guidance for the CLI and Python
+  API, result completeness, budgets and JSON error recovery.
+
 ## 5.2.2 — 2026-10-10
 
 - Thrift: a pooled session the server no longer knows no longer fails the

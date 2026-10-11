@@ -268,6 +268,17 @@ pub async fn execute_lazy_thrift(
     schema: Option<&str>,
     parameters: Option<Value>,
 ) -> Result<ResultStream, ApiError> {
+    execute_lazy_thrift_with_concurrency(client, statement, catalog, schema, parameters, None).await
+}
+
+pub(crate) async fn execute_lazy_thrift_with_concurrency(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+    concurrency: Option<usize>,
+) -> Result<ResultStream, ApiError> {
     let ThriftSubmitResult {
         statement_id,
         schema_bytes,
@@ -276,7 +287,7 @@ pub async fn execute_lazy_thrift(
         stats,
         warehouse_wait_s,
         submit_to_ready_s,
-    } = submit_thrift_and_start_fetch(client.clone(), statement, catalog, schema, parameters).await?;
+    } = submit_thrift_with_concurrency(client.clone(), statement, catalog, schema, parameters, concurrency).await?;
     // Populate `schema`/`columns` up front from Thrift's own result-set
     // metadata, the same way SEA's `manifest.schema.columns` already does --
     // otherwise both stay empty until a batch is actually decoded, which for
@@ -298,6 +309,7 @@ pub async fn execute_lazy_thrift(
         })
         .unwrap_or_default();
     Ok(ResultStream {
+        defer_completion: false,
         statement_id: statement_id.clone(),
         num_chunks: 0,
         schema,
@@ -310,6 +322,7 @@ pub async fn execute_lazy_thrift(
         cancel_handle: CancelHandle::Thrift { operation },
         stats,
         reporter: StatsReporter {
+            concurrency_used: None,
             client,
             statement_id,
             protocol: "thrift",
@@ -360,6 +373,17 @@ pub(crate) async fn submit_thrift_and_start_fetch(
     catalog: Option<&str>,
     schema: Option<&str>,
     parameters: Option<Value>,
+) -> Result<ThriftSubmitResult, ApiError> {
+    submit_thrift_with_concurrency(client, statement, catalog, schema, parameters, None).await
+}
+
+async fn submit_thrift_with_concurrency(
+    client: Arc<DbClient>,
+    statement: &str,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    parameters: Option<Value>,
+    concurrency: Option<usize>,
 ) -> Result<ThriftSubmitResult, ApiError> {
     let stats = Arc::new(QueryStatsAccumulator::default());
     let warehouse_t0 = Instant::now();
@@ -465,7 +489,7 @@ pub(crate) async fn submit_thrift_and_start_fetch(
     let schema_bytes = ready.schema_bytes.clone();
     let operation = ready.operation.clone();
 
-    let concurrency = client.chunk_fetch_concurrency.max(1);
+    let concurrency = concurrency.unwrap_or(client.chunk_fetch_concurrency).max(1);
     let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
     tokio::spawn(in_call_context(drive_thrift_fetch_loop(
         client,
@@ -473,6 +497,7 @@ pub(crate) async fn submit_thrift_and_start_fetch(
         throwaway_session,
         tx,
         stats.clone(),
+        concurrency,
     )));
 
     let warehouse_wait_s = stats.warehouse_wait_s();
@@ -539,24 +564,11 @@ async fn drive_thrift_fetch_loop(
     throwaway_session: Option<thrift::SessionHandle>,
     tx: mpsc::Sender<Result<ChunkItem, ApiError>>,
     stats: Arc<QueryStatsAccumulator>,
+    concurrency: usize,
 ) {
-    let ThriftStatementReady {
-        operation,
-        schema_bytes,
-        compression,
-        initial_rowset,
-        already_closed,
-    } = ready;
-    run_thrift_fetch_loop(
-        &client,
-        &operation,
-        schema_bytes,
-        compression,
-        initial_rowset,
-        &tx,
-        &stats,
-    )
-    .await;
+    let operation = ready.operation.clone();
+    let already_closed = ready.already_closed;
+    run_thrift_fetch_loop(&client, ready, &tx, &stats, concurrency).await;
     // Closes the channel *before* the two cleanup RPCs below, not after this
     // whole function returns -- `tx` is otherwise dropped at the end of this
     // scope, which is on the far side of a `CloseOperation` round trip.
@@ -664,16 +676,21 @@ async fn fetch_thrift_link(
 /// never at download-completion time.
 async fn run_thrift_fetch_loop(
     client: &Arc<DbClient>,
-    operation: &thrift::OperationHandle,
-    mut schema_bytes: Option<bytes::Bytes>,
-    compression: Option<bool>,
-    initial_rowset: Option<(thrift::RowSet, bool)>,
+    ready: ThriftStatementReady,
     tx: &mpsc::Sender<Result<ChunkItem, ApiError>>,
     stats: &Arc<QueryStatsAccumulator>,
+    concurrency: usize,
 ) {
+    let ThriftStatementReady {
+        operation,
+        mut schema_bytes,
+        compression,
+        initial_rowset,
+        ..
+    } = ready;
+    let operation = &operation;
     let mut metadata_confirmed = compression.is_some();
     let mut lz4_compressed = compression.unwrap_or_else(|| client.compress_results());
-    let concurrency = client.chunk_fetch_concurrency.max(1);
     let (link_tx, link_rx) = mpsc::channel::<ThriftLinkWork>(concurrency);
     let link_rx = Arc::new(tokio::sync::Mutex::new(link_rx));
 

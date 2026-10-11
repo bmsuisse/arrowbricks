@@ -2,7 +2,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any, BinaryIO, Literal
 
 def _validate_timeout(total_timeout_s: float | None) -> None: ...
-
 def write_ipc_stream(stream: Any, buf: BinaryIO) -> None: ...  # stream: anything implementing __arrow_c_stream__
 
 class Table:
@@ -102,6 +101,18 @@ class Client:
         parameters: list[dict[str, Any]] | None = None,
         prefer_inline: bool = False,
     ) -> ResultSet: ...
+    async def query_agent(
+        self,
+        statement: str,
+        *,
+        max_rows: int = 1000,
+        max_bytes: int = 10000,
+        max_cell_chars: int = 500,
+        total_timeout_s: float = 60.0,
+        catalog: str | None = None,
+        schema: str | None = None,
+        parameters: list[dict[str, Any]] | None = None,
+    ) -> str: ...
     async def upload_volume_file(self, volume_path: str, data: bytes) -> None: ...
     async def delete_volume_file(self, volume_path: str) -> None: ...
     async def close_sessions(self) -> None: ...

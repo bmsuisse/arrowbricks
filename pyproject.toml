@@ -1,7 +1,7 @@
 [project]
 name = "arrowbricks"
-version = "5.2.2"
-description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API and hands you the result as Arrow -- a DB-API-ish Cursor (fetchone/fetchmany/fetchall/fetchall_arrow) or NDJSON streaming. Rust/PyO3 core throughout -- zero required runtime dependencies."
+version = "6.0.0"
+description = "Rust-powered Databricks SQL client and agent CLI with Arrow/NDJSON streaming, bounded Markdown previews, actionable JSON diagnostics, and zero required Python dependencies."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -13,6 +13,9 @@ requires-python = ">=3.11"
 # stream_query_json, upload_volume_file/delete_volume_file, and
 # Cursor.description all work with zero dependencies installed.
 dependencies = []
+
+[project.scripts]
+arrowbricks = "arrowbricks.cli:main"
 
 [project.optional-dependencies]
 # Row materialization converts our capsule table through arro3-core.

@@ -3,11 +3,14 @@
 </p>
 
 <h1 align="center">arrowbricks</h1>
-<p align="center">Databricks SQL to Arrow, with a Rust core.</p>
+<p align="center">Rust-powered Databricks SQL for applications and agents: Arrow streaming, compact Markdown, and actionable diagnostics.</p>
 
-Runs SQL against a Databricks SQL warehouse and hands you the result as Arrow -- a `Cursor` shaped like [`databricks-sql-python`](https://github.com/databricks/databricks-sql-python)'s (`execute`, `fetchone`/`fetchmany`/`fetchall`, `fetchall_arrow`/`fetchmany_arrow`), or `stream_query_json` for streaming NDJSON. Talks to Databricks over Thrift by default (`protocol="thrift"`), or the REST Statement Execution API if you prefer (`protocol="sea"`) -- see below.
+Arrowbricks is a Databricks SQL client and agent toolkit with a Rust execution and rendering core. Applications can consume lazy Arrow results or streaming NDJSON; agents can use the CLI or `query_agent` for compact typed Markdown and actionable JSON diagnostics. Version 6.0 adds strict preview budgets, explicit completeness metadata, total deadlines, cancellation, and a reusable agent skill, with zero required Python dependencies.
+
+The Python `Cursor` also offers familiar [`databricks-sql-python`](https://github.com/databricks/databricks-sql-python)-style methods (`execute`, `fetchone`/`fetchmany`/`fetchall`, `fetchall_arrow`/`fetchmany_arrow`). Connect over Thrift by default (`protocol="thrift"`) or the REST Statement Execution API (`protocol="sea"`).
 
 - **Rust core.** Statement submit/poll, bounded-concurrency chunk fetch, the reorder buffer, and Arrow-IPC decode all run in a [PyO3](https://pyo3.rs)/[arrow-rs](https://github.com/apache/arrow-rs) extension bundled in this same package -- 1.6x-2.5x faster than a pure-Python/asyncio client on a multi-chunk result, scaling further with chunk count and concurrency where asyncio+GIL plateaus.
+- **Agent CLI and Python API.** Render directly from Arrow to bounded typed Markdown in Rust. Row, output-byte, cell and deadline budgets make previews predictable; the footer identifies incomplete or clipped results, and JSON errors retain the database's suggestions with a recovery hint.
 - **Thrift by default, SEA/REST as a fully-supported alternative** (`protocol="sea"` on `connect()`/`DatabricksClient(...)`). Thrift speaks the same HiveServer2-compatible protocol `databricks-sql-connector` uses by default -- measurably faster for *small* results (a statement's data can come back inline in the very same call that submits it, instead of SEA's separate poll-then-fetch round trip), and on par with SEA for a large, multi-chunk result too (its chunk downloads fan out concurrently across the whole result, same as SEA's own bounded-concurrency fetch, not serialized batch by batch) -- never slower than SEA on any query shape tested. Confirmed against a real production warehouse; see `AGENTS.md`'s design-invariant entry for the benchmarking history behind the switch.
 - **Compressed cloud-fetch transport by default.** Every statement requests LZ4-compressed chunk downloads (same default as the official `databricks-sql-connector`) and decompresses them in Rust before you ever see the bytes -- less data over the wire, which matters more than local decode speed for a large result. Measured ~2x faster chunk-fetch time against a real 120-column/100k-row table. Disable per-client with `compress_results=False` (`connect()`/`DatabricksClient(...)`) if your link to the warehouse is fast enough that decompression CPU time stops paying for itself.
 - **Zero required dependencies.** `pip install arrowbricks` and go.
@@ -23,6 +26,78 @@ pip install arrowbricks
 ```
 
 Ships as precompiled platform wheels (Linux/macOS/Windows) -- no Rust toolchain needed, and nothing else to install for most of the API. Row-tuple fetches (`fetchone`/`fetchmany`/`fetchall`) need one optional extra: `pip install arrowbricks[arro3]` -- see [Arrow vs. row-tuple fetches](#arrow-vs-row-tuple-fetches) below.
+
+## CLI quickstart (6.0)
+
+```bash
+pip install 'arrowbricks>=6.0'
+export DATABRICKS_HOST='your-workspace.azuredatabricks.net'
+export DATABRICKS_WAREHOUSE_ID='your-warehouse-id'
+export DATABRICKS_TOKEN='your-access-token'
+
+arrowbricks -c 'SELECT 1 AS answer'
+# | answer (Int32) |
+# | --- |
+# | 1 |
+#
+# rows_shown=1; complete=true; total_rows=1
+
+arrowbricks --agent -c 'SELECT * FROM your_catalog.your_schema.your_table' --max-rows 20 --max-bytes 4000
+arrowbricks -agent --file query.sql
+printf 'SELECT 1 AS answer' | arrowbricks
+python -m arrowbricks --protocol sea --command 'SELECT 1 AS answer'
+```
+
+Agent output is the default; `--agent` and `-agent` are optional aliases.
+`-c`/`--sql`/`--command` sends SQL unchanged. `-f`/`--file` reads a UTF-8 file
+(or `-` for stdin); without either option, piped stdin supplies SQL. Interactive
+invocations without SQL return a configuration error. Flags `--host`,
+`--warehouse-id` and `--token` override the corresponding environment variables;
+`--catalog` and `--schema` set the query namespace.
+
+The default limits are `--max-rows 1000`, `--max-bytes 10000`,
+`--max-cell-chars 500` and `--total-timeout-s 60` (`--timeout` is an alias).
+Clipped previews have `complete=false`; they remain successful queries with
+exit code 0. These limits bound the returned preview and stop further fetching
+once full; they do not limit the warehouse's scan cost. See [Agent results](#agent-results) for completeness and cancellation.
+
+Success writes only Markdown to stdout, so it can be piped directly into an
+agent. Query failures write JSON to stderr and exit 1; invalid configuration
+writes JSON to stderr and exits 2. Help uses the usual `--help` output and exits
+0. Ctrl-C interrupts the query, writes JSON to stderr and exits 130.
+Credentials are never included in help output. For example:
+
+```bash
+arrowbricks -c 'SELEC 1' 2>error.json
+# exit 1; error.json contains category, original message and next_step
+```
+
+Existing Python cursor and streaming APIs remain available in 6.0. `query_agent`
+is an explicit Python API; it does not change the output of existing methods.
+
+## Agent skill
+
+The reusable [Arrowbricks skill](skills/arrowbricks/SKILL.md) teaches agents the
+CLI and Python API, secure environment authentication, preview completeness,
+JSON recovery and the limits of scan/cost information. The skill is distributed
+in this repository; installing the Python package supplies the CLI and API.
+It targets 6.0+: for an unreleased checkout, install its built wheel; the
+`pip install` examples apply once a compatible release is published.
+
+From a repository checkout, copy the skill folder into your agent's skill
+directory. For project discovery with Codex:
+
+```bash
+mkdir -p .agents/skills
+cp -R skills/arrowbricks .agents/skills/arrowbricks
+```
+
+For Claude Code, use `.claude/skills/arrowbricks` instead; for a personal
+installation, use your agent's corresponding user skill directory. Keep
+`SKILL.md` inside the `arrowbricks` folder. After your agent reloads its skills,
+invoke `$arrowbricks` in Codex or `/arrowbricks` in Claude Code, or ask it to use
+Arrowbricks for a Databricks SQL preview. Credentials remain in your environment
+or credential provider, separate from the skill.
 
 ## Quickstart
 
@@ -73,6 +148,62 @@ for the same idea using Databricks' own OAuth machine-to-machine
 client-credentials flow instead -- like `databricks-sql-connector`'s
 `auth_type="databricks-oauth"`, but stdlib-only (`urllib.request`), no
 extra dependency.
+
+## Agent results
+
+`query_agent` returns one compact string: a typed Markdown table on success,
+or JSON with `category`, `message` and `next_step` on database or transport
+failure. It formats Arrow directly in Rust and needs no optional Python Arrow
+packages. Both `thrift` (default) and `sea` are supported.
+
+```python
+from arrowbricks import DatabricksClient
+
+async with DatabricksClient(host=..., warehouse_id=..., token=...) as client:
+    result = await client.query_agent(
+        "SELECT id, name FROM my_catalog.my_schema.my_table ORDER BY id",
+        max_rows=1000,
+        max_bytes=10000,
+        max_cell_chars=500,
+        total_timeout_s=60.0,
+        # catalog=None, schema=None, params=None
+    )
+    print(result)
+```
+
+Column headers include Arrow types. Strings are quoted, so SQL `NULL` differs
+from the string `"NULL"`; Markdown, HTML, pipes and line breaks are escaped.
+Clipped cells carry `…[truncated]`. The footer gives `rows_shown`, `complete`,
+and an exact `total_rows` only when the result is exhausted. Row, byte or cell
+clipping makes `complete=false`; an unexhausted result reports only a fetched
+lower bound. Every returned string, including its header and footer, fits
+`max_bytes` in UTF-8. Row and cell limits must be positive, with `max_bytes >= 256`; the timeout
+must be finite and non-negative. Invalid budgets raise before SQL submission.
+
+The single timeout covers submission, polling, downloads and formatting.
+Stopping requests best-effort server cancellation; cancelling the Python task
+preserves `asyncio.CancelledError`. A failure after some rows were fetched
+returns an error JSON string instead of claiming a successful partial result.
+Database diagnostics and suggestions are preserved; corrected SQL is never
+executed automatically. Pass named parameters with `params`, using the same
+list of `{"name": ..., "value": ..., "type": ...}` objects as the other APIs.
+
+These budgets bound the returned preview, not the warehouse scan or its cost.
+Pre-execution cost estimates and percentage progress are unavailable. This
+method does not hash the full result, fetch its last rows or offer persistent
+result paging. Use the cursor API when you need to consume a larger result.
+
+[`examples/agent_mode.py`](examples/agent_mode.py) is runnable with
+`DATABRICKS_HOST`, `DATABRICKS_WAREHOUSE_ID` and `DATABRICKS_TOKEN`:
+
+```bash
+python examples/agent_mode.py --protocol sea --sql 'SELECT 1 AS answer'
+```
+
+The example delegates to the installed CLI: Markdown goes to stdout and error
+JSON goes to stderr. Its exit codes are 0 for Markdown, 1 for a query error and
+2 for invalid configuration. A clipped Markdown preview is still a successful query; inspect
+its completeness footer before using it as a complete dataset.
 
 ## FastAPI SSE example
 

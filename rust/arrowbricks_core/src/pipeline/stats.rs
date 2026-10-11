@@ -86,6 +86,7 @@ impl Drop for CancelInFlightOnDrop<'_> {
 /// live in `QueryStatsAccumulator` instead, passed into `finish` explicitly
 /// rather than duplicated here.
 pub(crate) struct StatsReporter {
+    pub(crate) concurrency_used: Option<usize>,
     pub(crate) client: Arc<DbClient>,
     pub(crate) statement_id: String,
     pub(crate) protocol: &'static str,
@@ -139,7 +140,7 @@ impl StatsReporter {
                 .unwrap_or_else(|| stats.chunks_seen.load(Ordering::Relaxed)),
             bytes_downloaded: stats.bytes_downloaded.load(Ordering::Relaxed),
             retry_count: stats.retry_count.load(Ordering::Relaxed),
-            concurrency_used: self.client.chunk_fetch_concurrency,
+            concurrency_used: self.concurrency_used.unwrap_or(self.client.chunk_fetch_concurrency),
             outcome,
         };
         sink.on_event(data);

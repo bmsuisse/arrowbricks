@@ -540,9 +540,21 @@ impl DbClient {
         compressed: bool,
         stats: Arc<QueryStatsAccumulator>,
     ) -> mpsc::Receiver<Result<ChunkItem, ApiError>> {
+        let concurrency = self.chunk_fetch_concurrency;
+        self.fetch_chunks_with_backpressure_limit(statement_id, chunk_metas, compressed, stats, concurrency)
+    }
+
+    pub(crate) fn fetch_chunks_with_backpressure_limit(
+        self: std::sync::Arc<Self>,
+        statement_id: String,
+        chunk_metas: Vec<ChunkMeta>,
+        compressed: bool,
+        stats: Arc<QueryStatsAccumulator>,
+        concurrency: usize,
+    ) -> mpsc::Receiver<Result<ChunkItem, ApiError>> {
         // Never more workers than chunks: the rest would start, find the
         // queue empty and exit, for nothing.
-        let concurrency = self.chunk_fetch_concurrency.clamp(1, chunk_metas.len().max(1));
+        let concurrency = concurrency.clamp(1, chunk_metas.len().max(1));
         let (tx, rx) = mpsc::channel::<Result<ChunkItem, ApiError>>(concurrency);
         let queue = std::sync::Arc::new(Mutex::new(VecDeque::from(chunk_metas)));
 

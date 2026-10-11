@@ -424,6 +424,7 @@ pub async fn execute_ndjson_stream(
         cancel_handle,
         stats,
         reporter: StatsReporter {
+            concurrency_used: None,
             client,
             statement_id,
             protocol,
