@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import signal
@@ -76,6 +77,53 @@ def test_cli_help():
     assert result.returncode == 0 and result.stderr == ""
     assert "--sql" in result.stdout and "--file" in result.stdout and "--max-bytes" in result.stdout
     assert "fake-test-credential" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "result,exit_code",
+    [
+        ("| 雪🙂 |\nrows_shown=1", 0),
+        ('{"message":"雪🙂"}', 1),
+        ("a" * 255 + "\n", 0),
+        ('{"message":"' + "x" * 241 + '"}\n', 1),
+    ],
+    ids=["unicode-markdown", "unicode-json", "crlf-markdown-budget", "crlf-json-budget"],
+)
+async def test_cli_query_output_preserves_exact_utf8_wire_bytes(monkeypatch, result, exit_code):
+    from arrowbricks import cli, client
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def query_agent(self, *args, **kwargs):
+            return result
+
+    monkeypatch.setattr(client, "DatabricksClient", FakeClient)
+    args = cli._parser().parse_args(
+        ["--host", "host", "--warehouse-id", "warehouse", "--token", "test", "--max-bytes", "256"]
+    )
+    stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
+    stdout = io.TextIOWrapper(stdout_bytes, encoding="ascii", newline="\r\n")
+    stderr = io.TextIOWrapper(stderr_bytes, encoding="ascii", newline="\r\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", stdout)
+        patch.setattr(sys, "stderr", stderr)
+        actual_exit_code = await cli._run(args, "SELECT 1")
+        stdout.flush()
+        stderr.flush()
+    expected = result.encode("utf-8")
+    assert actual_exit_code == exit_code
+    assert stdout_bytes.getvalue() == (expected if exit_code == 0 else b"")
+    assert stderr_bytes.getvalue() == (expected if exit_code == 1 else b"")
+    if "雪" not in result:
+        assert len(expected) == 256
 
 
 async def test_cli_default_agent_and_explicit_aliases(cli_warehouse):
