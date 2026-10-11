@@ -160,8 +160,7 @@ impl MarkdownRenderer {
                     return Ok(false);
                 }
                 self.scratch.push(' ');
-                let is_null = column.is_null(row);
-                let quote = !is_null
+                let quote = !column.is_null(row)
                     && matches!(
                         column.data_type(),
                         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
@@ -172,20 +171,19 @@ impl MarkdownRenderer {
                 let cell_bytes = available - self.scratch.len() - reserve;
                 let mut sink = EscapedWriter::new(&mut self.scratch, self.max_cell_chars, cell_bytes);
                 sink.interrupt = self.interrupt.as_ref();
-                let result = if is_null {
+                let result = if column.is_null(row) {
                     sink.chars = usize::MAX;
                     sink.bytes = sink.bytes.max(4);
                     sink.write_str("NULL")
                         .map_err(|_| arrow_schema::ArrowError::CastError("bounded output".into()))
-                } else if quote {
-                    let value = if let Some(a) = column.as_any().downcast_ref::<StringArray>() {
-                        a.value(row)
-                    } else if let Some(a) = column.as_any().downcast_ref::<LargeStringArray>() {
-                        a.value(row)
-                    } else {
-                        column.as_any().downcast_ref::<StringViewArray>().unwrap().value(row)
-                    };
-                    sink.write_str(value)
+                } else if let Some(a) = column.as_any().downcast_ref::<StringArray>() {
+                    sink.write_str(a.value(row))
+                        .map_err(|_| arrow_schema::ArrowError::CastError("bounded output".into()))
+                } else if let Some(a) = column.as_any().downcast_ref::<LargeStringArray>() {
+                    sink.write_str(a.value(row))
+                        .map_err(|_| arrow_schema::ArrowError::CastError("bounded output".into()))
+                } else if let Some(a) = column.as_any().downcast_ref::<StringViewArray>() {
+                    sink.write_str(a.value(row))
                         .map_err(|_| arrow_schema::ArrowError::CastError("bounded output".into()))
                 } else {
                     formatter.value(row).write(&mut sink)
