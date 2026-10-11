@@ -199,6 +199,34 @@ async def test_cli_sql_error_is_json_only_on_stderr(cli_warehouse):
     assert error["next_step"] and "fake-test-credential" not in result.stderr
 
 
+async def test_cli_query_error_respects_entire_stderr_byte_budget(cli_warehouse):
+    protocol, env, _, server = cli_warehouse
+    message = "[PARSE_SYNTAX_ERROR] " + "x" * 10000
+    if protocol == "sea":
+        route = next(
+            route
+            for method, pattern, route in server._routes
+            if method == "POST" and pattern.match("/api/2.0/sql/statements")
+        )
+        route.mock(
+            side_effect=lambda req: Response(
+                json_body={
+                    "statement_id": "failed-cli",
+                    "status": {"state": "FAILED", "error": {"error_code": "PARSE_SYNTAX_ERROR", "message": message}},
+                }
+            )
+        )
+    else:
+        server.handler.execute_statement = lambda req: tm.execute_statement_resp(
+            direct=tm.DirectResults(operation_state=tm.OperationState.ERROR_STATE, operation_error=message)
+        )
+    result = run_cli("--protocol", protocol, "-c", "SELEC 1", "--max-bytes", "256", env=env)
+    assert result.returncode == 1 and result.stdout == ""
+    assert len(result.stderr.encode()) <= 256
+    error = json.loads(result.stderr)
+    assert error["category"] == "syntax_error" and error["truncated"]
+
+
 async def test_installed_console_script(cli_warehouse):
     protocol, env, _, _ = cli_warehouse
     result = run_cli("--protocol", protocol, "-c", "SELECT * FROM t", env=env, module=False)

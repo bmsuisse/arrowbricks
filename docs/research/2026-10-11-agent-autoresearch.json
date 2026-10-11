@@ -1,0 +1,323 @@
+{
+  "score_ratio_lower_is_better": 0.8924517851704243,
+  "summary": {
+    "candidate": {
+      "numeric": {
+        "bounded": 391.98,
+        "full": 799.39
+      },
+      "unicode_nested": {
+        "bounded": 104.67,
+        "full": 13029.07
+      },
+      "ascii_strings": {
+        "bounded": 313.42,
+        "full": 12941.87
+      },
+      "controls": {
+        "bounded": 154.62,
+        "full": 5485.5
+      },
+      "4MB_string": {
+        "bounded": 13.47,
+        "full": 17.46
+      },
+      "10MB_nested_string": {
+        "bounded": 12.51,
+        "full": 9.99
+      }
+    },
+    "baseline": {
+      "numeric": {
+        "bounded": 378.21,
+        "full": 581.35
+      },
+      "unicode_nested": {
+        "bounded": 91.3,
+        "full": 22292.38
+      },
+      "ascii_strings": {
+        "bounded": 292.17,
+        "full": 10891.1
+      },
+      "controls": {
+        "bounded": 262.82,
+        "full": 11467.55
+      },
+      "4MB_string": {
+        "bounded": 12.07,
+        "full": 10.95
+      },
+      "10MB_nested_string": {
+        "bounded": 20.72,
+        "full": 11.26
+      }
+    }
+  },
+  "runs": {
+    "candidate": [
+      {
+        "numeric": {
+          "bounded": 391.98,
+          "full": 799.39
+        },
+        "unicode_nested": {
+          "bounded": 80.06,
+          "full": 10695.45
+        },
+        "ascii_strings": {
+          "bounded": 179.18,
+          "full": 8174.35
+        },
+        "controls": {
+          "bounded": 83.45,
+          "full": 5485.5
+        },
+        "4MB_string": {
+          "bounded": 13.47,
+          "full": 10.73
+        },
+        "10MB_nested_string": {
+          "bounded": 12.51,
+          "full": 13.17
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 348.23,
+          "full": 645.72
+        },
+        "unicode_nested": {
+          "bounded": 104.67,
+          "full": 11049.18
+        },
+        "ascii_strings": {
+          "bounded": 313.42,
+          "full": 7529.74
+        },
+        "controls": {
+          "bounded": 154.62,
+          "full": 5242.25
+        },
+        "4MB_string": {
+          "bounded": 14.28,
+          "full": 22.85
+        },
+        "10MB_nested_string": {
+          "bounded": 13.89,
+          "full": 9.31
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 401.44,
+          "full": 1533.35
+        },
+        "unicode_nested": {
+          "bounded": 198.61,
+          "full": 34926.95
+        },
+        "ascii_strings": {
+          "bounded": 200.03,
+          "full": 12941.87
+        },
+        "controls": {
+          "bounded": 235.01,
+          "full": 11150.26
+        },
+        "4MB_string": {
+          "bounded": 47.14,
+          "full": 17.46
+        },
+        "10MB_nested_string": {
+          "bounded": 41.29,
+          "full": 13.23
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 759.34,
+          "full": 1939.47
+        },
+        "unicode_nested": {
+          "bounded": 238.57,
+          "full": 20051.4
+        },
+        "ascii_strings": {
+          "bounded": 331.1,
+          "full": 19991.01
+        },
+        "controls": {
+          "bounded": 176.05,
+          "full": 7994.72
+        },
+        "4MB_string": {
+          "bounded": 11.38,
+          "full": 17.46
+        },
+        "10MB_nested_string": {
+          "bounded": 10.92,
+          "full": 9.99
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 349.12,
+          "full": 645.2
+        },
+        "unicode_nested": {
+          "bounded": 61.61,
+          "full": 13029.07
+        },
+        "ascii_strings": {
+          "bounded": 380.2,
+          "full": 13616.5
+        },
+        "controls": {
+          "bounded": 102.41,
+          "full": 4404.75
+        },
+        "4MB_string": {
+          "bounded": 10.15,
+          "full": 8.99
+        },
+        "10MB_nested_string": {
+          "bounded": 11.39,
+          "full": 8.88
+        }
+      }
+    ],
+    "baseline": [
+      {
+        "numeric": {
+          "bounded": 828.67,
+          "full": 1228.92
+        },
+        "unicode_nested": {
+          "bounded": 162.29,
+          "full": 39409.49
+        },
+        "ascii_strings": {
+          "bounded": 292.17,
+          "full": 17353.18
+        },
+        "controls": {
+          "bounded": 262.82,
+          "full": 11467.55
+        },
+        "4MB_string": {
+          "bounded": 17.26,
+          "full": 14.56
+        },
+        "10MB_nested_string": {
+          "bounded": 20.72,
+          "full": 9.02
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 378.21,
+          "full": 564.49
+        },
+        "unicode_nested": {
+          "bounded": 98.61,
+          "full": 22292.38
+        },
+        "ascii_strings": {
+          "bounded": 649.1,
+          "full": 26984.32
+        },
+        "controls": {
+          "bounded": 553.24,
+          "full": 33606.03
+        },
+        "4MB_string": {
+          "bounded": 12.07,
+          "full": 10.21
+        },
+        "10MB_nested_string": {
+          "bounded": 69.15,
+          "full": 9.18
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 478.1,
+          "full": 581.35
+        },
+        "unicode_nested": {
+          "bounded": 91.3,
+          "full": 25085.47
+        },
+        "ascii_strings": {
+          "bounded": 298.14,
+          "full": 9978.77
+        },
+        "controls": {
+          "bounded": 227.93,
+          "full": 27868.75
+        },
+        "4MB_string": {
+          "bounded": 21.92,
+          "full": 11.23
+        },
+        "10MB_nested_string": {
+          "bounded": 11.59,
+          "full": 11.26
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 288.5,
+          "full": 450.77
+        },
+        "unicode_nested": {
+          "bounded": 60.19,
+          "full": 18853.87
+        },
+        "ascii_strings": {
+          "bounded": 213.33,
+          "full": 10891.1
+        },
+        "controls": {
+          "bounded": 387.76,
+          "full": 9578.58
+        },
+        "4MB_string": {
+          "bounded": 11.55,
+          "full": 10.94
+        },
+        "10MB_nested_string": {
+          "bounded": 12.71,
+          "full": 11.26
+        }
+      },
+      {
+        "numeric": {
+          "bounded": 240.34,
+          "full": 627.44
+        },
+        "unicode_nested": {
+          "bounded": 78.9,
+          "full": 10905.19
+        },
+        "ascii_strings": {
+          "bounded": 235.15,
+          "full": 10389.88
+        },
+        "controls": {
+          "bounded": 204.94,
+          "full": 9137.72
+        },
+        "4MB_string": {
+          "bounded": 11.73,
+          "full": 10.95
+        },
+        "10MB_nested_string": {
+          "bounded": 20.81,
+          "full": 11.31
+        }
+      }
+    ]
+  }
+}

@@ -102,3 +102,34 @@ During review, an existing empty SEA INTERVAL schema conversion failure was
 reproduced against the released package and filed as
 https://github.com/bmsuisse/arrowbricks/issues/18. The same zero-row query
 works through Thrift. It is outside the new agent/CLI behavior.
+
+## Autoresearch before release
+
+Two committed experiments were measured before the requested release. The first
+cached null checks and avoided failed string downcasts for nonstring cells. Its
+short samples produced contradictory workload results, so it was discarded.
+
+The second replaced per-control-character temporary strings with a ten-byte
+stack buffer. An exhaustive test compares every Unicode control character with
+the previous escaping contract, including short tab/newline/CR escapes. It was
+retained: control-heavy previews measured median 262.82 µs before and 154.62 µs
+after (41.2% lower). The six-workload geometric mean ratio was 0.89245.
+
+The experiment harness compiled the actual renderer source with the same
+`opt-level="s"`, LTO and single-codegen-unit settings. It included production
+deadline/atomic-cancellation checks, 10000 iterations per bounded workload,
+and five alternating baseline/candidate runs. Fixtures included numeric,
+Unicode/nested, ordinary ASCII, control strings and oversized scalar/nested
+strings. Output budgets and fixtures were unchanged between each pair.
+The primary metric was the geometric mean of candidate/baseline median times
+for 10 KB previews; full-output timings were recorded separately.
+
+Machine contention caused substantial variation on other workloads, so these
+measurements establish a focused control-escaping improvement, not a general
+latency claim. See [the raw timings](2026-10-11-agent-autoresearch.json). The
+loop stopped after these two experiments when release was requested. Results:
+
+| Experiment | Commit | Score ratio | Decision |
+|---|---|---:|---|
+| Avoid nonstring downcasts | 30323a3 | 0.91271 | Discard: inconclusive samples |
+| Stack control escaping | bcfbf10 | 0.89245 | Keep: affected workload improved |

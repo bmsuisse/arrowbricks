@@ -75,7 +75,7 @@ async def _run(args: argparse.Namespace, sql: str) -> int:
         _configuration_error(str(exc))
         return 2
     if result.lstrip().startswith("{"):
-        print(result, file=sys.stderr)
+        sys.stderr.write(result)
         return 1
     sys.stdout.write(result)
     return 0
