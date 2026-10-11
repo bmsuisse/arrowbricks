@@ -3,21 +3,14 @@
 </p>
 
 <h1 align="center">arrowbricks</h1>
-<p align="center">Rust-powered Databricks SQL for applications and agents: Arrow streaming, compact Markdown, and actionable diagnostics.</p>
+<p align="center">Fast Databricks SQL for Python applications and AI agents.</p>
 
-Arrowbricks is a Databricks SQL client and agent toolkit with a Rust execution and rendering core. Applications can consume lazy Arrow results or streaming NDJSON; agents can use the CLI or `query_agent` for compact typed Markdown and actionable JSON diagnostics. Version 6.0 adds strict preview budgets, explicit completeness metadata, total deadlines, cancellation, and a reusable agent skill, with zero required Python dependencies.
+- **Zero required Python dependencies.** One precompiled wheel. No Rust toolchain or cloud SDK needed.
+- **Fast Rust core.** Concurrent chunk downloads, lazy Arrow decoding, and streaming NDJSON, with result order preserved.
+- **Agent mode, new in 6.0.** A CLI and Python API that return compact typed Markdown, explicit truncation, and actionable JSON errors. Formatting stays in Rust.
 
-The Python `Cursor` also offers familiar [`databricks-sql-python`](https://github.com/databricks/databricks-sql-python)-style methods (`execute`, `fetchone`/`fetchmany`/`fetchall`, `fetchall_arrow`/`fetchmany_arrow`). Connect over Thrift by default (`protocol="thrift"`) or the REST Statement Execution API (`protocol="sea"`).
-
-- **Rust core.** Statement submit/poll, bounded-concurrency chunk fetch, the reorder buffer, and Arrow-IPC decode all run in a [PyO3](https://pyo3.rs)/[arrow-rs](https://github.com/apache/arrow-rs) extension bundled in this same package -- 1.6x-2.5x faster than a pure-Python/asyncio client on a multi-chunk result, scaling further with chunk count and concurrency where asyncio+GIL plateaus.
-- **Agent CLI and Python API.** Render directly from Arrow to bounded typed Markdown in Rust. Row, output-byte, cell and deadline budgets make previews predictable; the footer identifies incomplete or clipped results, and JSON errors retain the database's suggestions with a recovery hint.
-- **Thrift by default, SEA/REST as a fully-supported alternative** (`protocol="sea"` on `connect()`/`DatabricksClient(...)`). Thrift speaks the same HiveServer2-compatible protocol `databricks-sql-connector` uses by default -- measurably faster for *small* results (a statement's data can come back inline in the very same call that submits it, instead of SEA's separate poll-then-fetch round trip), and on par with SEA for a large, multi-chunk result too (its chunk downloads fan out concurrently across the whole result, same as SEA's own bounded-concurrency fetch, not serialized batch by batch) -- never slower than SEA on any query shape tested. Confirmed against a real production warehouse; see `AGENTS.md`'s design-invariant entry for the benchmarking history behind the switch.
-- **Compressed cloud-fetch transport by default.** Every statement requests LZ4-compressed chunk downloads (same default as the official `databricks-sql-connector`) and decompresses them in Rust before you ever see the bytes -- less data over the wire, which matters more than local decode speed for a large result. Measured ~2x faster chunk-fetch time against a real 120-column/100k-row table. Disable per-client with `compress_results=False` (`connect()`/`DatabricksClient(...)`) if your link to the warehouse is fast enough that decompression CPU time stops paying for itself.
-- **Zero required dependencies.** `pip install arrowbricks` and go.
-- **Bring-your-own-auth** -- a static token or your own token-refresh callable. No cloud-SDK dependency baked in.
-- **Result order preserved** even though chunks can complete out of order over the network.
-- **Lazy fetching** -- chunks are pulled only as `fetchone`/`fetchmany`/`fetchall` actually need them, not all upfront.
-- **Heartbeats** between slow chunks (`execute_streamed`/`stream_query_json`), so a caller streaming this over e.g. SSE never goes silent during a cold warehouse start.
+Use Thrift by default or the Statement Execution API with `protocol="sea"`.
+Bring a token or your own token-refresh callable.
 
 ## Install
 
@@ -25,474 +18,94 @@ The Python `Cursor` also offers familiar [`databricks-sql-python`](https://githu
 pip install arrowbricks
 ```
 
-Ships as precompiled platform wheels (Linux/macOS/Windows) -- no Rust toolchain needed, and nothing else to install for most of the API. Row-tuple fetches (`fetchone`/`fetchmany`/`fetchall`) need one optional extra: `pip install arrowbricks[arro3]` -- see [Arrow vs. row-tuple fetches](#arrow-vs-row-tuple-fetches) below.
+Wheels cover Linux, macOS, and Windows; Python 3.11+.
+Arrow, NDJSON, and agent mode work without extras. Python row tuples need
+`pip install 'arrowbricks[arro3]'`.
 
-## CLI quickstart (6.0)
+## Query from an agent or terminal
 
 ```bash
-pip install 'arrowbricks>=6.0'
 export DATABRICKS_HOST='your-workspace.azuredatabricks.net'
 export DATABRICKS_WAREHOUSE_ID='your-warehouse-id'
 export DATABRICKS_TOKEN='your-access-token'
 
 arrowbricks -c 'SELECT 1 AS answer'
-# | answer (Int32) |
-# | --- |
-# | 1 |
-#
-# rows_shown=1; complete=true; total_rows=1
+```
 
-arrowbricks --agent -c 'SELECT * FROM your_catalog.your_schema.your_table' --max-rows 20 --max-bytes 4000
-arrowbricks -agent --file query.sql
+```markdown
+| answer (Int32) |
+| --- |
+| 1 |
+
+rows_shown=1; complete=true; total_rows=1
+```
+
+Agent mode is the CLI default. SQL files and piped stdin work too:
+
+```bash
+arrowbricks --file query.sql --max-rows 20 --max-bytes 4000
 printf 'SELECT 1 AS answer' | arrowbricks
-python -m arrowbricks --protocol sea --command 'SELECT 1 AS answer'
 ```
 
-Agent output is the default; `--agent` and `-agent` are optional aliases.
-`-c`/`--sql`/`--command` sends SQL unchanged. `-f`/`--file` reads a UTF-8 file
-(or `-` for stdin); without either option, piped stdin supplies SQL. Interactive
-invocations without SQL return a configuration error. Flags `--host`,
-`--warehouse-id` and `--token` override the corresponding environment variables;
-`--catalog` and `--schema` set the query namespace.
+Previews have row, byte, cell, and deadline limits. The footer tells you when
+results are incomplete. Query errors go to stderr as JSON, preserving the
+warehouse's diagnostic and suggestions with a recovery hint; the CLI exits 1.
+Preview limits bound output and fetching, not warehouse scan cost.
 
-The default limits are `--max-rows 1000`, `--max-bytes 10000`,
-`--max-cell-chars 500` and `--total-timeout-s 60` (`--timeout` is an alias).
-Clipped previews have `complete=false`; they remain successful queries with
-exit code 0. These limits bound the returned preview and stop further fetching
-once full; they do not limit the warehouse's scan cost. See [Agent results](#agent-results) for completeness and cancellation.
-
-Success writes only Markdown to stdout, so it can be piped directly into an
-agent. Query failures write JSON to stderr and exit 1; invalid configuration
-writes JSON to stderr and exits 2. Help uses the usual `--help` output and exits
-0. Ctrl-C interrupts the query, writes JSON to stderr and exits 130.
-Credentials are never included in help output. For example:
-
-```bash
-arrowbricks -c 'SELEC 1' 2>error.json
-# exit 1; error.json contains category, original message and next_step
-```
-
-Existing Python cursor and streaming APIs remain available in 6.0. `query_agent`
-is an explicit Python API; it does not change the output of existing methods.
-
-## Agent skill
-
-The reusable [Arrowbricks skill](skills/arrowbricks/SKILL.md) teaches agents the
-CLI and Python API, secure environment authentication, preview completeness,
-JSON recovery and the limits of scan/cost information. The skill is distributed
-in this repository; installing the Python package supplies the CLI and API.
-It targets 6.0+: for an unreleased checkout, install its built wheel; the
-`pip install` examples apply once a compatible release is published.
-
-From a repository checkout, copy the skill folder into your agent's skill
-directory. For project discovery with Codex:
-
-```bash
-mkdir -p .agents/skills
-cp -R skills/arrowbricks .agents/skills/arrowbricks
-```
-
-For Claude Code, use `.claude/skills/arrowbricks` instead; for a personal
-installation, use your agent's corresponding user skill directory. Keep
-`SKILL.md` inside the `arrowbricks` folder. After your agent reloads its skills,
-invoke `$arrowbricks` in Codex or `/arrowbricks` in Claude Code, or ask it to use
-Arrowbricks for a Databricks SQL preview. Credentials remain in your environment
-or credential provider, separate from the skill.
-
-## Quickstart
-
-```python
-import asyncio
-from arrowbricks import connect
-
-
-async def main():
-    conn = connect(
-        host="adb-1234567890.1.azuredatabricks.net",
-        warehouse_id="abcd1234efgh5678",
-        token="dapi...",  # or token_provider=... -- see Auth below
-    )
-    cursor = conn.cursor()
-
-    await cursor.execute("SELECT * FROM my_catalog.my_schema.my_table LIMIT 100")
-    async for row in cursor:
-        print(row)
-
-    await cursor.execute("SELECT * FROM my_catalog.my_schema.my_table LIMIT 100")
-    table = await cursor.fetchall_arrow()  # an Arrow table (arro3/pyarrow/DuckDB-compatible)
-
-
-asyncio.run(main())
-```
-
-For streaming NDJSON (e.g. a FastAPI SSE endpoint, first row out as soon as its chunk arrives):
-
-```python
-from arrowbricks import HEARTBEAT, DatabricksClient
-
-client = DatabricksClient(host=..., warehouse_id=..., token=...)
-
-async for item in client.stream_query_json("SELECT * FROM my_catalog.my_schema.big_table"):
-    if item is HEARTBEAT:
-        continue  # forward as an SSE keep-alive comment, e.g.
-    print(item)  # one ready-to-send JSON string per row
-```
-
-See [`examples/basic.py`](examples/basic.py) for a runnable version,
-[`examples/cursor_paging.py`](examples/cursor_paging.py) for paging a large
-result with `fetchmany`/`fetchmany_arrow` without buffering it all upfront,
-[`examples/azure_auth.py`](examples/azure_auth.py) for a caching
-`token_provider` built on Azure AD (`DefaultAzureCredential`, needs
-`azure-identity`), or [`examples/oauth_m2m_auth.py`](examples/oauth_m2m_auth.py)
-for the same idea using Databricks' own OAuth machine-to-machine
-client-credentials flow instead -- like `databricks-sql-connector`'s
-`auth_type="databricks-oauth"`, but stdlib-only (`urllib.request`), no
-extra dependency.
-
-## Agent results
-
-`query_agent` returns one compact string: a typed Markdown table on success,
-or JSON with `category`, `message` and `next_step` on database or transport
-failure. It formats Arrow directly in Rust and needs no optional Python Arrow
-packages. Both `thrift` (default) and `sea` are supported.
+For Python agents:
 
 ```python
 from arrowbricks import DatabricksClient
 
 async with DatabricksClient(host=..., warehouse_id=..., token=...) as client:
-    result = await client.query_agent(
-        "SELECT id, name FROM my_catalog.my_schema.my_table ORDER BY id",
-        max_rows=1000,
-        max_bytes=10000,
-        max_cell_chars=500,
-        total_timeout_s=60.0,
-        # catalog=None, schema=None, params=None
-    )
-    print(result)
+    text = await client.query_agent("SELECT 1 AS answer", max_bytes=4000)
+    print(text)  # Markdown on success; JSON on query failure
 ```
 
-Column headers include Arrow types. Strings are quoted, so SQL `NULL` differs
-from the string `"NULL"`; Markdown, HTML, pipes and line breaks are escaped.
-Clipped cells carry `…[truncated]`. The footer gives `rows_shown`, `complete`,
-and an exact `total_rows` only when the result is exhausted. Row, byte or cell
-clipping makes `complete=false`; an unexhausted result reports only a fetched
-lower bound. Every returned string, including its header and footer, fits
-`max_bytes` in UTF-8. Row and cell limits must be positive, with `max_bytes >= 256`; the timeout
-must be finite and non-negative. Invalid budgets raise before SQL submission.
+Give your agent the reusable [Arrowbricks skill](skills/arrowbricks/SKILL.md).
+See [CLI options and skill installation](docs/usage.md#cli-quickstart-60) and
+[agent budgets, completeness, and cancellation](docs/usage.md#agent-results).
 
-The single timeout covers submission, polling, downloads and formatting.
-Stopping requests best-effort server cancellation; cancelling the Python task
-preserves `asyncio.CancelledError`. A failure after some rows were fetched
-returns an error JSON string instead of claiming a successful partial result.
-Database diagnostics and suggestions are preserved; corrected SQL is never
-executed automatically. Pass named parameters with `params`, using the same
-list of `{"name": ..., "value": ..., "type": ...}` objects as the other APIs.
+## Query from an application
 
-These budgets bound the returned preview, not the warehouse scan or its cost.
-Pre-execution cost estimates and percentage progress are unavailable. This
-method does not hash the full result, fetch its last rows or offer persistent
-result paging. Use the cursor API when you need to consume a larger result.
-
-[`examples/agent_mode.py`](examples/agent_mode.py) is runnable with
-`DATABRICKS_HOST`, `DATABRICKS_WAREHOUSE_ID` and `DATABRICKS_TOKEN`:
-
-```bash
-python examples/agent_mode.py --protocol sea --sql 'SELECT 1 AS answer'
-```
-
-The example delegates to the installed CLI: Markdown goes to stdout and error
-JSON goes to stderr. Its exit codes are 0 for Markdown, 1 for a query error and
-2 for invalid configuration. A clipped Markdown preview is still a successful query; inspect
-its completeness footer before using it as a complete dataset.
-
-## FastAPI SSE example
-
-`stream_query_json` is the full-speed way to serve a query over HTTP: the first row reaches the client after roughly one chunk's fetch/decode time, not the whole query's -- the Rust core is fetching, decoding, and reordering chunks concurrently the entire time, and the `HEARTBEAT`s keep the connection alive through a slow cold warehouse start instead of the client just seeing dead air:
+The async cursor offers familiar `execute` and `fetch*` methods.
+Arrow results work directly with DuckDB, PyArrow, and Polars:
 
 ```python
-import os
-from collections.abc import AsyncIterator
-
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-
-from arrowbricks import HEARTBEAT, DatabricksClient
-
-app = FastAPI()
-client = DatabricksClient(
-    host=os.environ["DATABRICKS_HOST"],
-    warehouse_id=os.environ["DATABRICKS_WAREHOUSE_ID"],
-    token=os.environ["DATABRICKS_TOKEN"],
-)
-
-
-async def _sse(sql: str) -> AsyncIterator[str]:
-    async for item in client.stream_query_json(sql, total_timeout_s=300):
-        if item is HEARTBEAT:
-            yield ": keep-alive\n\n"  # SSE comment line -- clients ignore it, it just keeps the connection open
-        else:
-            yield f"data: {item}\n\n"
-
-
-@app.get("/query")
-async def query(sql: str) -> StreamingResponse:
-    return StreamingResponse(_sse(sql), media_type="text/event-stream")
-```
-
-```bash
-uvicorn app:app --reload
-curl -N "http://localhost:8000/query?sql=SELECT+*+FROM+range(1000000)"
-```
-
-This example takes `sql` straight from the request for brevity -- arrowbricks does no SQL validation by design, so a real deployment must validate/allowlist it (or accept fixed query names + params) before exposing a route like this publicly. See [`examples/fastapi_sse.py`](examples/fastapi_sse.py) for the runnable version, [`examples/fastapi_sse_pivot.py`](examples/fastapi_sse_pivot.py) for the same over a buffered `Cursor.fetchall_streamed` result with one combined heartbeat/timeout budget across both the wait and the download, or [`examples/fastapi_sse_validated.py`](examples/fastapi_sse_validated.py) for one way to do that validation, using [sqlglot](https://github.com/tobymao/sqlglot) to require a single read-only `SELECT` against an allowlist of fully-qualified tables.
-
-## Auth
-
-`connect`/`DatabricksClient` take either:
-
-- `token: str` -- a static personal access token or pre-issued OAuth token, or
-- `token_provider` -- a callable (sync or async) returning a token string, called on every request.
-
-arrowbricks has no opinion on *how* you get a token and no cloud-SDK dependency of its own. If your provider is expensive to call, cache/refresh inside it -- arrowbricks does no caching on your behalf.
-
-A sync provider is called on one of arrowbricks' own worker threads. An async provider's coroutine runs on the event loop of the code that started the call (the `await cursor.execute(...)`, `async for ... in client.stream_query_json(...)`, and so on), with that code's `contextvars`, even when the token is needed by a background chunk download. One client can therefore be shared across event loops: successive `asyncio.run()` calls, or one loop per thread at the same time.
-
-```python
-conn = connect(host=..., warehouse_id=..., token_provider=my_token_provider)
-```
-
-## Observability
-
-Pass `on_event` to `connect`/`DatabricksClient` to get a `QueryStats` snapshot once per query, at completion (success, cancelled, timed out, or errored):
-
-```python
-def log_query(stats):
-    print(
-        f"{stats.statement_id}: {stats.outcome} in {stats.fetch_s:.2f}s, {stats.bytes_downloaded} bytes, {stats.retry_count} retries"
-    )
-
-
-conn = connect(host=..., warehouse_id=..., token=..., on_event=log_query)
-```
-
-`on_event` is sync or async, same as `token_provider`, and applies to every query run through that client (not passed per-call). It's strictly fire-and-forget: any exception it raises is caught and swallowed on the Rust side, never surfaced to your query, and dispatching it never blocks or measurably slows the actual fetch -- a slow or broken logging/metrics callback can't make your queries slower or fail them. `QueryStats` fields: `statement_id: str`, `protocol: "thrift" | "sea"`, `warehouse_wait_s: float` (0.0 if the client already knew the warehouse was running), `submit_to_ready_s: float` (statement submit -> ready to fetch), `fetch_s: float` (download + decode), `num_chunks: int`, `bytes_downloaded: int`, `retry_count: int`, `concurrency_used: int`, and `outcome: "success" | "cancelled" | "timeout" | "error"`.
-
-`on_event` fires once the fetch of a given query actually completes (or is abandoned) -- a `Cursor` whose result is never fully drained (e.g. only a partial `fetchmany()`, then abandoned) never fires one, same category as this package's existing documented gap around GC-based cleanup.
-
-## Cancellation
-
-When `total_timeout_s` elapses or your code cancels the surrounding coroutine (`task.cancel()`/`asyncio.wait_for`) while a query is in flight, arrowbricks fires a best-effort server-side cancel in the background (Thrift's `CancelOperation`, or SEA's `POST .../cancel`) so Databricks stops running the query instead of finishing it for nobody. This is fire-and-forget: the `QueryTimeout`/cancellation still reaches you immediately, and the cancel call's own result (success or failure) is never surfaced or awaited.
-
-This covers both phases of a query: the submit/poll wait while the statement is still running (`Cursor.execute()`/`execute_streamed()`, and the start of `client.stream_query_json(...)`), and the chunk download afterwards (`Cursor.fetchall_streamed()`/`fetchall_arrow_streamed()`, the rest of `stream_query_json`). `stream_query_json`'s `total_timeout_s` is one budget across both phases. On `protocol="sea"` there is one short blind spot: the submit request itself can wait server-side for up to `wait_timeout` (default 30s) before Databricks returns a statement id, and a query abandoned inside that window can't be cancelled.
-
-Abandoning a result also stops the client-side work right away, for every fetch method (plain `fetchall_arrow()`/`fetchmany()` too): cancelling the task, closing a `stream_query_json` iterator early (what a web framework does when the HTTP client disconnects mid-response), or dropping a `Cursor` before its result is drained aborts the chunk downloads in flight, starts no new ones, and on Thrift closes the operation (`CloseOperation`). Nothing to opt into: cancel the task (or let your framework close the generator) and arrowbricks cleans up. Cancelling a FastAPI handler on client disconnect therefore stops the warehouse query (if it is still running) and the downloads (if it is not).
-
-## Errors
-
-Every exception arrowbricks raises itself is an `ArrowbricksError` -- a `RuntimeError` subclass, so an `except RuntimeError` written before this hierarchy existed keeps catching everything unchanged. Three subclasses split by what actually changes what your code should do next:
-
-- `TransientError` -- a network blip, connection reset, or 5xx that survived every internal retry (`retry_attempts`, exponential backoff up to `retry_max_wait_s` -- see below) before ever reaching you. Back off further and try again later; retrying immediately just repeats what already failed.
-- `AuthError` -- HTTP 401/403, even after every internal retry re-fetched a token from your `token_provider`, *or* your `token_provider` itself raised (e.g. its own OAuth refresh call came back unauthorized). Treat the credential itself as bad/expired, not a transient blip.
-- `StatementError` -- the SQL statement itself failed or was canceled server-side (bad SQL, a permissions error, a warehouse-side query failure). Retrying the identical statement will fail identically; this isn't a transport problem.
-
-Anything else (a generic non-auth/non-statement HTTP error, an internal parse/decode failure) raises the plain `ArrowbricksError` base.
-
-```python
-from arrowbricks import ArrowbricksError, AuthError, StatementError, TransientError
-
-try:
-    await cursor.execute(sql)
-except AuthError:
-    refresh_credentials()
-except StatementError:
-    raise  # bad SQL -- don't retry
-except TransientError:
-    await asyncio.sleep(5)
-    await cursor.execute(sql)  # safe to retry
-except ArrowbricksError:
-    raise
-```
-
-`QueryTimeout` (`total_timeout_s` exceeded -- see Cancellation above) also subclasses `ArrowbricksError`, so `except ArrowbricksError` is a genuine catch-all for every exception this package raises itself.
-
-## API
-
-- `connect(host, warehouse_id, *, token=None, token_provider=None, ...) -> Connection`
-- `Connection.cursor() -> Cursor`
-- `Connection.client -> DatabricksClient` -- the same client `cursor()` uses, for lower-level access (e.g. `stream_query_json`, `upload_volume_file`).
-- `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None, prefer_inline=False) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`. `prefer_inline=True` tries fetching a small result (well under Databricks' 25 MiB inline cap) in the same round trip as the submission itself, skipping the chunk-fetch entirely. If the result turns out too big, the statement fails server-side before ever really executing, and arrowbricks transparently re-runs it the normal way -- safe to double-submit, since nothing committed the first time; a caller who sets `prefer_inline` without actually expecting a small result just pays for the query twice in this case. If instead the result comes back but has a column type this can't convert (nested ARRAY/MAP/STRUCT, VARIANT), the statement already *succeeded* -- arrowbricks does **not** silently re-run it (that could duplicate a write for non-idempotent SQL); it raises `ArrowbricksError` naming the statement instead, so you know it ran and can decide yourself whether re-running is safe. Leave `prefer_inline` off unless you know the result is small, and unless you know the query is a `SELECT` (or otherwise idempotent) if you want the byte-limit fallback's automatic retry to be safe too.
-- `Cursor.execute_streamed(...)` -- same args, but an async generator yielding `HEARTBEAT` while waiting on a slow cold start, then the ready `Cursor` -- for bridging e.g. an SSE connection. Its timeout/heartbeats stop the moment the statement is ready, *before* any chunk has been downloaded -- see `fetchall_streamed` below for the download phase itself.
-- `Cursor.fetchone() -> tuple | None`, `Cursor.fetchmany(size) -> list[tuple]`, `Cursor.fetchall() -> list[tuple]`, and iterating a `Cursor` directly -- row tuples; needs the `arro3` extra.
-- `Cursor.fetchmany_arrow(size) -> Table`, `Cursor.fetchall_arrow() -> Table` -- an Arrow table (implements `__arrow_c_stream__`, so arro3/pyarrow/DuckDB can all consume it directly, zero-copy).
-- `Cursor.fetchall_streamed(*, total_timeout_s=None)` / `Cursor.fetchall_arrow_streamed(*, total_timeout_s=None)` -- like `fetchall()`/`fetchall_arrow()`, but yield `HEARTBEAT` while pulling chunks instead of blocking silently, then the final rows/Table -- for a caller downloading a large result over SSE who needs heartbeats (and a timeout) through the *download*, not just the initial wait. Compose with `execute_streamed` and a shared deadline if you want one combined budget across both phases (see `examples/fastapi_sse_pivot.py`).
-- `Cursor.description` -- DB-API-style `[(name, type_name, None, None, None, None, None), ...]` after `execute()`.
-- `client.stream_query_json(sql, **kwargs)` (or the equivalent free function `stream_query_json(client, sql, **kwargs)`) -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives. Timestamps come out as full ISO-8601, every column key is always present (`"col":null` for a null value, never an omitted key). JSON has no literal for NaN/Infinity/-Infinity, so those come back as `"col":null` by default -- pass `non_finite_floats="string"` to get `"col":"NaN"`/`"col":"Infinity"`/`"col":"-Infinity"` instead if you need to tell them apart from a real NULL.
-- `DatabricksClient(host, warehouse_id, *, token=None, token_provider=None, protocol="thrift", on_event=None, retry_attempts=6, retry_max_wait_s=20.0, ...)` -- the lower-level client `Connection` wraps. `client.upload_volume_file(volume_path, data)`/`client.delete_volume_file(volume_path)` for the Files API. Pass `protocol="sea"` to opt into the REST Statement Execution API backend instead of the default Thrift one (see above) -- `prefer_inline` (SEA-only) has no effect under `protocol="thrift"` (silent no-op, not an error), since Thrift's own inline-result mechanism already covers that case. `on_event` -- see Observability below. `retry_attempts`/`retry_max_wait_s` tune the retry policy behind `TransientError`/`AuthError` (see Errors above) -- total attempts (the first try plus `retry_attempts - 1` retries) and the exponential-backoff ceiling in seconds, for every retryable request this client makes (statement submit/poll, chunk-index resolution, chunk download, volume file ops). `retry_attempts` must be at least 1 (raises `ValueError` otherwise).
-- `write_ipc_stream(table, buf)` -- writes any Arrow-C-Data-Interface-compatible object as an uncompressed Arrow-IPC stream (see below).
-- `ReplayableArrowChunk(data: bytes, chunk_index, declared_row_count=None)` -- wraps raw Arrow-IPC stream bytes (e.g. previously downloaded and stored) so they can be read more than once via `__arrow_c_stream__` (a schema peek, then the actual scan -- DuckDB's registration path does this), and `.to_table()` for a one-shot parse. No extra dependency needed.
-
-`Cursor.execute`/`execute_streamed`/`stream_query_json` all accept `catalog`, `schema`, `row_limit`, `offset`, and `total_timeout_s`.
-
-## Arrow vs. row-tuple fetches
-
-From 4.0, Arrow fetches and `ReplayableArrowChunk.to_table()` return
-`arrowbricks._core.Table`. It exposes `num_rows`, `num_columns`,
-`column_names`, `len(table)` and the Arrow capsule interfaces. For methods
-such as `.column()`, `.schema` or `.to_batches()`, first convert with
-`arro3.core.Table.from_arrow(table)`, `pyarrow.table(table)` or
-`polars.from_arrow(table)`. DuckDB can consume it directly.
-`write_ipc_stream` requires `__arrow_c_stream__`; wrap an array-only producer
-in a table before passing it in.
-
-Everything above works with zero dependencies installed *except* row-tuple fetches. `fetchall_arrow`/`fetchmany_arrow` return an Arrow table straight from the Rust core -- the faster path if your code can consume Arrow directly (DuckDB, pyarrow, polars, a Parquet writer, ...):
-
-```python
-import duckdb
-
-table = await cursor.fetchall_arrow()
-duckdb.sql("SELECT count(*) FROM table").show()  # DuckDB reads it zero-copy
-```
-
-`fetchone`/`fetchmany`/`fetchall` (and iterating a `Cursor` directly) materialize actual Python tuples instead -- `("id", "label")`-style rows you can index into, print, or pass to code that doesn't know about Arrow at all. That conversion needs `arro3-core` (`pip install arrowbricks[arro3]`):
-
-```python
-await cursor.execute("SELECT id, label FROM my_catalog.my_schema.my_table")
-async for row in cursor:  # or: rows = await cursor.fetchall()
-    print(row[0], row[1])
-```
-
-Calling a row-tuple method without `arro3-core` installed raises a `ModuleNotFoundError` naming the exact install command, rather than failing silently or with a confusing traceback.
-
-## Using with DuckDB
-
-Anything arrowbricks hands back as Arrow (`fetchall_arrow`/`fetchmany_arrow`, `ReplayableArrowChunk`) implements `__arrow_c_stream__`, so DuckDB can register and query it directly -- zero-copy, no intermediate materialization, and no `arro3-core`/`pyarrow` install needed on top:
-
-```python
-import duckdb
 from arrowbricks import connect
 
-conn = connect(host=..., warehouse_id=..., token=...)
-cursor = conn.cursor()
-await cursor.execute("SELECT * FROM my_catalog.my_schema.my_table LIMIT 100")
-table = await cursor.fetchall_arrow()
-
-con = duckdb.connect()
-con.register("my_table", table)
-con.sql("SELECT count(*) FROM my_table").show()
+async with connect(host=..., warehouse_id=..., token=...) as conn:
+    cursor = conn.cursor()
+    await cursor.execute("SELECT * FROM my_catalog.my_schema.my_table LIMIT 100")
+    table = await cursor.fetchall_arrow()
 ```
 
-`ReplayableArrowChunk` works the same way for Arrow-IPC bytes you fetched and stored earlier (e.g. a raw chunk's bytes, cached in Redis/a file/wherever) -- DuckDB's registration path calls `__arrow_c_stream__` twice (a schema peek, then the actual scan), which is exactly what `ReplayableArrowChunk` exists to support:
+Or consume ready-to-send NDJSON without building Python rows:
 
 ```python
-from arrowbricks import ReplayableArrowChunk
+from arrowbricks import HEARTBEAT, DatabricksClient
 
-chunk = ReplayableArrowChunk(stored_bytes, chunk_index=0)
-con.register("my_table", chunk)
-con.sql("SELECT * FROM my_table WHERE id = 42").show()
+async with DatabricksClient(host=..., warehouse_id=..., token=...) as client:
+    async for item in client.stream_query_json("SELECT * FROM range(100)"):
+        if item is not HEARTBEAT:
+            print(item)
 ```
 
-## Rust core
+## Performance
 
-`rust/arrowbricks_core` is the crate implementing the hot path above, built into this same `arrowbricks` wheel as a compiled submodule -- not a separate PyPI package. See [its own README](rust/arrowbricks_core/README.md) for the crate-level design, plus standalone DuckDB and FastAPI SSE examples against the compiled extension directly.
+The query and formatting work runs in Rust. Agent previews render directly from
+Arrow, avoiding intermediate Python rows or JSON. In a real warehouse test,
+a 100-row preview used **44% fewer bytes and 24% fewer tokens** than NDJSON.
+See [agent measurements and methodology](docs/research/agent-rendering.md) and
+[client benchmarks](docs/benchmarks.md) for workloads, comparisons, and limits.
 
-## Why not `databricks-sql-connector`?
+## Learn more
 
-The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility. If you just want a query result as Arrow/JSON in your own async app, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies. arrowbricks speaks the same wire protocols (Thrift by default, or the REST Statement Execution API via `protocol="sea"`) with a hand-rolled Rust implementation instead, and zero required dependencies of its own. The `Cursor` API is deliberately shaped like the official driver's so switching between them is mostly a constructor change, but arrowbricks is async throughout (`execute`, `fetchone`, etc. are all coroutines) -- there's no sync escape hatch.
-
-## Benchmarks
-
-Measured against a real Databricks SQL warehouse (Azure Databricks, `2X-Small` **Pro** serverless warehouse, Photon on, 1-4 auto-scaling clusters -- the smallest/cheapest warehouse tier, deliberately: a bigger warehouse would narrow the gap by making the query itself slower and the client-side overhead this compares proportionally smaller). Query: `SELECT id, id * 2 AS doubled, CAST(id AS STRING) AS label FROM range(200000)` (200k rows, 3 columns), 3 timed runs after 1 discarded warm-up run, one connection reused per library:
-
-| | avg | stdev | range |
-|---|---|---|---|
-| `databricks-sql-connector` | 0.88s | 0.06s | 0.83s - 0.95s |
-| arrowbricks | 0.50s | 0.02s | 0.48s - 0.52s |
-
-These historical latency measurements compare the connector's `fetchall()`
-(Python rows) with arrowbricks' `fetchall_arrow()` (Arrow), which do different
-amounts of materialization. The previously published 16 MB memory figures
-were invalid: the script sampled peak RSS before importing the libraries or
-running queries. It now measures after the workload; rerun it for actual
-peak memory on your machine. The installed-footprint measurements were:
-
-| | installed size (package + all required deps) |
-|---|---|
-| `databricks-sql-connector` | 71 MB (pulls in `pandas`, `numpy`, `thrift`, `oauthlib`, `lz4`, `requests`, `urllib3`, `openpyxl`, ... as hard dependencies -- `pandas`+`numpy` alone are 61 MB of that) |
-| arrowbricks | 9 MB (zero required runtime dependencies -- the whole thing is one compiled Rust extension, built with `opt-level="s"`, `ring` instead of the heavier default TLS crypto backend, and no unused HTTP/2 support -- see `rust/arrowbricks_core/Cargo.toml`'s own `[profile.release]` and `rustls`/`hyper-rustls` comments for the measurements behind those choices) |
-
-Run it yourself: [`examples/benchmark_vs_connector.py`](examples/benchmark_vs_connector.py) (needs both packages installed: `pip install arrowbricks databricks-sql-connector`). Reads `DATABRICKS_HOST`/`DATABRICKS_WAREHOUSE_ID`/`DATABRICKS_TOKEN` from the environment or a `.env` file (never commit one with a real token in it) and runs each library in its own subprocess so peak memory reflects that library alone:
-
-```bash
-DATABRICKS_HOST=adb-1234567890.1.azuredatabricks.net \
-DATABRICKS_WAREHOUSE_ID=abcd1234efgh5678 \
-DATABRICKS_TOKEN=dapiXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
-python examples/benchmark_vs_connector.py
-```
-
-For comparing arrowbricks versions with identical APIs, use
-[`examples/benchmark_versions.py`](examples/benchmark_versions.py). It keeps
-one connection per version, discards warm-ups, alternates execution order,
-passes concurrency explicitly, and checks row counts. Add `--verify-ipc`
-(requires `arro3-core`) to compare serialized Arrow results in memory after
-timing. Results must have stable values, schema metadata, row order, and batch boundaries;
-verification contributes to peak process memory, and checksums are not printed. See
-[`benchmarks/2026-09-06.md`](benchmarks/2026-09-06.md) for replay/cache measurements
-and [`benchmarks/2026-09-06-downloads.md`](benchmarks/2026-09-06-downloads.md)
-for the subsequent cloud-fetch scheduling measurements and limits.
-
-Follow-up experiments cover [spare request slots](benchmarks/2026-09-06-spare-slots.md),
-[concurrent replay and NDJSON encoding](benchmarks/2026-09-06-lowlevel.md),
-and the rejected [LZ4 capacity](benchmarks/2026-09-06-lz4-capacity.md) and
-[direct-fill buffer](benchmarks/2026-09-06-direct-fill.md) changes.
-
-Cached IPC replay can be measured without a warehouse:
-
-```bash
-uv run python examples/benchmark_replay.py --rows 200000 --columns 16 --repeats 8
-```
-
-Replays now share immutable input bytes across decoded tables, reducing
-repeated copies and memory use. Arrow may still copy misaligned fixed-width
-buffers or decompress IPC-compressed bodies. Keeping a small slice of a
-decoded array can retain the full source allocation until that slice is released.
-Decoding releases the Python interpreter lock, so independent replay calls
-can run concurrently on separate Python threads.
-
-`BENCHMARK_SQL` overrides the query, `BENCHMARK_RUNS` (default 3) controls how many timed runs to average.
-
-## A note on Arrow IPC compression
-
-`write_ipc_stream` (and everything in this package that serializes Arrow-IPC bytes) always writes **uncompressed** bodies. A compressed body (arro3's own default is `compression="LZ4"`) is transparently decompressed by some Arrow readers (e.g. DuckDB's) but not necessarily by every other Arrow IPC reader -- notably, `duckdb-wasm`'s browser-side decoder silently fails to parse LZ4-compressed bodies. Since arrowbricks' bytes might end up read by anything, plain uncompressed is the safe default.
-
-IPC output is written incrementally, with each Python `write()` call capped at
-1 MiB. Short writes are handled; the destination remains open and is not flushed
-by arrowbricks. A write failure can leave partial output, so discard it before retrying.
-
-## Real warehouse verification
-
-The opt-in live suite generates synthetic data with read-only SQL. It covers
-Thrift and SEA, compression enabled and disabled, Arrow paging, Python values,
-nested NDJSON, empty schemas, concurrent queries, errors, and timeout recovery.
-Set `DATABRICKS_HOST`, `DATABRICKS_WAREHOUSE_ID`, and `DATABRICKS_TOKEN` in the
-environment or the repository's ignored `.env`, then run:
-
-```bash
-ARROWBRICKS_LIVE=1 uv run pytest tests/live -q
-```
-
-To compare two package directories on the same warehouse, use
-`examples/benchmark_versions.py --baseline /path/to/old --candidate /path/to/new`.
-`--mode` selects `arrow`, `paging`, `rows`, `ndjson`, or `ipc`.
-The benchmark alternates execution order, discards warm-ups, checks row counts,
-and measures each version in its own process. `--verify-ipc` additionally compares
-Arrow content for `arrow`/`ipc` modes; use an ordered query with stable results.
-Samples also include process CPU time and the core's warehouse-wait,
-submit-to-ready, and fetch timings. These help distinguish local processing
-overhead from warehouse and download variability; core fetch time is not pure
-network time and excludes time spent consuming rows in Python.
-Peak RSS includes retained allocator memory and is specific to the host platform.
-`--transform-only` isolates row conversion or IPC serialization after downloading
-real data (`--mode rows` or `--mode ipc`), to distinguish CPU work from network noise.
+- [Usage and API reference](docs/usage.md): authentication, errors, cancellation, observability, and Arrow interop.
+- [Runnable examples](examples/): cursors, agents, OAuth, and FastAPI streaming.
+- [Rust core](rust/arrowbricks_core/README.md): implementation and native APIs.
+- [Real warehouse verification](docs/usage.md#real-warehouse-verification).
+- [Changelog](CHANGELOG.md).
 
 ## License
 

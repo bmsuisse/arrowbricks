@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "arrowbricks_core"
-version = "6.0.0"
+version = "6.0.1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
