@@ -1,4 +1,9 @@
-from examples.benchmark_vs_connector import load_dotenv
+import runpy
+from pathlib import Path
+
+load_dotenv = runpy.run_path(str(Path(__file__).resolve().parents[1] / "examples" / "benchmark_vs_connector.py"))[
+    "load_dotenv"
+]
 
 
 def test_live_example_env_file_is_explicit_and_keeps_existing_values(tmp_path, monkeypatch):
