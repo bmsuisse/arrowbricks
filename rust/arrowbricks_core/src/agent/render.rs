@@ -373,9 +373,17 @@ impl Write for EscapedWriter<'_> {
                     self.raw(ch.encode_utf8(&mut [0; 4]))?;
                 }
                 c if c.is_control() => {
-                    let mut escaped = String::new();
-                    write!(escaped, "\\u{:04x}", c as u32)?;
-                    self.raw(&escaped)?;
+                    let mut escaped = [0_u8; 10];
+                    let mut at = escaped.len();
+                    let mut code = c as u32;
+                    while code != 0 || escaped.len() - at < 4 {
+                        at -= 1;
+                        escaped[at] = b"0123456789abcdef"[(code & 15) as usize];
+                        code >>= 4;
+                    }
+                    at -= 2;
+                    escaped[at..at + 2].copy_from_slice(b"\\u");
+                    self.raw(std::str::from_utf8(&escaped[at..]).unwrap())?;
                 }
                 c => self.raw(c.encode_utf8(&mut [0; 4]))?,
             }
@@ -421,6 +429,26 @@ mod tests {
             out.contains("total_rows=3") && out.contains("complete=true") && !out.contains('|'),
             "{out}"
         );
+    }
+    #[test]
+    fn control_escaping_matches_hex_format_for_every_control_character() {
+        for code in 0..=0x10ffff {
+            if let Some(ch) = char::from_u32(code)
+                && ch.is_control()
+            {
+                let mut output = String::new();
+                EscapedWriter::new(&mut output, 1, 64)
+                    .write_str(ch.encode_utf8(&mut [0; 4]))
+                    .unwrap();
+                let expected = match ch {
+                    '\t' => "\\t".to_owned(),
+                    '\n' => "\\n".to_owned(),
+                    '\r' => "\\r".to_owned(),
+                    _ => format!("\\u{code:04x}"),
+                };
+                assert_eq!(output, expected);
+            }
+        }
     }
     #[test]
     fn rendering_interrupts_are_errors_not_clipped_success() {
