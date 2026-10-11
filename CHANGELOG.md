@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.0.1 — 2026-10-11
+
+- Write CLI query output as UTF-8 bytes, so Unicode works under ASCII locales
+  and Windows newline conversion cannot exceed the output byte limit.
+- Lead the README with the dependency, performance, and agent-mode benefits;
+  move detailed usage and benchmark notes into linked documentation.
+
 ## 6.0.0 — 2026-10-11
 
 - Add an explicit `DatabricksClient.query_agent` interface returning compact,

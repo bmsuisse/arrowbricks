@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "6.0.0"
+version = "6.0.1"
 description = "Rust-powered Databricks SQL client and agent CLI with Arrow/NDJSON streaming, bounded Markdown previews, actionable JSON diagnostics, and zero required Python dependencies."
 readme = "README.md"
 license = "MIT"
