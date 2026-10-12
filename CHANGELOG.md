@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 6.1.0 — 2026-10-12
 
 - Accept PEP 750 t-strings (Python 3.14+) as SQL on every method that takes it:
   each interpolation is bound as a typed named parameter, `{name:i}` quotes an
