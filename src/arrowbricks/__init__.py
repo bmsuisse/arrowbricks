@@ -3,6 +3,7 @@
 __lazy_modules__ = ["arrowbricks._streaming", "arrowbricks.client", "arrowbricks.cursor"]
 
 from ._core import ArrowbricksError, AuthError, QueryStats, StatementError, TransientError
+from ._sql import unsafe_sql
 from ._streaming import (
     HEARTBEAT,
     QueryTimeout,
@@ -29,5 +30,6 @@ __all__ = [
     "await_with_heartbeat",
     "connect",
     "stream_query_json",
+    "unsafe_sql",
     "write_ipc_stream",
 ]

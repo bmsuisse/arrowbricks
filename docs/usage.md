@@ -179,6 +179,40 @@ JSON goes to stderr. Its exit codes are 0 for Markdown, 1 for a query error and
 2 for invalid configuration. A clipped Markdown preview is still a successful query; inspect
 its completeness footer before using it as a complete dataset.
 
+## SQL safety: t-strings and `LiteralString`
+
+Every method that takes SQL (`Cursor.execute`/`execute_streamed`,
+`DatabricksClient.query_agent`/`stream_query_json`, `stream_query_json`) is typed
+`LiteralString | Template | sqlglot.Expr`. A `str` built at runtime (an f-string
+with a request value in it, say) is therefore flagged by your type checker --
+that is the injection bug class this is meant to catch. Runtime behaviour is
+unchanged: a `str` is still sent as-is.
+
+On Python 3.14+ pass values in a [PEP 750](https://peps.python.org/pep-0750/)
+t-string, the way psycopg does. Each interpolation is bound as a typed Databricks
+named parameter (`:ab_p0`, `:ab_p1`, ...) and never becomes part of the SQL text:
+
+```python
+await cur.execute(t"SELECT * FROM {table:i} WHERE id = {user_id} AND day >= {since}")
+```
+
+- Supported value types: `None`, `bool`, `int`, `float`, `Decimal`, `str`, `date`,
+  `datetime` (timezone-aware -> `TIMESTAMP`, naive -> `TIMESTAMP_NTZ`) and `UUID`.
+  Anything else raises `TypeError` instead of being guessed at.
+- `{name:i}` quotes an identifier with backticks (parameters can't bind table or
+  column names). `{x:s}` or no spec binds a parameter; other specs and `!r`/`!s`
+  conversions raise `ValueError`.
+- A nested t-string is spliced in, so queries can be composed from fragments.
+- Explicit `parameters`/`params` still work and are merged with the t-string's;
+  names starting with `ab_p` are reserved.
+- A sqlglot expression (`pip install arrowbricks[sqlglot]`) is rendered in the
+  Databricks dialect and sent.
+- SQL that genuinely isn't a literal (a file, a CLI argument) can be marked with
+  `arrowbricks.unsafe_sql(text)`: a no-op that tells the type checker you
+  vouched for it. Don't use it on request data -- use a t-string.
+
+On Python 3.11-3.13 t-strings don't exist; use literal SQL plus `parameters`.
+
 ## FastAPI SSE example
 
 `stream_query_json` is the full-speed way to serve a query over HTTP: the first row reaches the client after roughly one chunk's fetch/decode time, not the whole query's -- the Rust core is fetching, decoding, and reordering chunks concurrently the entire time, and the `HEARTBEAT`s keep the connection alive through a slow cold warehouse start instead of the client just seeing dead air:
@@ -294,7 +328,7 @@ except ArrowbricksError:
 - `connect(host, warehouse_id, *, token=None, token_provider=None, ...) -> Connection`
 - `Connection.cursor() -> Cursor`
 - `Connection.client -> DatabricksClient` -- the same client `cursor()` uses, for lower-level access (e.g. `stream_query_json`, `upload_volume_file`).
-- `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None, prefer_inline=False) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`. `prefer_inline=True` tries fetching a small result (well under Databricks' 25 MiB inline cap) in the same round trip as the submission itself, skipping the chunk-fetch entirely. If the result turns out too big, the statement fails server-side before ever really executing, and arrowbricks transparently re-runs it the normal way -- safe to double-submit, since nothing committed the first time; a caller who sets `prefer_inline` without actually expecting a small result just pays for the query twice in this case. If instead the result comes back but has a column type this can't convert (nested ARRAY/MAP/STRUCT, VARIANT), the statement already *succeeded* -- arrowbricks does **not** silently re-run it (that could duplicate a write for non-idempotent SQL); it raises `ArrowbricksError` naming the statement instead, so you know it ran and can decide yourself whether re-running is safe. Leave `prefer_inline` off unless you know the result is small, and unless you know the query is a `SELECT` (or otherwise idempotent) if you want the byte-limit fallback's automatic retry to be safe too.
+- `Cursor.execute(sql, parameters=None, *, row_limit=None, offset=None, catalog=None, schema=None, total_timeout_s=None, prefer_inline=False) -> Cursor` -- submits and waits for the statement, like a real DB-API cursor. `parameters`, if given, is Databricks' own named-parameter format -- `[{"name": ..., "value": ..., "type": ...}]` bound against `:name` markers in `sql`; `sql` may also be a t-string whose interpolations are bound for you (see [SQL safety](#sql-safety-t-strings-and-literalstring)). `prefer_inline=True` tries fetching a small result (well under Databricks' 25 MiB inline cap) in the same round trip as the submission itself, skipping the chunk-fetch entirely. If the result turns out too big, the statement fails server-side before ever really executing, and arrowbricks transparently re-runs it the normal way -- safe to double-submit, since nothing committed the first time; a caller who sets `prefer_inline` without actually expecting a small result just pays for the query twice in this case. If instead the result comes back but has a column type this can't convert (nested ARRAY/MAP/STRUCT, VARIANT), the statement already *succeeded* -- arrowbricks does **not** silently re-run it (that could duplicate a write for non-idempotent SQL); it raises `ArrowbricksError` naming the statement instead, so you know it ran and can decide yourself whether re-running is safe. Leave `prefer_inline` off unless you know the result is small, and unless you know the query is a `SELECT` (or otherwise idempotent) if you want the byte-limit fallback's automatic retry to be safe too.
 - `Cursor.execute_streamed(...)` -- same args, but an async generator yielding `HEARTBEAT` while waiting on a slow cold start, then the ready `Cursor` -- for bridging e.g. an SSE connection. Its timeout/heartbeats stop the moment the statement is ready, *before* any chunk has been downloaded -- see `fetchall_streamed` below for the download phase itself.
 - `Cursor.fetchone() -> tuple | None`, `Cursor.fetchmany(size) -> list[tuple]`, `Cursor.fetchall() -> list[tuple]`, and iterating a `Cursor` directly -- row tuples; needs the `arro3` extra.
 - `Cursor.fetchmany_arrow(size) -> Table`, `Cursor.fetchall_arrow() -> Table` -- an Arrow table (implements `__arrow_c_stream__`, so arro3/pyarrow/DuckDB can all consume it directly, zero-copy).

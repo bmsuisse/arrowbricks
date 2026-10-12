@@ -21,6 +21,9 @@ arrowbricks = "arrowbricks.cli:main"
 # Row materialization converts our capsule table through arro3-core.
 # Arrow fetches and streaming do not need this optional dependency.
 arro3 = ["arro3-core>=0.8"]
+# Only for passing sqlglot expressions as SQL (`Cursor.execute(expr)`); they
+# are rendered in the Databricks dialect. Nothing imports sqlglot at runtime.
+sqlglot = ["sqlglot>=27"]
 
 [project.urls]
 Repository = "https://github.com/bmsuisse/arrowbricks"
@@ -74,6 +77,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
+    "sqlglot>=27",
     "ty>=0.0.65",
 ]
 
@@ -99,3 +103,8 @@ select = ["E", "F", "I", "UP", "S", "B"]
 "tests/*" = ["S101", "S106"]
 "rust/arrowbricks_core/tests_py/*" = ["S101", "S106"]
 "tests/arro3_free/*" = ["S101", "S106"]
+
+# t-strings (`string.templatelib`, PEP 750) only exist on 3.14+; the package itself
+# still supports 3.11+ and guards that import, so type-check against 3.14.
+[tool.ty.environment]
+python-version = "3.14"

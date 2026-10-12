@@ -53,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace, sql: str) -> int:
+    from ._sql import unsafe_sql
     from .client import DatabricksClient
 
     try:
@@ -63,7 +64,7 @@ async def _run(args: argparse.Namespace, sql: str) -> int:
             protocol=args.protocol,
         ) as client:
             result = await client.query_agent(
-                sql,
+                unsafe_sql(sql),  # operator-supplied SQL, sent unchanged
                 max_rows=args.max_rows,
                 max_bytes=args.max_bytes,
                 max_cell_chars=args.max_cell_chars,

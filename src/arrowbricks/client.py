@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from . import _core
+from ._sql import Sql, prepare_sql
 
 TokenProvider = Callable[[], "str | Awaitable[str]"]
 
@@ -148,7 +149,7 @@ class DatabricksClient:
 
     async def query_agent(
         self,
-        sql: str,
+        sql: Sql,
         *,
         max_rows: int = 1000,
         max_bytes: int = 10000,
@@ -167,8 +168,9 @@ class DatabricksClient:
         cancellation. SQL is sent unchanged, with best-effort server cancellation
         when stopped. Output limits do not limit the warehouse's scan cost.
         """
+        text, params = prepare_sql(sql, params)
         return await self._core_client.query_agent(
-            sql,
+            text,
             max_rows=max_rows,
             max_bytes=max_bytes,
             max_cell_chars=max_cell_chars,
@@ -180,7 +182,7 @@ class DatabricksClient:
 
     def stream_query_json(
         self,
-        sql: str,
+        sql: Sql,
         *,
         params: list[dict[str, Any]] | None = None,
         row_limit: int | None = None,
