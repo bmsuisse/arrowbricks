@@ -131,9 +131,26 @@ async def test_cli_default_agent_and_explicit_aliases(cli_warehouse):
     for alias in ([], ["--agent"], ["-agent"]):
         result = run_cli(*alias, "--protocol", protocol, "-c", "SELECT id, label FROM t", env=env)
         assert result.returncode == 0 and result.stderr == ""
-        assert result.stdout.startswith("|")
-        assert r"row\_0" in result.stdout and "complete=true" in result.stdout
+        assert result.stdout.startswith("id:Int64\tlabel:Utf8\n")
+        assert "row_0" in result.stdout and "complete=true" in result.stdout
     assert submitted == ["SELECT id, label FROM t"] * 3
+
+
+async def test_cli_format_flag_selects_markdown(cli_warehouse):
+    protocol, env, _, _ = cli_warehouse
+    result = run_cli("--format", "markdown", "--protocol", protocol, "-c", "SELECT id, label FROM t", env=env)
+    assert result.returncode == 0 and result.stderr == ""
+    assert result.stdout.startswith("|id (Int64)|label (Utf8)|\n|-|-|\n|0|")
+    assert r"row\_0" in result.stdout
+    assert run_cli("--format", "csv", "-c", "SELECT 1", env=env).returncode == 2
+
+
+def test_error_json_detection_never_mistakes_a_tsv_header_for_an_error():
+    from arrowbricks import cli
+
+    assert cli._is_error_json('{"category":"syntax_error","message":"m","next_step":"n"}')
+    assert not cli._is_error_json("{braces}:Utf8\tb:Int64\n1\t2\n\nrows_shown=1; complete=true; total_rows=1")
+    assert not cli._is_error_json("id:Int64\n1")
 
 
 @pytest.mark.parametrize("flag", ["-c", "--sql", "--command"])
@@ -278,7 +295,7 @@ async def test_cli_query_error_respects_entire_stderr_byte_budget(cli_warehouse)
 async def test_installed_console_script(cli_warehouse):
     protocol, env, _, _ = cli_warehouse
     result = run_cli("--protocol", protocol, "-c", "SELECT * FROM t", env=env, module=False)
-    assert result.returncode == 0 and result.stdout.startswith("|") and result.stderr == ""
+    assert result.returncode == 0 and result.stdout.startswith("id:Int64") and result.stderr == ""
 
 
 @pytest.mark.parametrize(

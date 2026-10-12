@@ -1,7 +1,7 @@
 use arrow_array::types::Int32Type;
 use arrow_array::{ArrayRef, Float64Array, Int64Array, ListArray, RecordBatch, StringArray};
 use arrow_schema::{Field, Schema};
-use arrowbricks_core::agent::render::MarkdownRenderer;
+use arrowbricks_core::agent::render::{MarkdownRenderer, OutputFormat};
 use std::{hint::black_box, sync::Arc, time::Instant};
 
 fn batch(columns: Vec<ArrayRef>) -> RecordBatch {
@@ -19,11 +19,12 @@ fn direct(b: &RecordBatch, bytes: usize, interrupts: bool) -> String {
             1000,
             bytes,
             500,
+            OutputFormat::Markdown,
             Instant::now() + std::time::Duration::from_secs(60),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
     } else {
-        MarkdownRenderer::new(b.schema(), 1000, bytes, 500)
+        MarkdownRenderer::new(b.schema(), 1000, bytes, 500, OutputFormat::Markdown)
     }
     .unwrap();
     renderer.push_batch(b).unwrap();

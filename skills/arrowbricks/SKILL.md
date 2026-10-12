@@ -1,6 +1,6 @@
 ---
 name: arrowbricks
-description: Use when querying a Databricks SQL warehouse with Arrowbricks, preparing bounded agent previews, or interpreting its Markdown results and JSON errors.
+description: Use when querying a Databricks SQL warehouse with Arrowbricks, preparing bounded agent previews, or interpreting its TSV or Markdown results and JSON errors.
 ---
 
 # Arrowbricks
@@ -66,16 +66,20 @@ requests best-effort server cancellation; Python task cancellation stays
 
 | Signal | Meaning |
 | --- | --- |
-| CLI exit 0, Markdown stdout | Query succeeded; inspect its footer. |
+| CLI exit 0, preview on stdout | Query succeeded; inspect its footer. |
 | `complete=false` | Preview is incomplete, including cell clipping. |
 | `total_rows=N` / `total_rows>=N` | Exact exhausted total / fetched lower bound. |
 | `cells_truncated=true`, `…[truncated]` | Values were clipped; do not treat them as full values. |
 | CLI exit 1, JSON stderr | Query failed; inspect `category`, `message`, `next_step`. |
 | CLI exit 2 / 130, JSON stderr | Configuration error / interruption. |
 
-Typed headers retain column order and duplicate names. SQL NULL is unquoted;
-the string `"NULL"` is quoted. Markdown/HTML escaping is presentation, not
-changed data. An error after fetching rows is failure, not a successful preview.
+Typed headers retain column order and duplicate names. Default output is TSV
+(`name:Type` header, one line per row, footer after a blank line): `\t`, `\n`,
+`\r` and `\\` inside a cell are escapes for tab, newline, carriage return and
+backslash, SQL NULL is `\N` and an empty field is the empty string. With
+`--format markdown` / `output_format="markdown"` NULL is unquoted and the string
+`"NULL"` is quoted; Markdown/HTML escaping there is presentation, not changed
+data. An error after fetching rows is failure, not a successful preview.
 
 A preview cap does not limit warehouse scanning or cost. Pre-execution cost
 estimates and percentage progress are unavailable; do not invent them or drain

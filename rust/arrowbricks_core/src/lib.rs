@@ -828,9 +828,9 @@ impl PyDbClient {
         })
     }
 
-    /// Returns bounded typed Markdown, or actionable JSON for a query failure.
+    /// Returns a bounded typed preview (TSV or Markdown), or actionable JSON for a query failure.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (statement, *, max_rows=1000, max_bytes=10000, max_cell_chars=500, total_timeout_s=60.0, catalog=None, schema=None, parameters=None))]
+    #[pyo3(signature = (statement, *, max_rows=1000, max_bytes=10000, max_cell_chars=500, total_timeout_s=60.0, output_format="tsv", catalog=None, schema=None, parameters=None))]
     fn query_agent<'py>(
         &self,
         py: Python<'py>,
@@ -839,15 +839,18 @@ impl PyDbClient {
         max_bytes: usize,
         max_cell_chars: usize,
         total_timeout_s: f64,
+        output_format: &str,
         catalog: Option<String>,
         schema: Option<String>,
         parameters: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let format = agent::OutputFormat::parse(output_format).map_err(PyValueError::new_err)?;
         let options = agent::AgentOptions {
             max_rows,
             max_bytes,
             max_cell_chars,
             total_timeout_s,
+            format,
         };
         options.validate().map_err(PyValueError::new_err)?;
         let client = self.inner.clone();

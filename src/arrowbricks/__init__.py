@@ -2,6 +2,7 @@
 # them is first used. Older Pythons ignore this list and import eagerly.
 __lazy_modules__ = ["arrowbricks._streaming", "arrowbricks.client", "arrowbricks.cursor"]
 
+from ._agent import AgentFormat
 from ._core import ArrowbricksError, AuthError, QueryStats, StatementError, TransientError
 from ._sql import Sql, unsafe_sql
 from ._streaming import (
@@ -16,6 +17,7 @@ from .client import DatabricksClient
 from .cursor import Connection, Cursor, connect
 
 __all__ = [
+    "AgentFormat",
     "HEARTBEAT",
     "ArrowbricksError",
     "AuthError",

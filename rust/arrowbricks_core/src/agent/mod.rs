@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::client::{ApiError, DbClient, Protocol};
 use crate::pipeline;
 use render::MarkdownRenderer;
+pub use render::OutputFormat;
 
 #[derive(Clone, Copy)]
 pub struct AgentOptions {
@@ -18,6 +19,7 @@ pub struct AgentOptions {
     pub max_bytes: usize,
     pub max_cell_chars: usize,
     pub total_timeout_s: f64,
+    pub format: OutputFormat,
 }
 
 impl Default for AgentOptions {
@@ -27,6 +29,7 @@ impl Default for AgentOptions {
             max_bytes: 10_000,
             max_cell_chars: 500,
             total_timeout_s: 60.0,
+            format: OutputFormat::default(),
         }
     }
 }
@@ -172,6 +175,7 @@ pub async fn query(
                             options.max_rows,
                             options.max_bytes,
                             options.max_cell_chars,
+                            options.format,
                             deadline.into_std(),
                             interrupted,
                         )?,

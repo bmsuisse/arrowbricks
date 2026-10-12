@@ -33,6 +33,7 @@ async def verify(protocol: str, runs: int) -> dict:
 
     async def check(name: str, sql: str, *, contains=(), **kwargs) -> str:
         start = time.perf_counter()
+        kwargs.setdefault("output_format", "markdown")
         text = await client.query_agent(sql, **kwargs)
         assert len(text.encode()) <= kwargs.get("max_bytes", 10000), name
         for expected in contains:
@@ -53,6 +54,13 @@ async def verify(protocol: str, runs: int) -> dict:
         await check(
             "null_and_string", "SELECT CAST(NULL AS STRING) AS absent, 'NULL' AS literal", contains=("NULL", '"NULL"')
         )
+        text = await check(
+            "tsv_tab_and_newline",
+            "SELECT concat('a', char(9), 'b', char(10), 'c') AS v, CAST(NULL AS STRING) AS n",
+            output_format="tsv",
+            contains=("v:", "a\\tb\\nc", "\\N", "complete=true"),
+        )
+        assert len(text.split("\n\n")[0].splitlines()) == 2, text
         await check("unicode", "SELECT 'Grüezi 🦆 東京' AS greeting", contains=("Grüezi", "🦆", "東京"))
         text = await check("escaped", "SELECT concat('a|b', char(10), '<script>', char(92), '`x`') AS value")
         assert "<script>" not in text and "a|b" not in text, text
