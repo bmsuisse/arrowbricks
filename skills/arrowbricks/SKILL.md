@@ -74,7 +74,7 @@ requests best-effort server cancellation; Python task cancellation stays
 | CLI exit 2 / 130, JSON stderr | Configuration error / interruption. |
 
 Typed headers retain column order and duplicate names. Default output is TSV
-(`name:Type` header, one line per row, footer after a blank line): `\t`, `\n`,
+(`name:Type` header, one line per row; the footer is the last line, so read it from the end, not at the first blank line): `\t`, `\n`,
 `\r` and `\\` inside a cell are escapes for tab, newline, carriage return and
 backslash, SQL NULL is `\N` and an empty field is the empty string. With
 `--format markdown` / `output_format="markdown"` NULL is unquoted and the string

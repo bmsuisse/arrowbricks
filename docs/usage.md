@@ -164,7 +164,9 @@ Backslash, tab, newline and carriage return inside a value are written as
 `\N`, the string `\N` is `\\N`, and the empty string is an empty field, so each
 row is exactly one line with one tab between columns whatever the data holds.
 Nested values (lists, structs, maps) use Arrow's display text, escaped the same
-way. The footer is the last line, after one blank line.
+way. NULL inside a nested value prints as `NULL`, not `\N`. The footer is the last
+line: read it from the end rather than splitting at the first blank line, because a
+one-column result of empty strings has blank data lines too.
 
 `output_format="markdown"` is a pipe table without padding
 (`|id (Int64)|note (Utf8)|`, separator `|-|-|`). Strings are quoted, so SQL
