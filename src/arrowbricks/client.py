@@ -165,8 +165,9 @@ class DatabricksClient:
         deadline across submission and fetching. The completeness footer marks
         clipping and gives an exact total only after exhausting the result.
         Invalid budgets raise before submitting SQL; asyncio cancellation remains
-        cancellation. SQL is sent unchanged, with best-effort server cancellation
-        when stopped. Output limits do not limit the warehouse's scan cost.
+        cancellation. A `str` is sent unchanged (a t-string's values are bound
+        as named parameters), with best-effort server cancellation when
+        stopped. Output limits do not limit the warehouse's scan cost.
         """
         text, params = prepare_sql(sql, params)
         return await self._core_client.query_agent(

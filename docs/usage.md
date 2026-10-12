@@ -183,7 +183,7 @@ its completeness footer before using it as a complete dataset.
 
 Every method that takes SQL (`Cursor.execute`/`execute_streamed`,
 `DatabricksClient.query_agent`/`stream_query_json`, `stream_query_json`) is typed
-`LiteralString | Template | sqlglot.Expr`. A `str` built at runtime (an f-string
+`LiteralString | Template | <sqlglot expression>`. A `str` built at runtime (an f-string
 with a request value in it, say) is therefore flagged by your type checker --
 that is the injection bug class this is meant to catch. Runtime behaviour is
 unchanged: a `str` is still sent as-is.
@@ -198,18 +198,31 @@ await cur.execute(t"SELECT * FROM {table:i} WHERE id = {user_id} AND day >= {sin
 
 - Supported value types: `None`, `bool`, `int`, `float`, `Decimal`, `str`, `date`,
   `datetime` (timezone-aware -> `TIMESTAMP`, naive -> `TIMESTAMP_NTZ`) and `UUID`.
-  Anything else raises `TypeError` instead of being guessed at.
+  Anything else raises `TypeError` instead of being guessed at; in particular
+  `bytes` is out, as Databricks has no BINARY parameter type.
 - `{name:i}` quotes an identifier with backticks (parameters can't bind table or
-  column names). `{x:s}` or no spec binds a parameter; other specs and `!r`/`!s`
-  conversions raise `ValueError`.
-- A nested t-string is spliced in, so queries can be composed from fragments.
-- Explicit `parameters`/`params` still work and are merged with the t-string's;
-  names starting with `ab_p` are reserved.
+  column names). A `str` is *one* identifier -- `{"cat.sch.tbl":i}` is not split;
+  pass `("cat", "sch", "tbl")` for a qualified name.
+- `{x}` or `{x:s}` binds a parameter. A nested t-string is spliced in with `{part:q}`
+  (the explicit spec is deliberate: splicing SQL is never accidental), so queries
+  can be composed from fragments. Any other spec, and `!r`/`!s` conversions, raise.
+- Mistakes that would silently run the wrong query raise instead: an interpolation
+  inside a quoted string or comment (`LIKE '{prefix}%'` -- write `LIKE {prefix + '%'}`)
+  and one directly touching other text that would extend its marker (`{a}{b}`, `x{a}1`).
+- A t-string carries its own parameters, so passing `parameters`/`params` as well
+  raises. A plain `str` keeps taking `parameters` as before.
 - A sqlglot expression (`pip install arrowbricks[sqlglot]`) is rendered in the
   Databricks dialect and sent.
 - SQL that genuinely isn't a literal (a file, a CLI argument) can be marked with
   `arrowbricks.unsafe_sql(text)`: a no-op that tells the type checker you
-  vouched for it. Don't use it on request data -- use a t-string.
+  vouched for it. Don't use it on request data -- use a t-string. Annotate your own
+  pass-through helpers with `arrowbricks.Sql` (or `LiteralString`), not `str`.
+- Don't build a `Template(...)` from runtime strings; unlike a t-string literal,
+  type checkers can't tell it apart from a safe one.
+
+Type checkers flag a runtime `str` for every Python version, with or without
+sqlglot installed. This is what makes it catch injection bugs, and a test in
+`tests/test_sql.py` pins it.
 
 On Python 3.11-3.13 t-strings don't exist; use literal SQL plus `parameters`.
 
@@ -224,7 +237,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from arrowbricks import HEARTBEAT, DatabricksClient
+from arrowbricks import HEARTBEAT, DatabricksClient, unsafe_sql
 
 app = FastAPI()
 client = DatabricksClient(
@@ -235,7 +248,7 @@ client = DatabricksClient(
 
 
 async def _sse(sql: str) -> AsyncIterator[str]:
-    async for item in client.stream_query_json(sql, total_timeout_s=300):
+    async for item in client.stream_query_json(unsafe_sql(sql), total_timeout_s=300):
         if item is HEARTBEAT:
             yield ": keep-alive\n\n"  # SSE comment line -- clients ignore it, it just keeps the connection open
         else:
@@ -252,7 +265,7 @@ uvicorn app:app --reload
 curl -N "http://localhost:8000/query?sql=SELECT+*+FROM+range(1000000)"
 ```
 
-This example takes `sql` straight from the request for brevity -- arrowbricks does no SQL validation by design, so a real deployment must validate/allowlist it (or accept fixed query names + params) before exposing a route like this publicly. See [`examples/fastapi_sse.py`](../examples/fastapi_sse.py) for the runnable version, [`examples/fastapi_sse_pivot.py`](../examples/fastapi_sse_pivot.py) for the same over a buffered `Cursor.fetchall_streamed` result with one combined heartbeat/timeout budget across both the wait and the download, or [`examples/fastapi_sse_validated.py`](../examples/fastapi_sse_validated.py) for one way to do that validation, using [sqlglot](https://github.com/tobymao/sqlglot) to require a single read-only `SELECT` against an allowlist of fully-qualified tables.
+This example takes `sql` straight from the request for brevity (`unsafe_sql` tells the type checker you vouch for it; see [SQL safety](#sql-safety-t-strings-and-literalstring)) -- arrowbricks does no SQL validation by design, so a real deployment must validate/allowlist it (or accept fixed query names + params) before exposing a route like this publicly. See [`examples/fastapi_sse.py`](../examples/fastapi_sse.py) for the runnable version, [`examples/fastapi_sse_pivot.py`](../examples/fastapi_sse_pivot.py) for the same over a buffered `Cursor.fetchall_streamed` result with one combined heartbeat/timeout budget across both the wait and the download, or [`examples/fastapi_sse_validated.py`](../examples/fastapi_sse_validated.py) for one way to do that validation, using [sqlglot](https://github.com/tobymao/sqlglot) to require a single read-only `SELECT` against an allowlist of fully-qualified tables.
 
 ## Auth
 

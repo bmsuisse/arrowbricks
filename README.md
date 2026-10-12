@@ -20,7 +20,9 @@ pip install arrowbricks
 
 Wheels cover Linux, macOS, and Windows; Python 3.11+.
 Arrow, NDJSON, and agent mode work without extras. Python row tuples need
-`pip install 'arrowbricks[arro3]'`.
+`pip install 'arrowbricks[arro3]'`; sqlglot expressions as SQL need `[sqlglot]`.
+On Python 3.14+ pass values as a t-string (`t"... WHERE id = {x}"`) and they are
+bound as parameters -- see [SQL safety](docs/usage.md#sql-safety-t-strings-and-literalstring).
 
 ## Query from an agent or terminal
 

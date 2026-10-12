@@ -6,7 +6,7 @@
   each interpolation is bound as a typed named parameter, `{name:i}` quotes an
   identifier, nested t-strings compose, and explicit parameters still merge in.
   sqlglot expressions are accepted too (`arrowbricks[sqlglot]` extra).
-- Type `sql` as `LiteralString | Template | sqlglot.Expr`, so type checkers flag
+- Type `sql` as `LiteralString | Template | <sqlglot expression>` (`arrowbricks.Sql`), so type checkers flag
   SQL built from runtime strings. Typing only -- a `str` still works at runtime;
   `arrowbricks.unsafe_sql(text)` marks SQL you vouch for (#21).
 

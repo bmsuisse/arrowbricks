@@ -103,8 +103,3 @@ select = ["E", "F", "I", "UP", "S", "B"]
 "tests/*" = ["S101", "S106"]
 "rust/arrowbricks_core/tests_py/*" = ["S101", "S106"]
 "tests/arro3_free/*" = ["S101", "S106"]
-
-# t-strings (`string.templatelib`, PEP 750) only exist on 3.14+; the package itself
-# still supports 3.11+ and guards that import, so type-check against 3.14.
-[tool.ty.environment]
-python-version = "3.14"
