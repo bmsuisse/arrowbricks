@@ -1,0 +1,7 @@
+id	Int64
+a	Utf8
+b	Int64
+c	Float64
+d	Date32
+e	Boolean
+f	Utf8

@@ -1,93 +1,122 @@
-# Agent output format: TSV vs Markdown vs others
+# Agent output format: TSV vs Markdown
 
-Question: which text layout should `query_agent` return? Measured on tokens
-(cost) and on whether a model can read the result correctly.
+Question: which layout should `query_agent` return by default? Measured with
+the shipped Rust renderer on ten result sets: token cost, lossless decoding,
+and whether Claude reads the result correctly. Reproduction scripts, data,
+answers and the answer key are in
+[`agent-output-format/`](agent-output-format/).
+
+## Verdict
+
+- **TSV is much cheaper:** 28% fewer `o200k_base` tokens (26% fewer
+  `cl100k_base`) than 6.1's Markdown table, and 12% (9%) fewer than the new
+  unpadded Markdown.
+- **TSV is lossless and robust:** every one of 14,810 cells decoded back to the
+  source value, every one of 2,150 rows had exactly the right number of tabs,
+  and a test over every Unicode scalar value found no character that can
+  break a row. A naive `split("|")` on the Markdown layouts gets the column
+  count wrong for 16 of 2,160 table lines (cells containing a pipe); `split("\t")`
+  on TSV was right for all 2,150.
+- **Readability is a tie, not a win:** across 12 blind reader runs (Haiku and
+  Sonnet, 82 questions each) TSV scored 97.6%, new Markdown 97.6% and 6.1
+  Markdown 98.8%. Paired, TSV won 3 questions and 6.1 Markdown won 7 (sign
+  test p = 0.34), so no real difference. Every miss was a hand count or
+  "largest of many numbers" question; exact-string and escaping questions
+  (tabs, newlines, pipes, backslashes, `\N`, NULL vs `'NULL'` vs empty) were
+  100% for all layouts. So TSV costs less without costing accuracy; this
+  benchmark does not show it improves accuracy.
 
 ## Method
 
-- Five deterministic result sets: `orders` (100 rows, 7 typed columns, 30% NULL
-  notes), `wide` (50 rows x 30 numeric columns), `nested` (40 rows with a
-  struct, an array and a map), `big` (1,000 rows x 5), and `escapes` (12 rows
-  holding commas, pipes, quotes, newlines, `NULL` vs SQL NULL, empty string,
-  Unicode, leading/trailing spaces, and a string that looks like a table).
-- **Tokens:** `tiktoken` `o200k_base` (also `cl100k_base`, same order). This is
-  not the Claude tokenizer; treat ratios, not absolute counts, as meaningful.
-- **Readability:** one Claude Haiku agent per format wrote its own encoder,
-  then answered 24 questions (lookups, filtered counts, sums, NULL and
-  escaping checks, nested access) from the encoded text only. Answers were
-  graded against ground truth the agents could not see. 12 formats/variants
-  were tried, including TOON, JSON, NDJSON, YAML, CSV, columnar JSON and three
-  invented variants (dictionary-encoded, run-length columnar, trimmed Markdown).
-- **Real renderer:** the table below re-measures the shipped Rust renderer on
-  `orders`, `wide`, `big`, `escapes`, `nested` (schemas inferred from NDJSON).
-  The pre-change padded Markdown is reconstructed from the new Markdown output
-  by re-adding the spaces (same escaping), not run from the old build.
+- **Data:** ten deterministic result sets (2,150 rows): orders, events (UUIDs,
+  timestamps), wide metrics (25 columns), nested (struct, list),
+  text with tabs/newlines/pipes/quotes/backslashes/`\N`/`NULL`/empty/Unicode
+  and a 600-character cell that gets clipped (plus column names `a|b` and
+  `{x}`), paths and URLs full of `_ * & <`, a 70%-NULL table, a 1,000-row
+  table, extreme numerics, and multi-line log messages.
+- **Renderers:** this branch for TSV and the new Markdown; commit `5243cf6`
+  (6.1.0) built unmodified for the old Markdown. Typed Arrow schemas, byte
+  limits lifted so nothing but the 500-character cell clip applies.
+- **Tokens:** `tiktoken` `o200k_base` and `cl100k_base`. These are not the
+  Claude tokenizer; ratios, not absolute counts, are what carry over.
+- **Reader test:** 82 questions (lookups, filtered counts, extremes, NULL
+  handling, column types, exact strings with escaping, clip detection).
+  Twelve agents (Claude Haiku and Sonnet, three layouts, two runs each, the
+  second with the datasets in reverse order) got only the printed files for
+  one layout, labelled X/Y/Z so the layout was not named, and only the Read
+  tool (no code). They were told to answer with the original value, undoing
+  whatever escaping the layout used. Answers were graded against a key
+  computed from the source data, which they could not see. Six runs ran one
+  `ls` on their folder despite the rules; it listed file names only.
 
-## Result: shipped renderer, `o200k_base` tokens
+## Tokens (shipped renderer)
 
-| Result set | TSV | Markdown (new) | Markdown (6.1) | TSV vs 6.1 |
-| --- | ---: | ---: | ---: | ---: |
-| orders | 2,510 | 3,164 | 3,941 | -36% |
-| wide | 6,062 | 6,175 | 7,734 | -22% |
-| big | 15,903 | 17,915 | 23,924 | -34% |
-| escapes | 109 | 156 | 194 | -44% |
-| nested | 1,835 | 1,879 | 2,085 | -12% |
-| **total** | **26,419** | **29,289** | **37,878** | **-30%** |
-
-New Markdown (no padding, `|-|` separator) is -23% against 6.1. 6.1's table
-also escaped `_` and quoted every string, which the TSV layout does not need.
-
-## Result: prototype encoders, all formats
-
-Token totals over the five sets (prototype encoders, so slightly different
-from the table above), and Haiku reader score out of 24:
-
-| Format | Tokens | vs padded Markdown | Reader score |
+| Result set | TSV | Markdown (new) | Markdown (6.1) |
 | --- | ---: | ---: | ---: |
-| TSV | 25.8k | -34% | 24 |
-| CSV | 26.2k | -33% | 24 (b) |
-| trimmed Markdown, run-length columnar, dictionary (invented) | 26.1k-26.6k | -32% to -33% | 23 each |
-| columnar JSON | 27.2k | -30% | 23 |
-| TOON | 28.8k | -26% | 23 |
-| compact Markdown, spaced pipes | 31.7k | -19% | 24 |
-| padded Markdown | 39.1k | baseline | 24 |
-| JSON | 42.4k | +8% | 23 |
-| NDJSON | 43.6k | +12% | 23 |
-| YAML | 54.3k | +39% | 24 |
+| big (1000 rows) | 16,725 | 18,894 | 25,904 |
+| events | 15,944 | 18,226 | 20,911 |
+| orders | 5,177 | 6,222 | 7,834 |
+| wide metrics | 7,164 | 7,129 | 9,088 |
+| paths and URLs | 4,588 | 6,027 | 6,623 |
+| numeric | 4,102 | 4,128 | 4,886 |
+| logs | 3,580 | 4,626 | 5,234 |
+| nested | 2,095 | 2,337 | 2,643 |
+| nulls heavy | 1,983 | 2,032 | 2,390 |
+| text, messy | 585 | 724 | 914 |
+| **total** | **61,943** | **70,345** | **86,427** |
+| vs Markdown (6.1) | **-28.3%** | -18.6% | baseline |
 
-Scores exclude one ambiguous question, `escapes-7` (a literal backslash-n versus
-a real newline), counted correct for every format. (b) The CSV agent had seen some of the data before
-answering, so its run was not fully blind.
+TSV is not cheaper on every set: on the 25-column all-numbers table it is a
+tie with the new Markdown (7,164 against 7,129), and on `numeric` nearly one.
+Bytes show the same order (121.9 kB, 140.5 kB, 170.5 kB). 6.1's table also
+escaped `_` (including in column names) and quoted every string, which the
+other two layouts mostly avoid.
 
-## Reading the results
+## Reader accuracy (82 questions x 4 runs per layout)
 
-- Every miss was hand-counting or hand-adding over the 50-row `wide` table
-  (plus one nested count), not a format-specific failure. 24 questions cannot
-  separate the formats on accuracy; they show nothing is unreadable.
-- TSV and CSV are cheapest because they state each column name once and add
-  almost no punctuation. A pipe table pays for a `|` and spacing per cell.
-- TOON beat JSON and YAML, but lost to TSV/CSV on flat tables and, on the
-  `nested` set, fell back to a verbose list form (its tabular form needs flat
-  values): 2,430 tokens against about 1,500 for columnar JSON. Its paper
-  (arXiv 2605.29676) compares against JSON only. It has no explicit delimiters,
-  and the crate's streaming parses the whole input first, which conflicts with
-  the bounded renderer.
-- The invented variants saved at most 4-5% over TSV and cost readability.
-- gzip+base64 (unreadable control) came to 17.7k tokens: only 31% under TSV,
-  so no readable format is near the floor.
+| | TSV | Markdown (new) | Markdown (6.1) |
+| --- | ---: | ---: | ---: |
+| Haiku | 158/164 (96.3%) | 157/164 (95.7%) | 160/164 (97.6%) |
+| Sonnet | 162/164 (98.8%) | 163/164 (99.4%) | 164/164 (100%) |
+| all | 320/328 (97.6%) | 320/328 (97.6%) | 324/328 (98.8%) |
+| exact-string / escaping questions | 100% | 100% | 100% |
+| count / extreme questions | 93.8% | 93.8% | 96.9% |
+
+Twelve of the 82 questions were missed at least once (listed by `grade_eval.py`): counting rows (some
+over 1,000) and picking the largest of nearly equal 13-digit numbers.
+Sonnet missed the largest-ratio question under TSV in both runs
+(answering id 146, 8.63e12, instead of 103, 8.82e12). With four runs per
+cell this cannot be told from chance, but it is the one place TSV did worse
+in a way that repeated.
+
+## Earlier survey of other formats
+
+Before this, 12 other encodings (CSV, JSON, NDJSON, YAML, columnar JSON,
+TOON, padded Markdown, spaced compact Markdown and three invented variants:
+dictionary-encoded, run-length columnar, trimmed Markdown) were encoded with
+prototype Python encoders and read by Haiku over 24 questions on five sets.
+Token totals (o200k): TSV 25.8k, CSV 26.2k, trimmed Markdown 26.2k, run-length
+columnar 26.1k, dictionary 26.6k, columnar JSON 27.2k, TOON 28.8k, spaced
+Markdown 31.7k, padded Markdown 39.1k, JSON 42.4k, NDJSON 43.6k, YAML 54.3k.
+Reader scores were 23-24 of 24 for all. TOON beat JSON and YAML but lost to
+TSV/CSV on tables and fell back to a verbose list form for nested data (2,430
+tokens against about 1,500 for columnar JSON); the invented variants saved at
+most 4-5% over TSV. gzip+base64 (unreadable) was 17.7k, only 31% under TSV.
+This survey used the model under test to write its encoders, so only its token
+ordering is relied on; the shipped-renderer numbers above are the evidence.
 
 ## Why TSV needs the escaping it has
 
-Tabs and newlines are the only characters TSV can't hold raw. Values are
+Tabs and newlines are the only characters TSV cannot hold raw. Values are
 written PostgreSQL-`COPY`-style: `\\`, `\t`, `\n`, `\r`, other control
-characters as `\uXXXX`, NULL as `\N`, empty string as an empty field. A
-property test round-trips random strings (tabs, newlines, backslashes, `\N`,
-control characters) and checks every row is one line with exactly
-`columns - 1` tabs.
+characters as `\uXXXX`, NULL as `\N`, empty string as an empty field. Tests:
+a round-trip property test over random strings, an exhaustive test over every
+Unicode scalar value (each must decode back and never add a tab or line), and
+the 14,810-cell comparison above.
 
 ## Limits
 
-Small question set; OpenAI tokenizers, not Claude's; encoders written by the
-model under test (except TOON, which used `@toon-format/toon` 4.4.0); the 6.1
-column is reconstructed. Nested values still use Arrow's display text, so a
-NULL inside a list prints as `NULL` in both layouts.
+Four runs per layout and model; OpenAI tokenizers, not Claude's; one task type
+(read a printed result); nested values keep Arrow's display text, so a NULL
+inside a list prints as `NULL` in both layouts. The 6.1 Markdown was measured
+from the real 6.1 code, not reconstructed.

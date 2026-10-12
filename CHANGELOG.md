@@ -2,11 +2,13 @@
 
 ## 6.2.0 — 2026-10-12
 
-Why TSV: on five sample result sets the shipped renderer's TSV used 30% fewer
-`o200k_base` tokens than 6.1's Markdown table, and 12 formats scored 23-24 of
-24 on a Haiku reader test (every miss was hand arithmetic or counting, none
-format specific). TSV and CSV were the cheapest readable formats; TOON lost to them on
-tables. Method, numbers and caveats:
+Why TSV: with the shipped renderer on ten sample result sets, TSV used 28% fewer
+`o200k_base` tokens than 6.1's Markdown table (12% fewer than the new unpadded
+Markdown), decoded back losslessly for all 14,810 cells, and could not be broken
+by any Unicode character. In 12 blind reader runs (Haiku and Sonnet, 82
+questions) the layouts scored the same within noise (TSV 97.6%, new Markdown
+97.6%, 6.1 Markdown 98.8%), so TSV is cheaper without being less accurate; the
+benchmark does not show it is more accurate. Method, numbers and caveats:
 [`benchmarks/2026-10-12-agent-output-format.md`](benchmarks/2026-10-12-agent-output-format.md).
 
 - Add `output_format` to `DatabricksClient.query_agent` and `--format` to the
@@ -15,10 +17,9 @@ tables. Method, numbers and caveats:
   header and one tab-separated line per row. Backslash, tab, newline and
   carriage return in values become `\\`, `\t`, `\n` and `\r`, SQL NULL is `\N`
   and the empty string is an empty field, so a cell can never contain a raw
-  delimiter. On five sample result sets it used about 30% fewer `o200k_base`
-  tokens than 6.1's padded Markdown table.
+  delimiter.
 - **Behavior change:** the default output is now TSV, and the Markdown table no
-  longer pads cells with spaces (`|a (Int64)|b (Utf8)|`, separator `|-|-|`), about 23% fewer tokens.
+  longer pads cells with spaces (`|a (Int64)|b (Utf8)|`, separator `|-|-|`), 19% fewer tokens.
   Pass `output_format="markdown"` / `--format markdown` for the table. Both
   layouts end with the same completeness footer and share the byte budget.
 - The CLI recognises an error by parsing it as a JSON object, so a column named

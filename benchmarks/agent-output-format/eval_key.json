@@ -1,0 +1,494 @@
+[
+ {
+  "id": "orders-1",
+  "dataset": "orders",
+  "question": "What is customer_id of the row with id 117?",
+  "answer": "cust_0049"
+ },
+ {
+  "id": "orders-2",
+  "dataset": "orders",
+  "question": "How many rows have status 'returned'?",
+  "answer": 47
+ },
+ {
+  "id": "orders-3",
+  "dataset": "orders",
+  "question": "How many rows have currency 'EUR' AND status 'shipped'?",
+  "answer": 16
+ },
+ {
+  "id": "orders-4",
+  "dataset": "orders",
+  "question": "What is the id of the row with the highest amount?",
+  "answer": 143
+ },
+ {
+  "id": "orders-5",
+  "dataset": "orders",
+  "question": "How many rows have a SQL NULL note?",
+  "answer": 78
+ },
+ {
+  "id": "orders-6",
+  "dataset": "orders",
+  "question": "What is order_date of the row with id 58?",
+  "answer": "2026-02-11"
+ },
+ {
+  "id": "orders-7",
+  "dataset": "orders",
+  "question": "What is note of the row with id 33? (NULL if SQL NULL)",
+  "answer": "NULL"
+ },
+ {
+  "id": "orders-8",
+  "dataset": "orders",
+  "question": "Which column has the type Date32? Give the column name.",
+  "answer": "order_date"
+ },
+ {
+  "id": "events-1",
+  "dataset": "events",
+  "question": "What is user_name where seq is 211?",
+  "answer": "carla_khan"
+ },
+ {
+  "id": "events-2",
+  "dataset": "events",
+  "question": "How many rows have event_type 'purchase'?",
+  "answer": 79
+ },
+ {
+  "id": "events-3",
+  "dataset": "events",
+  "question": "How many rows have success false?",
+  "answer": 56
+ },
+ {
+  "id": "events-4",
+  "dataset": "events",
+  "question": "What is seq of the row with the largest duration_ms?",
+  "answer": 214
+ },
+ {
+  "id": "events-5",
+  "dataset": "events",
+  "question": "How many rows have a SQL NULL duration_ms?",
+  "answer": 29
+ },
+ {
+  "id": "events-6",
+  "dataset": "events",
+  "question": "What is ts where seq is 75, exactly as it appears in the result?",
+  "answer": "2026-03-01T08:46:31.825949"
+ },
+ {
+  "id": "events-7",
+  "dataset": "events",
+  "question": "How many rows have event_type 'error' AND country_code 'CH'?",
+  "answer": 14
+ },
+ {
+  "id": "events-8",
+  "dataset": "events",
+  "question": "What is event_id where seq is 140?",
+  "answer": "e73a436a-b2d3-19ce-f8a9-06f526bd6221"
+ },
+ {
+  "id": "wide_metrics-1",
+  "dataset": "wide_metrics",
+  "question": "What is m07 where id is 33?",
+  "answer": 65.0
+ },
+ {
+  "id": "wide_metrics-2",
+  "dataset": "wide_metrics",
+  "question": "What is m19 where id is 60?",
+  "answer": "NULL"
+ },
+ {
+  "id": "wide_metrics-3",
+  "dataset": "wide_metrics",
+  "question": "How many rows have m05 greater than 90?",
+  "answer": 6
+ },
+ {
+  "id": "wide_metrics-4",
+  "dataset": "wide_metrics",
+  "question": "What is the id of the row with the largest m12?",
+  "answer": 79
+ },
+ {
+  "id": "wide_metrics-5",
+  "dataset": "wide_metrics",
+  "question": "How many rows have a SQL NULL m03?",
+  "answer": 8
+ },
+ {
+  "id": "wide_metrics-6",
+  "dataset": "wide_metrics",
+  "question": "What is region where id is 45?",
+  "answer": "north"
+ },
+ {
+  "id": "wide_metrics-7",
+  "dataset": "wide_metrics",
+  "question": "How many rows have region 'north'?",
+  "answer": 21
+ },
+ {
+  "id": "wide_metrics-8",
+  "dataset": "wide_metrics",
+  "question": "What is c2 where id is 71?",
+  "answer": 257
+ },
+ {
+  "id": "nested-1",
+  "dataset": "nested",
+  "question": "What is customer.name where id is 13?",
+  "answer": "Hugo Silva"
+ },
+ {
+  "id": "nested-2",
+  "dataset": "nested",
+  "question": "How many rows have customer.vip true?",
+  "answer": 14
+ },
+ {
+  "id": "nested-3",
+  "dataset": "nested",
+  "question": "How many rows have an empty tags list?",
+  "answer": 9
+ },
+ {
+  "id": "nested-4",
+  "dataset": "nested",
+  "question": "What is the first element of scores where id is 7?",
+  "answer": 3
+ },
+ {
+  "id": "nested-5",
+  "dataset": "nested",
+  "question": "How many rows have the tag 'c' in tags?",
+  "answer": 25
+ },
+ {
+  "id": "nested-6",
+  "dataset": "nested",
+  "question": "How many elements does tags have where id is 31?",
+  "answer": 2
+ },
+ {
+  "id": "nested-7",
+  "dataset": "nested",
+  "question": "What is total where id is 40?",
+  "answer": 500.8
+ },
+ {
+  "id": "nested-8",
+  "dataset": "nested",
+  "question": "What is the sum of the scores list where id is 22?",
+  "answer": 19
+ },
+ {
+  "id": "text_messy-1",
+  "dataset": "text_messy",
+  "question": "Give the exact text where id is 3. Write a real tab as \\t.",
+  "answer": "tab\\there"
+ },
+ {
+  "id": "text_messy-2",
+  "dataset": "text_messy",
+  "question": "Give the exact text where id is 5. Write each real newline as \\n.",
+  "answer": "line1\\nline2\\nline3"
+ },
+ {
+  "id": "text_messy-3",
+  "dataset": "text_messy",
+  "question": "Give the exact text where id is 9. Write a real backslash as \\\\ (two characters).",
+  "answer": "back\\\\slash and \\\\n literal"
+ },
+ {
+  "id": "text_messy-4",
+  "dataset": "text_messy",
+  "question": "Is text where id is 11 the two-character string backslash-N, or SQL NULL? Answer 'string' or 'null'.",
+  "answer": "string"
+ },
+ {
+  "id": "text_messy-5",
+  "dataset": "text_messy",
+  "question": "Is text where id is 13 the four-letter string NULL, or SQL NULL? Answer 'string' or 'null'.",
+  "answer": "string"
+ },
+ {
+  "id": "text_messy-6",
+  "dataset": "text_messy",
+  "question": "Is text where id is 15 an empty string, SQL NULL, or something else? Answer 'empty', 'null' or 'other'.",
+  "answer": "empty"
+ },
+ {
+  "id": "text_messy-7",
+  "dataset": "text_messy",
+  "question": "Give the exact text where id is 23. Write each real newline as \\n.",
+  "answer": "| a | b |\\n|---|---|"
+ },
+ {
+  "id": "text_messy-8",
+  "dataset": "text_messy",
+  "question": "Give the exact text where id is 27 (the original characters, not any escaped form).",
+  "answer": "a_b_c *star* [link](u) <b>x</b> &amp; `code` ~s~"
+ },
+ {
+  "id": "text_messy-9",
+  "dataset": "text_messy",
+  "question": "Give the exact text where id is 19, wrapped in single quotes so spaces are visible.",
+  "answer": "'  padded both sides  '"
+ },
+ {
+  "id": "text_messy-10",
+  "dataset": "text_messy",
+  "question": "Does the result show the full text where id is 31 (600 characters), or is it clipped? Answer 'full' or 'clipped'.",
+  "answer": "clipped"
+ },
+ {
+  "id": "text_messy-11",
+  "dataset": "text_messy",
+  "question": "What is the value of the column named 'a|b' where id is 5?",
+  "answer": 15
+ },
+ {
+  "id": "text_messy-12",
+  "dataset": "text_messy",
+  "question": "What is {x} where id is 8? (NULL if SQL NULL)",
+  "answer": "NULL"
+ },
+ {
+  "id": "paths_urls-1",
+  "dataset": "paths_urls",
+  "question": "What is url where id is 14?",
+  "answer": "https://api.example.com/v1/items_20?a=3&b_c=4"
+ },
+ {
+  "id": "paths_urls-2",
+  "dataset": "paths_urls",
+  "question": "What is file_path where id is 77?",
+  "answer": "/data/raw_files/events_2024/part_00064.parquet"
+ },
+ {
+  "id": "paths_urls-3",
+  "dataset": "paths_urls",
+  "question": "What is owner_name where id is 5?",
+  "answer": "team_beta_2"
+ },
+ {
+  "id": "paths_urls-4",
+  "dataset": "paths_urls",
+  "question": "How many rows have owner_name 'team_beta_2'?",
+  "answer": 17
+ },
+ {
+  "id": "paths_urls-5",
+  "dataset": "paths_urls",
+  "question": "What is the id of the row with the largest size_bytes?",
+  "answer": 53
+ },
+ {
+  "id": "paths_urls-6",
+  "dataset": "paths_urls",
+  "question": "How many rows have a url containing the text '<x>'?",
+  "answer": 13
+ },
+ {
+  "id": "paths_urls-7",
+  "dataset": "paths_urls",
+  "question": "How many rows have a file_path ending in '.parquet'?",
+  "answer": 30
+ },
+ {
+  "id": "paths_urls-8",
+  "dataset": "paths_urls",
+  "question": "What is size_bytes where id is 60?",
+  "answer": 920460445
+ },
+ {
+  "id": "nulls_heavy-1",
+  "dataset": "nulls_heavy",
+  "question": "How many rows have a SQL NULL a?",
+  "answer": 58
+ },
+ {
+  "id": "nulls_heavy-2",
+  "dataset": "nulls_heavy",
+  "question": "How many rows have f equal to the empty string (not NULL)?",
+  "answer": 31
+ },
+ {
+  "id": "nulls_heavy-3",
+  "dataset": "nulls_heavy",
+  "question": "How many rows have both a and b SQL NULL?",
+  "answer": 32
+ },
+ {
+  "id": "nulls_heavy-4",
+  "dataset": "nulls_heavy",
+  "question": "What is c where id is 20? (NULL if SQL NULL)",
+  "answer": 0.678
+ },
+ {
+  "id": "nulls_heavy-5",
+  "dataset": "nulls_heavy",
+  "question": "How many rows have e true?",
+  "answer": 24
+ },
+ {
+  "id": "nulls_heavy-6",
+  "dataset": "nulls_heavy",
+  "question": "What is d where id is 64? (NULL if SQL NULL)",
+  "answer": "NULL"
+ },
+ {
+  "id": "nulls_heavy-7",
+  "dataset": "nulls_heavy",
+  "question": "For id 3, is f an empty string, SQL NULL, or a non-empty value? Answer 'empty', 'null' or 'value'.",
+  "answer": "empty"
+ },
+ {
+  "id": "nulls_heavy-8",
+  "dataset": "nulls_heavy",
+  "question": "For id 4, is f an empty string, SQL NULL, or a non-empty value? Answer 'empty', 'null' or 'value'.",
+  "answer": "null"
+ },
+ {
+  "id": "big-1",
+  "dataset": "big",
+  "question": "What is sku where seq is 777?",
+  "answer": "SKU-2411"
+ },
+ {
+  "id": "big-2",
+  "dataset": "big",
+  "question": "What is price where seq is 500?",
+  "answer": 136.37
+ },
+ {
+  "id": "big-3",
+  "dataset": "big",
+  "question": "What is sku where seq is 123?",
+  "answer": "SKU-3621"
+ },
+ {
+  "id": "big-4",
+  "dataset": "big",
+  "question": "What is qty where seq is 999?",
+  "answer": 3
+ },
+ {
+  "id": "big-5",
+  "dataset": "big",
+  "question": "What is city where seq is 250?",
+  "answer": "Accra"
+ },
+ {
+  "id": "big-6",
+  "dataset": "big",
+  "question": "What is the seq of the row with the largest price?",
+  "answer": 230
+ },
+ {
+  "id": "numeric-1",
+  "dataset": "numeric",
+  "question": "What is big where id is 7?",
+  "answer": 9223372036854775807
+ },
+ {
+  "id": "numeric-2",
+  "dataset": "numeric",
+  "question": "What is neg where id is 33?",
+  "answer": -678.3996
+ },
+ {
+  "id": "numeric-3",
+  "dataset": "numeric",
+  "question": "How many rows have big less than 0?",
+  "answer": 63
+ },
+ {
+  "id": "numeric-4",
+  "dataset": "numeric",
+  "question": "What is the id of the row with the largest ratio? (if tied give the lowest id)",
+  "answer": 103
+ },
+ {
+  "id": "numeric-5",
+  "dataset": "numeric",
+  "question": "What is pct where id is 12?",
+  "answer": 21.8
+ },
+ {
+  "id": "numeric-6",
+  "dataset": "numeric",
+  "question": "Which column has type Float32? Give the column name.",
+  "answer": "pct"
+ },
+ {
+  "id": "numeric-7",
+  "dataset": "numeric",
+  "question": "How many rows have ratio less than 0.000001?",
+  "answer": 41
+ },
+ {
+  "id": "numeric-8",
+  "dataset": "numeric",
+  "question": "What is the precision and scale of the neg column's decimal type, as 'p,s'?",
+  "answer": "18,4"
+ },
+ {
+  "id": "logs-1",
+  "dataset": "logs",
+  "question": "Give the exact message where seq is 10. Write real newlines as \\n and tabs as \\t.",
+  "answer": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"
+ },
+ {
+  "id": "logs-2",
+  "dataset": "logs",
+  "question": "How many rows have level 'ERROR'?",
+  "answer": 31
+ },
+ {
+  "id": "logs-3",
+  "dataset": "logs",
+  "question": "What is service where seq is 55?",
+  "answer": "search_worker"
+ },
+ {
+  "id": "logs-4",
+  "dataset": "logs",
+  "question": "How many rows have a message containing the pipe character '|'?",
+  "answer": 14
+ },
+ {
+  "id": "logs-5",
+  "dataset": "logs",
+  "question": "Give the exact message where seq is 85. Write real newlines as \\n and tabs as \\t.",
+  "answer": "Unhandled exception\\n\\tat svc.Handler.run(Handler.java:42)\\n\\tat svc.Main.main(Main.java:7)"
+ },
+ {
+  "id": "logs-6",
+  "dataset": "logs",
+  "question": "What is ts where seq is 33, exactly as it appears in the result?",
+  "answer": "2026-03-01T08:20:43.257478"
+ },
+ {
+  "id": "logs-7",
+  "dataset": "logs",
+  "question": "How many rows have service 'auth_service'?",
+  "answer": 50
+ },
+ {
+  "id": "logs-8",
+  "dataset": "logs",
+  "question": "Give the exact message where seq is 99. Write real newlines as \\n and tabs as \\t.",
+  "answer": "login ok"
+ }
+]

@@ -1,0 +1,5 @@
+id	Int64
+url	Utf8
+file_path	Utf8
+owner_name	Utf8
+size_bytes	Int64

@@ -869,6 +869,22 @@ mod tests {
         }
     }
     #[test]
+    fn tsv_round_trips_every_unicode_scalar_value() {
+        let all: Vec<char> = (0..=0x10ffff_u32).filter_map(char::from_u32).collect();
+        let chunks: Vec<String> = all.chunks(512).map(|c| c.iter().collect()).collect();
+        let b = batch(&["v"], vec![Arc::new(StringArray::from(chunks.clone()))]);
+        let mut r = MarkdownRenderer::new(b.schema(), chunks.len(), 64 << 20, 1 << 20, OutputFormat::Tsv).unwrap();
+        r.push_batch(&b).unwrap();
+        let out = r.finish(true);
+        let table = out.split_once("\n\nrows_shown=").unwrap().0;
+        let lines: Vec<&str> = table.split('\n').collect();
+        assert_eq!(lines.len(), chunks.len() + 1, "a character leaked a line break");
+        for (line, expected) in lines[1..].iter().zip(&chunks) {
+            assert!(!line.contains('\t'), "a character leaked a tab");
+            assert_eq!(tsv_cell(line).as_deref(), Some(expected.as_str()));
+        }
+    }
+    #[test]
     fn markdown_has_no_padding_and_a_minimal_separator() {
         let b = batch(
             &["a", "b"],

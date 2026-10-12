@@ -1,0 +1,6 @@
+seq	Int64
+sku	Utf8
+qty	Int32
+price	Decimal128(10, 2)
+city	Utf8
+flag	Boolean

@@ -1,0 +1,7 @@
+id	Int64
+customer_id	Utf8
+order_date	Date32
+amount	Decimal128(10, 2)
+currency	Utf8
+status	Utf8
+note	Utf8

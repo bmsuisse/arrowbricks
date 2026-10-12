@@ -1,0 +1,40 @@
+{"id": 1, "text": "plain text 1", "a|b": 3, "{x}": "v1"}
+{"id": 2, "text": "plain text 2", "a|b": 6, "{x}": "v2"}
+{"id": 3, "text": "tab\there", "a|b": 9, "{x}": "v3"}
+{"id": 4, "text": "plain text 4", "a|b": 12, "{x}": null}
+{"id": 5, "text": "line1\nline2\nline3", "a|b": 15, "{x}": "v5"}
+{"id": 6, "text": "plain text 6", "a|b": 18, "{x}": "v6"}
+{"id": 7, "text": "pipe|inside|cell", "a|b": 21, "{x}": "v7"}
+{"id": 8, "text": "plain text 8", "a|b": 24, "{x}": null}
+{"id": 9, "text": "back\\slash and \\n literal", "a|b": 27, "{x}": "v9"}
+{"id": 10, "text": "plain text 10", "a|b": 30, "{x}": "v10"}
+{"id": 11, "text": "\\N", "a|b": 33, "{x}": "v11"}
+{"id": 12, "text": "plain text 12", "a|b": 36, "{x}": null}
+{"id": 13, "text": "NULL", "a|b": 39, "{x}": "v13"}
+{"id": 14, "text": "plain text 14", "a|b": 42, "{x}": "v14"}
+{"id": 15, "text": "", "a|b": 45, "{x}": "v15"}
+{"id": 16, "text": "plain text 16", "a|b": 48, "{x}": null}
+{"id": 17, "text": "Zürich — 東京 🚀 café", "a|b": 51, "{x}": "v17"}
+{"id": 18, "text": "plain text 18", "a|b": 54, "{x}": "v18"}
+{"id": 19, "text": "  padded both sides  ", "a|b": 57, "{x}": "v19"}
+{"id": 20, "text": "plain text 20", "a|b": 60, "{x}": null}
+{"id": 21, "text": "quote \"x\" and 'y'", "a|b": 63, "{x}": "v21"}
+{"id": 22, "text": "plain text 22", "a|b": 66, "{x}": "v22"}
+{"id": 23, "text": "| a | b |\n|---|---|", "a|b": 69, "{x}": "v23"}
+{"id": 24, "text": "plain text 24", "a|b": 72, "{x}": null}
+{"id": 25, "text": "crlf\r\nend", "a|b": 75, "{x}": "v25"}
+{"id": 26, "text": "plain text 26", "a|b": 78, "{x}": "v26"}
+{"id": 27, "text": "a_b_c *star* [link](u) <b>x</b> &amp; `code` ~s~", "a|b": 81, "{x}": "v27"}
+{"id": 28, "text": "plain text 28", "a|b": 84, "{x}": null}
+{"id": 29, "text": "true", "a|b": 87, "{x}": "v29"}
+{"id": 30, "text": "plain text 30", "a|b": 90, "{x}": "v30"}
+{"id": 31, "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "a|b": 93, "{x}": "v31"}
+{"id": 32, "text": "plain text 32", "a|b": 96, "{x}": null}
+{"id": 33, "text": "plain text 33", "a|b": 99, "{x}": "v33"}
+{"id": 34, "text": "plain text 34", "a|b": 102, "{x}": "v34"}
+{"id": 35, "text": "plain text 35", "a|b": 105, "{x}": "v35"}
+{"id": 36, "text": "plain text 36", "a|b": 108, "{x}": null}
+{"id": 37, "text": "plain text 37", "a|b": 111, "{x}": "v37"}
+{"id": 38, "text": "plain text 38", "a|b": 114, "{x}": "v38"}
+{"id": 39, "text": "plain text 39", "a|b": 117, "{x}": "v39"}
+{"id": 40, "text": "plain text 40", "a|b": 120, "{x}": null}

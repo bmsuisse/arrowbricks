@@ -1,0 +1,5 @@
+seq	Int64
+ts	Timestamp(µs)
+level	Utf8
+service	Utf8
+message	Utf8

@@ -1,0 +1,5 @@
+id	Int64
+customer	Struct("name": Utf8, "vip": Boolean)
+tags	List(Utf8)
+scores	List(Int32)
+total	Decimal128(10, 2)

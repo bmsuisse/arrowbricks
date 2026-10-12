@@ -103,3 +103,5 @@ select = ["E", "F", "I", "UP", "S", "B"]
 "tests/*" = ["S101", "S106"]
 "rust/arrowbricks_core/tests_py/*" = ["S101", "S106"]
 "tests/arro3_free/*" = ["S101", "S106"]
+# One-off benchmark harness: terse scripts, seeded (non-crypto) randomness, asserts as checks.
+"benchmarks/agent-output-format/*" = ["B905", "E501", "E731", "E741", "S101", "S311"]
