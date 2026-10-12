@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from . import _core
+from ._agent import DEFAULT_AGENT_FORMAT, AgentFormat
 from ._sql import Sql, prepare_sql
 
 TokenProvider = Callable[[], "str | Awaitable[str]"]
@@ -155,11 +156,20 @@ class DatabricksClient:
         max_bytes: int = 10000,
         max_cell_chars: int = 500,
         total_timeout_s: float = 60.0,
+        output_format: AgentFormat = DEFAULT_AGENT_FORMAT,
         catalog: str | None = None,
         schema: str | None = None,
         params: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Return bounded typed Markdown, or actionable JSON on query failure.
+        r"""Return a bounded typed preview, or actionable JSON on query failure.
+
+        `output_format="tsv"` (the default) is the cheapest to read: a
+        `name:Type` header, then one tab-separated line per row. Backslash, tab,
+        newline and carriage return in a value are written as `\\`, `\t`, `\n`
+        and `\r`, SQL NULL is `\N` and the empty string is an empty field, so a
+        cell can never contain a raw delimiter. `"markdown"` is a pipe table
+        without padding (`|a (Int64)|b (Utf8)|`) whose strings are quoted and
+        Markdown-escaped. Both end with the same completeness footer.
 
         Budgets cover rows, the entire UTF-8 output, cell characters and one
         deadline across submission and fetching. The completeness footer marks
@@ -176,6 +186,7 @@ class DatabricksClient:
             max_bytes=max_bytes,
             max_cell_chars=max_cell_chars,
             total_timeout_s=total_timeout_s,
+            output_format=output_format,
             catalog=catalog,
             schema=schema,
             parameters=params,

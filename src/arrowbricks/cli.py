@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+from ._agent import AGENT_FORMATS, DEFAULT_AGENT_FORMAT
+
 
 def _configuration_error(message: str) -> None:
     print(
@@ -30,11 +32,13 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _Parser(description="Databricks SQL to bounded typed Markdown; failures are JSON on stderr.")
+    parser = _Parser(
+        description="Databricks SQL to a bounded typed preview (TSV by default); errors are JSON on stderr."
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("-c", "--sql", "--command", dest="sql", help="SQL statement, sent unchanged")
     source.add_argument("-f", "--file", help="UTF-8 SQL file, or - for stdin; defaults to piped stdin")
-    parser.add_argument("--agent", "-agent", action="store_true", help="agent Markdown output (the default)")
+    parser.add_argument("--agent", "-agent", action="store_true", help="agent output (the default; see --format)")
     parser.add_argument("--host", default=os.environ.get("DATABRICKS_HOST"), help="workspace host (DATABRICKS_HOST)")
     parser.add_argument(
         "--warehouse-id",
@@ -48,8 +52,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rows", type=int, default=1000)
     parser.add_argument("--max-bytes", type=int, default=10000)
     parser.add_argument("--max-cell-chars", type=int, default=500)
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=AGENT_FORMATS,
+        default=DEFAULT_AGENT_FORMAT,
+        help="output layout: tab-separated values (default) or a Markdown pipe table",
+    )
     parser.add_argument("--total-timeout-s", "--timeout", dest="total_timeout_s", type=float, default=60.0)
     return parser
+
+
+def _is_error_json(result: str) -> bool:
+    """Error diagnostics are one JSON object; a TSV header or table never parses as JSON."""
+    if not result.startswith("{"):
+        return False
+    try:
+        return isinstance(json.loads(result), dict)
+    except ValueError:
+        return False
 
 
 async def _run(args: argparse.Namespace, sql: str) -> int:
@@ -69,6 +90,7 @@ async def _run(args: argparse.Namespace, sql: str) -> int:
                 max_bytes=args.max_bytes,
                 max_cell_chars=args.max_cell_chars,
                 total_timeout_s=args.total_timeout_s,
+                output_format=args.output_format,
                 catalog=args.catalog,
                 schema=args.schema,
             )
@@ -76,7 +98,7 @@ async def _run(args: argparse.Namespace, sql: str) -> int:
         _configuration_error(str(exc))
         return 2
     # Locale encoding and newline translation must not change the byte budget.
-    if result.lstrip().startswith("{"):
+    if _is_error_json(result):
         sys.stderr.buffer.write(result.encode("utf-8"))
         return 1
     sys.stdout.buffer.write(result.encode("utf-8"))
@@ -84,7 +106,7 @@ async def _run(args: argparse.Namespace, sql: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one SQL statement; return 0 for Markdown, 1 for query errors, 2 for configuration."""
+    """Run one SQL statement; return 0 for a preview, 1 for query errors, 2 for configuration."""
     parser = _parser()
     args = parser.parse_args(argv)
     if not all((args.host, args.warehouse_id, args.token)):

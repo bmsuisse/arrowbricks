@@ -1,0 +1,5 @@
+id	Int64
+big	Int64
+ratio	Float64
+neg	Decimal128(18, 4)
+pct	Float32

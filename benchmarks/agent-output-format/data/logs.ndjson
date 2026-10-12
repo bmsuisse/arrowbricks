@@ -1,0 +1,120 @@
+{"seq": 1, "ts": "2026-03-01T08:01:07.975956", "level": "INFO", "service": "search_worker", "message": "retry 3|5 failed"}
+{"seq": 2, "ts": "2026-03-01T08:01:32.971242", "level": "INFO", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 3, "ts": "2026-03-01T08:02:17.711938", "level": "ERROR", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 4, "ts": "2026-03-01T08:02:29.227138", "level": "INFO", "service": "billing_api", "message": "cache miss key=user_42"}
+{"seq": 5, "ts": "2026-03-01T08:03:29.649185", "level": "DEBUG", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 6, "ts": "2026-03-01T08:03:46.585549", "level": "DEBUG", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 7, "ts": "2026-03-01T08:04:31.979025", "level": "ERROR", "service": "billing_api", "message": "cache miss key=user_42"}
+{"seq": 8, "ts": "2026-03-01T08:05:05.381120", "level": "ERROR", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 9, "ts": "2026-03-01T08:05:58.833034", "level": "ERROR", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 10, "ts": "2026-03-01T08:06:24.545738", "level": "INFO", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 11, "ts": "2026-03-01T08:07:04.635002", "level": "ERROR", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 12, "ts": "2026-03-01T08:07:29.736028", "level": "INFO", "service": "search_worker", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 13, "ts": "2026-03-01T08:08:15.239210", "level": "WARN", "service": "search_worker", "message": "retry 3|5 failed"}
+{"seq": 14, "ts": "2026-03-01T08:09:08.634156", "level": "DEBUG", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 15, "ts": "2026-03-01T08:09:39.598618", "level": "INFO", "service": "billing_api", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 16, "ts": "2026-03-01T08:10:16.115799", "level": "DEBUG", "service": "billing_api", "message": "cache miss key=user_42"}
+{"seq": 17, "ts": "2026-03-01T08:10:36.717596", "level": "ERROR", "service": "search_worker", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 18, "ts": "2026-03-01T08:11:40.261311", "level": "ERROR", "service": "auth_service", "message": "login ok"}
+{"seq": 19, "ts": "2026-03-01T08:12:05.836781", "level": "INFO", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 20, "ts": "2026-03-01T08:12:24.343313", "level": "DEBUG", "service": "search_worker", "message": "login ok"}
+{"seq": 21, "ts": "2026-03-01T08:13:28.563764", "level": "ERROR", "service": "billing_api", "message": "login ok"}
+{"seq": 22, "ts": "2026-03-01T08:14:05.136782", "level": "DEBUG", "service": "auth_service", "message": "login ok"}
+{"seq": 23, "ts": "2026-03-01T08:14:20.401258", "level": "DEBUG", "service": "billing_api", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 24, "ts": "2026-03-01T08:15:03.364083", "level": "ERROR", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 25, "ts": "2026-03-01T08:15:29.139587", "level": "INFO", "service": "search_worker", "message": "login ok"}
+{"seq": 26, "ts": "2026-03-01T08:16:09.418991", "level": "INFO", "service": "auth_service", "message": "login ok"}
+{"seq": 27, "ts": "2026-03-01T08:16:40.792481", "level": "ERROR", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 28, "ts": "2026-03-01T08:17:50.216418", "level": "INFO", "service": "auth_service", "message": "login ok"}
+{"seq": 29, "ts": "2026-03-01T08:18:14.744697", "level": "WARN", "service": "billing_api", "message": "cache miss key=user_42"}
+{"seq": 30, "ts": "2026-03-01T08:18:31.650959", "level": "ERROR", "service": "auth_service", "message": "login ok"}
+{"seq": 31, "ts": "2026-03-01T08:19:10.484046", "level": "WARN", "service": "auth_service", "message": "login ok"}
+{"seq": 32, "ts": "2026-03-01T08:20:03.596233", "level": "INFO", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 33, "ts": "2026-03-01T08:20:43.257478", "level": "INFO", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 34, "ts": "2026-03-01T08:21:23.279958", "level": "INFO", "service": "billing_api", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 35, "ts": "2026-03-01T08:22:05.891019", "level": "DEBUG", "service": "auth_service", "message": "login ok"}
+{"seq": 36, "ts": "2026-03-01T08:22:26.564345", "level": "INFO", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 37, "ts": "2026-03-01T08:22:49.745910", "level": "INFO", "service": "auth_service", "message": "login ok"}
+{"seq": 38, "ts": "2026-03-01T08:23:26.939797", "level": "INFO", "service": "search_worker", "message": "retry 3|5 failed"}
+{"seq": 39, "ts": "2026-03-01T08:24:15.611052", "level": "WARN", "service": "billing_api", "message": "login ok"}
+{"seq": 40, "ts": "2026-03-01T08:25:06.055940", "level": "WARN", "service": "search_worker", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 41, "ts": "2026-03-01T08:25:35.375238", "level": "WARN", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 42, "ts": "2026-03-01T08:26:04.008049", "level": "WARN", "service": "search_worker", "message": "login ok"}
+{"seq": 43, "ts": "2026-03-01T08:26:49.350130", "level": "WARN", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 44, "ts": "2026-03-01T08:27:34.540388", "level": "ERROR", "service": "search_worker", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 45, "ts": "2026-03-01T08:28:00.098385", "level": "WARN", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 46, "ts": "2026-03-01T08:28:33.828342", "level": "ERROR", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 47, "ts": "2026-03-01T08:29:13.609473", "level": "DEBUG", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 48, "ts": "2026-03-01T08:30:06.357395", "level": "DEBUG", "service": "search_worker", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 49, "ts": "2026-03-01T08:30:41.309950", "level": "WARN", "service": "search_worker", "message": "login ok"}
+{"seq": 50, "ts": "2026-03-01T08:30:58.318262", "level": "INFO", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 51, "ts": "2026-03-01T08:32:02.202147", "level": "WARN", "service": "auth_service", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 52, "ts": "2026-03-01T08:32:33.431128", "level": "WARN", "service": "billing_api", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 53, "ts": "2026-03-01T08:32:54.927009", "level": "WARN", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 54, "ts": "2026-03-01T08:33:43.279903", "level": "WARN", "service": "auth_service", "message": "login ok"}
+{"seq": 55, "ts": "2026-03-01T08:33:55.049136", "level": "ERROR", "service": "search_worker", "message": "login ok"}
+{"seq": 56, "ts": "2026-03-01T08:35:02.187828", "level": "ERROR", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 57, "ts": "2026-03-01T08:35:33.782563", "level": "WARN", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 58, "ts": "2026-03-01T08:36:11.247084", "level": "DEBUG", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 59, "ts": "2026-03-01T08:36:40.913931", "level": "ERROR", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 60, "ts": "2026-03-01T08:37:11.816869", "level": "INFO", "service": "search_worker", "message": "retry 3|5 failed"}
+{"seq": 61, "ts": "2026-03-01T08:38:04.956834", "level": "WARN", "service": "billing_api", "message": "retry 3|5 failed"}
+{"seq": 62, "ts": "2026-03-01T08:38:24.210596", "level": "WARN", "service": "search_worker", "message": "retry 3|5 failed"}
+{"seq": 63, "ts": "2026-03-01T08:39:07.558520", "level": "WARN", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 64, "ts": "2026-03-01T08:39:32.278663", "level": "ERROR", "service": "auth_service", "message": "retry 3|5 failed"}
+{"seq": 65, "ts": "2026-03-01T08:40:15.871390", "level": "WARN", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 66, "ts": "2026-03-01T08:41:16.806876", "level": "ERROR", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 67, "ts": "2026-03-01T08:41:35.904411", "level": "INFO", "service": "search_worker", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 68, "ts": "2026-03-01T08:42:15.635632", "level": "WARN", "service": "auth_service", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 69, "ts": "2026-03-01T08:42:57.776544", "level": "ERROR", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 70, "ts": "2026-03-01T08:43:34.596596", "level": "DEBUG", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 71, "ts": "2026-03-01T08:44:11.721543", "level": "INFO", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 72, "ts": "2026-03-01T08:44:36.322166", "level": "WARN", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 73, "ts": "2026-03-01T08:45:27.075604", "level": "INFO", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 74, "ts": "2026-03-01T08:45:41.878984", "level": "ERROR", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 75, "ts": "2026-03-01T08:46:46.749129", "level": "DEBUG", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 76, "ts": "2026-03-01T08:46:54.108846", "level": "INFO", "service": "billing_api", "message": "login ok"}
+{"seq": 77, "ts": "2026-03-01T08:47:59.198564", "level": "INFO", "service": "billing_api", "message": "retry 3|5 failed"}
+{"seq": 78, "ts": "2026-03-01T08:48:22.656211", "level": "WARN", "service": "search_worker", "message": "login ok"}
+{"seq": 79, "ts": "2026-03-01T08:49:10.396189", "level": "ERROR", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 80, "ts": "2026-03-01T08:49:53.044322", "level": "ERROR", "service": "auth_service", "message": "retry 3|5 failed"}
+{"seq": 81, "ts": "2026-03-01T08:50:13.823887", "level": "DEBUG", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 82, "ts": "2026-03-01T08:50:50.296170", "level": "WARN", "service": "auth_service", "message": "retry 3|5 failed"}
+{"seq": 83, "ts": "2026-03-01T08:51:43.228437", "level": "INFO", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 84, "ts": "2026-03-01T08:52:05.226508", "level": "ERROR", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 85, "ts": "2026-03-01T08:52:25.804132", "level": "DEBUG", "service": "search_worker", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 86, "ts": "2026-03-01T08:53:37.950357", "level": "WARN", "service": "search_worker", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 87, "ts": "2026-03-01T08:53:44.870020", "level": "DEBUG", "service": "search_worker", "message": "login ok"}
+{"seq": 88, "ts": "2026-03-01T08:54:35.815380", "level": "WARN", "service": "auth_service", "message": "login ok"}
+{"seq": 89, "ts": "2026-03-01T08:55:26.311774", "level": "WARN", "service": "auth_service", "message": "login ok"}
+{"seq": 90, "ts": "2026-03-01T08:56:06.383253", "level": "WARN", "service": "billing_api", "message": "cache miss key=user_42"}
+{"seq": 91, "ts": "2026-03-01T08:56:21.376410", "level": "DEBUG", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 92, "ts": "2026-03-01T08:56:59.734325", "level": "ERROR", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 93, "ts": "2026-03-01T08:57:52.867193", "level": "DEBUG", "service": "auth_service", "message": "login ok"}
+{"seq": 94, "ts": "2026-03-01T08:58:04.840965", "level": "DEBUG", "service": "billing_api", "message": "retry 3|5 failed"}
+{"seq": 95, "ts": "2026-03-01T08:58:50.097783", "level": "WARN", "service": "search_worker", "message": "retry 3|5 failed"}
+{"seq": 96, "ts": "2026-03-01T08:59:41.659059", "level": "INFO", "service": "billing_api", "message": "timeout after 30s"}
+{"seq": 97, "ts": "2026-03-01T08:59:52.734792", "level": "WARN", "service": "billing_api", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 98, "ts": "2026-03-01T09:00:32.394481", "level": "INFO", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 99, "ts": "2026-03-01T09:01:25.414767", "level": "DEBUG", "service": "search_worker", "message": "login ok"}
+{"seq": 100, "ts": "2026-03-01T09:02:06.888610", "level": "DEBUG", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 101, "ts": "2026-03-01T09:02:39.990571", "level": "ERROR", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 102, "ts": "2026-03-01T09:03:00.503380", "level": "DEBUG", "service": "billing_api", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 103, "ts": "2026-03-01T09:03:47.829655", "level": "INFO", "service": "auth_service", "message": "retry 3|5 failed"}
+{"seq": 104, "ts": "2026-03-01T09:04:42.109625", "level": "ERROR", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 105, "ts": "2026-03-01T09:04:56.664762", "level": "INFO", "service": "auth_service", "message": "login ok"}
+{"seq": 106, "ts": "2026-03-01T09:05:51.766406", "level": "ERROR", "service": "billing_api", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 107, "ts": "2026-03-01T09:06:20.834248", "level": "DEBUG", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 108, "ts": "2026-03-01T09:06:47.616992", "level": "INFO", "service": "auth_service", "message": "cache miss key=user_42"}
+{"seq": 109, "ts": "2026-03-01T09:07:18.158850", "level": "ERROR", "service": "auth_service", "message": "payload {\"user\":\"x\",\"ok\":true,\"n\":[1,2]}"}
+{"seq": 110, "ts": "2026-03-01T09:08:24.106157", "level": "ERROR", "service": "auth_service", "message": "retry 3|5 failed"}
+{"seq": 111, "ts": "2026-03-01T09:08:55.442244", "level": "WARN", "service": "billing_api", "message": "login ok"}
+{"seq": 112, "ts": "2026-03-01T09:09:26.002388", "level": "ERROR", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 113, "ts": "2026-03-01T09:10:11.120765", "level": "ERROR", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 114, "ts": "2026-03-01T09:10:45.610270", "level": "DEBUG", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 115, "ts": "2026-03-01T09:10:56.551076", "level": "WARN", "service": "auth_service", "message": "login ok"}
+{"seq": 116, "ts": "2026-03-01T09:11:42.595210", "level": "DEBUG", "service": "auth_service", "message": "timeout after 30s"}
+{"seq": 117, "ts": "2026-03-01T09:12:14.148071", "level": "INFO", "service": "search_worker", "message": "cache miss key=user_42"}
+{"seq": 118, "ts": "2026-03-01T09:13:13.794266", "level": "DEBUG", "service": "search_worker", "message": "timeout after 30s"}
+{"seq": 119, "ts": "2026-03-01T09:13:53.349891", "level": "WARN", "service": "search_worker", "message": "Unhandled exception\n\tat svc.Handler.run(Handler.java:42)\n\tat svc.Main.main(Main.java:7)"}
+{"seq": 120, "ts": "2026-03-01T09:14:14.577445", "level": "DEBUG", "service": "search_worker", "message": "login ok"}

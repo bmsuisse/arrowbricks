@@ -1,5 +1,30 @@
 # Changelog
 
+## 6.2.0 — 2026-10-12
+
+Why TSV: with the shipped renderer on ten sample result sets, TSV used 28% fewer
+`o200k_base` tokens than 6.1's Markdown table (12% fewer than the new unpadded
+Markdown), decoded back losslessly for all 14,810 cells, and could not be broken
+by any Unicode character. In 12 blind reader runs (Haiku and Sonnet, 82
+questions) the layouts scored the same within noise (TSV 97.6%, new Markdown
+97.6%, 6.1 Markdown 98.8%), so TSV is cheaper without being less accurate; the
+benchmark does not show it is more accurate. Method, numbers and caveats:
+[`benchmarks/2026-10-12-agent-output-format.md`](benchmarks/2026-10-12-agent-output-format.md).
+
+- Add `output_format` to `DatabricksClient.query_agent` and `--format` to the
+  CLI: `"tsv"` (the new default) or `"markdown"` (typed as the exported
+  `arrowbricks.AgentFormat` literal). TSV prints a `name:Type`
+  header and one tab-separated line per row. Backslash, tab, newline and
+  carriage return in values become `\\`, `\t`, `\n` and `\r`, SQL NULL is `\N`
+  and the empty string is an empty field, so a cell can never contain a raw
+  delimiter.
+- **Behavior change:** the default output is now TSV, and the Markdown table no
+  longer pads cells with spaces (`|a (Int64)|b (Utf8)|`, separator `|-|-|`), 19% fewer tokens.
+  Pass `output_format="markdown"` / `--format markdown` for the table. Both
+  layouts end with the same completeness footer and share the byte budget.
+- The CLI recognises an error by parsing it as a JSON object, so a column named
+  like `{x}` no longer sends a successful TSV result to stderr.
+
 ## 6.1.0 — 2026-10-12
 
 - Accept PEP 750 t-strings (Python 3.14+) as SQL on every method that takes it:

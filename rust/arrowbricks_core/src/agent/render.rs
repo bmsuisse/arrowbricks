@@ -12,7 +12,31 @@ use std::time::Instant;
 const FOOTER_RESERVE: usize = 160;
 const CLIPPED: &str = "…[truncated]";
 
-pub struct MarkdownRenderer {
+/// Text layout of an agent preview.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Tab-separated values, `name:Type` header. `\\`, tab, newline and carriage
+    /// return are backslash-escaped, SQL NULL is `\N` and the empty string is an
+    /// empty field (PostgreSQL `COPY` text conventions), so a cell can never
+    /// contain a raw delimiter.
+    #[default]
+    Tsv,
+    /// Pipe table without padding; strings are quoted and Markdown-escaped.
+    Markdown,
+}
+
+impl OutputFormat {
+    pub fn parse(name: &str) -> Result<Self, &'static str> {
+        match name {
+            "tsv" => Ok(Self::Tsv),
+            "markdown" => Ok(Self::Markdown),
+            _ => Err("output_format must be 'tsv' or 'markdown'"),
+        }
+    }
+}
+
+pub struct AgentRenderer {
+    format: OutputFormat,
     schema: SchemaRef,
     output: String,
     scratch: String,
@@ -25,15 +49,22 @@ pub struct MarkdownRenderer {
     cells_truncated: bool,
     interrupt: Option<Interrupt>,
 }
-impl MarkdownRenderer {
-    pub fn new(schema: SchemaRef, max_rows: usize, max_bytes: usize, max_cell_chars: usize) -> Result<Self, ApiError> {
-        Self::new_inner(schema, max_rows, max_bytes, max_cell_chars, None)
+impl AgentRenderer {
+    pub fn new(
+        schema: SchemaRef,
+        max_rows: usize,
+        max_bytes: usize,
+        max_cell_chars: usize,
+        format: OutputFormat,
+    ) -> Result<Self, ApiError> {
+        Self::new_inner(schema, max_rows, max_bytes, max_cell_chars, format, None)
     }
     pub fn new_with_interrupt(
         schema: SchemaRef,
         max_rows: usize,
         max_bytes: usize,
         max_cell_chars: usize,
+        format: OutputFormat,
         deadline: Instant,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Self, ApiError> {
@@ -42,6 +73,7 @@ impl MarkdownRenderer {
             max_rows,
             max_bytes,
             max_cell_chars,
+            format,
             Some(Interrupt { deadline, cancelled }),
         )
     }
@@ -53,6 +85,7 @@ impl MarkdownRenderer {
         max_rows: usize,
         max_bytes: usize,
         max_cell_chars: usize,
+        format: OutputFormat,
         interrupt: Option<Interrupt>,
     ) -> Result<Self, ApiError> {
         if max_bytes < 256 || max_rows == 0 || max_cell_chars == 0 {
@@ -65,6 +98,7 @@ impl MarkdownRenderer {
         }
         let mut output = String::with_capacity(max_bytes.min(10_000));
         let mut header = EscapedWriter::new(&mut output, usize::MAX, max_bytes - FOOTER_RESERVE);
+        header.tsv = format == OutputFormat::Tsv;
         header.interrupt = interrupt.as_ref();
         let mut full = false;
         if schema.fields().is_empty() {
@@ -73,18 +107,30 @@ impl MarkdownRenderer {
                 .map_err(|_| ApiError::permanent(header.interrupted.unwrap_or("agent schema formatting failed")))?;
         } else {
             let result = (|| -> fmt::Result {
-                header.raw("| ")?;
-                for field in schema.fields() {
-                    header.write_str(field.name())?;
-                    header.raw(" (")?;
-                    write!(header, "{}", field.data_type())?;
-                    header.raw(") | ")?;
-                }
-                header.output.pop();
-                header.bytes += 1;
-                header.raw("\n|")?;
-                for _ in schema.fields() {
-                    header.raw(" --- |")?;
+                match format {
+                    OutputFormat::Markdown => {
+                        header.raw("|")?;
+                        for field in schema.fields() {
+                            header.write_str(field.name())?;
+                            header.raw(" (")?;
+                            write!(header, "{}", field.data_type())?;
+                            header.raw(")|")?;
+                        }
+                        header.raw("\n|")?;
+                        for _ in schema.fields() {
+                            header.raw("-|")?;
+                        }
+                    }
+                    OutputFormat::Tsv => {
+                        for (index, field) in schema.fields().iter().enumerate() {
+                            if index > 0 {
+                                header.raw("\t")?;
+                            }
+                            header.write_str(field.name())?;
+                            header.raw(":")?;
+                            write!(header, "{}", field.data_type())?;
+                        }
+                    }
                 }
                 header.raw("\n")
             })();
@@ -98,6 +144,7 @@ impl MarkdownRenderer {
             }
         }
         Ok(Self {
+            format,
             schema,
             output,
             scratch: String::new(),
@@ -149,9 +196,12 @@ impl MarkdownRenderer {
             }
             self.scratch.clear();
             let available = self.max_bytes - FOOTER_RESERVE - self.output.len();
-            self.scratch.push('|');
+            let tsv = self.format == OutputFormat::Tsv;
+            if !tsv {
+                self.scratch.push('|');
+            }
             let mut row_clipped = false;
-            for (column, formatter) in batch.columns().iter().zip(&formatters) {
+            for (index, (column, formatter)) in batch.columns().iter().zip(&formatters).enumerate() {
                 // Reserve closing quote, clipping marker, and delimiter before formatting.
                 let reserve = CLIPPED.len() + 5;
                 if self.scratch.len().saturating_add(reserve + 2) > available {
@@ -159,8 +209,11 @@ impl MarkdownRenderer {
                     self.omitted_rows = true;
                     return Ok(false);
                 }
-                self.scratch.push(' ');
-                let quote = !column.is_null(row)
+                if tsv && index > 0 {
+                    self.scratch.push('\t');
+                }
+                let quote = !tsv
+                    && !column.is_null(row)
                     && matches!(
                         column.data_type(),
                         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
@@ -170,11 +223,13 @@ impl MarkdownRenderer {
                 }
                 let cell_bytes = available - self.scratch.len() - reserve;
                 let mut sink = EscapedWriter::new(&mut self.scratch, self.max_cell_chars, cell_bytes);
+                sink.tsv = tsv;
                 sink.interrupt = self.interrupt.as_ref();
                 let result = if column.is_null(row) {
                     sink.chars = usize::MAX;
                     sink.bytes = sink.bytes.max(4);
-                    sink.write_str("NULL")
+                    // `\N` is the TSV NULL marker; a literal backslash-N string renders as `\\N`.
+                    sink.raw(if tsv { "\\N" } else { "NULL" })
                         .map_err(|_| arrow_schema::ArrowError::CastError("bounded output".into()))
                 } else if let Some(a) = column.as_any().downcast_ref::<StringArray>() {
                     sink.write_str(a.value(row))
@@ -204,7 +259,9 @@ impl MarkdownRenderer {
                 if quote {
                     self.scratch.push('"');
                 }
-                self.scratch.push_str(" |");
+                if !tsv {
+                    self.scratch.push('|');
+                }
             }
             self.scratch.push('\n');
             if self.scratch.len() > available {
@@ -321,6 +378,7 @@ struct EscapedWriter<'a> {
     interrupt: Option<&'a Interrupt>,
     interrupted: Option<&'static str>,
     until_check: usize,
+    tsv: bool,
 }
 impl<'a> EscapedWriter<'a> {
     fn new(output: &'a mut String, chars: usize, bytes: usize) -> Self {
@@ -332,6 +390,7 @@ impl<'a> EscapedWriter<'a> {
             interrupt: None,
             interrupted: None,
             until_check: 0,
+            tsv: false,
         }
     }
     fn raw(&mut self, text: &str) -> fmt::Result {
@@ -362,6 +421,10 @@ impl Write for EscapedWriter<'_> {
                 return Err(fmt::Error);
             }
             match ch {
+                // TSV needs no Markdown/HTML escaping, only delimiter and control-character safety.
+                '&' | '<' | '>' | '|' | '`' | '*' | '_' | '[' | ']' | '~' | '"' if self.tsv => {
+                    self.raw(ch.encode_utf8(&mut [0; 4]))?
+                }
                 '&' => self.raw("&amp;")?,
                 '<' => self.raw("&lt;")?,
                 '>' => self.raw("&gt;")?,
@@ -412,7 +475,7 @@ mod tests {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
     }
     fn render(batch: &RecordBatch, rows: usize, bytes: usize, chars: usize, exhausted: bool) -> String {
-        let mut r = MarkdownRenderer::new(batch.schema(), rows, bytes, chars).unwrap();
+        let mut r = AgentRenderer::new(batch.schema(), rows, bytes, chars, OutputFormat::Markdown).unwrap();
         r.push_batch(batch).unwrap();
         r.finish(exhausted)
     }
@@ -454,8 +517,19 @@ mod tests {
     fn rendering_interrupts_are_errors_not_clipped_success() {
         let b = batch(&["a"], vec![Arc::new(StringArray::from(vec!["long value"]))]);
         let flag = Arc::new(AtomicBool::new(false));
-        assert!(MarkdownRenderer::new_with_interrupt(b.schema(), 10, 1000, 500, Instant::now(), flag.clone()).is_err());
-        let mut r = MarkdownRenderer::new(b.schema(), 10, 1000, 500).unwrap();
+        assert!(
+            AgentRenderer::new_with_interrupt(
+                b.schema(),
+                10,
+                1000,
+                500,
+                OutputFormat::Markdown,
+                Instant::now(),
+                flag.clone()
+            )
+            .is_err()
+        );
+        let mut r = AgentRenderer::new(b.schema(), 10, 1000, 500, OutputFormat::Markdown).unwrap();
         r.set_interrupt(Instant::now() + std::time::Duration::from_secs(10), flag.clone());
         flag.store(true, Ordering::Relaxed);
         assert!(r.push_batch(&b).unwrap_err().message.contains("cancelled"));
@@ -491,7 +565,7 @@ mod tests {
             out.contains("total_rows=2") && out.contains("complete=false") && out.contains("cells_truncated=true"),
             "{out}"
         );
-        assert!(out.contains("| NULL |"), "{out}");
+        assert!(out.contains("|NULL|"), "{out}");
         assert!(out.contains("next=filter/aggregate SQL or raise budgets"));
     }
     #[test]
@@ -511,7 +585,7 @@ mod tests {
         let out = render(&b, 10, 2000, 500, true);
         assert!(out.contains("complete=true") && out.contains("\"NULL\""), "{out}");
         for (rows, bytes, chars) in [(0, 256, 1), (1, 255, 1), (1, 256, 0)] {
-            assert!(MarkdownRenderer::new(b.schema(), rows, bytes, chars).is_err());
+            assert!(AgentRenderer::new(b.schema(), rows, bytes, chars, OutputFormat::Markdown).is_err());
         }
     }
     #[test]
@@ -538,8 +612,8 @@ mod tests {
         );
         let out = render(&b, 10, 1000, 500, true);
         assert!(out.contains("x (Int64)") && out.contains("x (Utf8)"), "{out}");
-        assert!(out.contains("| 1 | \"NULL\" |"), "{out}");
-        assert!(out.contains("| NULL | NULL |"), "{out}");
+        assert!(out.contains("|1|\"NULL\"|"), "{out}");
+        assert!(out.contains("|NULL|NULL|"), "{out}");
         assert!(out.contains("complete=true") && out.contains("total_rows=2"), "{out}");
     }
     #[test]
@@ -629,10 +703,209 @@ mod tests {
             assert!(out.contains(value), "missing {value}: {out}");
         }
     }
+    fn render_tsv(batch: &RecordBatch, rows: usize, bytes: usize, chars: usize) -> String {
+        let mut r = AgentRenderer::new(batch.schema(), rows, bytes, chars, OutputFormat::Tsv).unwrap();
+        r.push_batch(batch).unwrap();
+        r.finish(true)
+    }
+    /// Reference decoder for the documented TSV cell grammar.
+    fn tsv_cell(raw: &str) -> Option<String> {
+        if raw == "\\N" {
+            return None;
+        }
+        let mut out = String::new();
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next().unwrap() {
+                '\\' => out.push('\\'),
+                't' => out.push('\t'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap());
+                }
+                other => panic!("unexpected escape \\{other}"),
+            }
+        }
+        Some(out)
+    }
+    #[test]
+    fn tsv_is_the_default_layout_with_typed_header() {
+        assert_eq!(OutputFormat::default(), OutputFormat::Tsv);
+        let b = batch(
+            &["id", "label"],
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec![Some("a_b"), None])),
+            ],
+        );
+        let out = render_tsv(&b, 10, 1000, 500);
+        assert_eq!(
+            out,
+            "id:Int64\tlabel:Utf8\n1\ta_b\n2\t\\N\n\nrows_shown=2; complete=true; total_rows=2"
+        );
+    }
+    #[test]
+    fn tsv_tabs_newlines_backslashes_and_markers_cannot_break_the_table() {
+        let nasty = [
+            "plain",
+            "a\tb",
+            "tab at end\t",
+            "\tleading tab",
+            "line1\nline2",
+            "crlf\r\n",
+            "back\\slash",
+            "ends with backslash\\",
+            "\\t is not a tab",
+            "\\N",
+            "NULL",
+            "",
+            " padded ",
+            "pipe|and,comma\"quote\"",
+            "bell\u{7} nul\u{0} nel\u{85}",
+            "Zürich 東京 🚀",
+            "\t\t\t",
+        ];
+        let values: Vec<Option<&str>> = nasty.iter().map(|v| Some(*v)).chain([None]).collect();
+        let b = batch(
+            &["k", "v", "w"],
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..values.len() as i64)),
+                Arc::new(StringArray::from(values.clone())),
+                Arc::new(StringArray::from(values.clone())),
+            ],
+        );
+        let out = render_tsv(&b, 100, 10_000, 500);
+        let (table, footer) = out.split_once("\n\nrows_shown=").unwrap();
+        assert!(footer.contains("complete=true"), "{footer}");
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), values.len() + 1, "a cell leaked a line break: {out:?}");
+        for (line, expected) in lines[1..].iter().zip(&values) {
+            let cells: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cells.len(), 3, "a cell leaked a tab: {line:?}");
+            for cell in &cells[1..] {
+                assert_eq!(tsv_cell(cell).as_deref(), *expected, "{line:?}");
+            }
+        }
+    }
+    #[test]
+    fn tsv_string_null_marker_and_empty_string_are_distinct() {
+        let b = batch(
+            &["s"],
+            vec![Arc::new(StringArray::from(vec![
+                Some("\\N"),
+                None,
+                Some(""),
+                Some("NULL"),
+            ]))],
+        );
+        let out = render_tsv(&b, 10, 1000, 500);
+        assert!(out.contains("\n\\\\N\n\\N\n\nNULL\n"), "{out:?}");
+    }
+    #[test]
+    fn tsv_clips_cells_and_never_exceeds_the_byte_budget() {
+        let b = batch(
+            &["a", "b"],
+            vec![
+                Arc::new(StringArray::from(vec!["\t🦀\n".repeat(300); 10])),
+                Arc::new(Int64Array::from(vec![42; 10])),
+            ],
+        );
+        for bytes in 256..700 {
+            let out = render_tsv(&b, 10, bytes, 500);
+            assert!(out.len() <= bytes, "{} > {bytes}", out.len());
+            assert!(out.contains("complete=false"));
+            for line in out.lines().take_while(|l| !l.is_empty()) {
+                assert_eq!(line.matches('\t').count(), 1, "{line:?}");
+            }
+        }
+        let out = render_tsv(&b, 10, 4000, 3);
+        assert!(
+            out.contains("\\t🦀\\n…[truncated]\t42") || out.contains("…[truncated]\t42"),
+            "{out:?}"
+        );
+        assert!(out.contains("cells_truncated=true"));
+    }
+    #[test]
+    fn tsv_nested_values_and_header_names_are_escaped_too() {
+        use arrow_array::builder::{ListBuilder, StringBuilder};
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("x\ty\nz");
+        builder.append(true);
+        let b = batch(
+            &["we\tird\nname", "list"],
+            vec![Arc::new(Int64Array::from(vec![1])), Arc::new(builder.finish())],
+        );
+        let out = render_tsv(&b, 10, 1000, 500);
+        let lines: Vec<&str> = out.lines().take_while(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2, "{out:?}");
+        assert!(lines[0].starts_with("we\\tird\\nname:Int64\tlist:"), "{out:?}");
+        assert_eq!(lines[1].matches('\t').count(), 1, "{out:?}");
+        assert!(lines[1].contains("x\\ty\\nz"), "{out:?}");
+    }
+    proptest::proptest! {
+        #[test]
+        fn tsv_roundtrips_arbitrary_strings(values in proptest::collection::vec(proptest::option::of("\\PC{0,12}|[\t\n\r\\\\N|]{0,6}"), 1..8)) {
+            let b = batch(&["a", "b"], vec![
+                Arc::new(StringArray::from(values.clone())),
+                Arc::new(StringArray::from(values.clone())),
+            ]);
+            let out = render_tsv(&b, 100, 100_000, 500);
+            let table = out.split_once("\n\nrows_shown=").unwrap().0;
+            let lines: Vec<&str> = table.split('\n').collect();
+            proptest::prop_assert_eq!(lines.len(), values.len() + 1);
+            for (line, expected) in lines[1..].iter().zip(&values) {
+                let cells: Vec<&str> = line.split('\t').collect();
+                proptest::prop_assert_eq!(cells.len(), 2);
+                for cell in cells {
+                    proptest::prop_assert_eq!(tsv_cell(cell), expected.clone());
+                }
+            }
+        }
+    }
+    #[test]
+    fn tsv_round_trips_every_unicode_scalar_value() {
+        let all: Vec<char> = (0..=0x10ffff_u32).filter_map(char::from_u32).collect();
+        let chunks: Vec<String> = all.chunks(512).map(|c| c.iter().collect()).collect();
+        let b = batch(&["v"], vec![Arc::new(StringArray::from(chunks.clone()))]);
+        let mut r = AgentRenderer::new(b.schema(), chunks.len(), 64 << 20, 1 << 20, OutputFormat::Tsv).unwrap();
+        r.push_batch(&b).unwrap();
+        let out = r.finish(true);
+        let table = out.split_once("\n\nrows_shown=").unwrap().0;
+        let lines: Vec<&str> = table.split('\n').collect();
+        assert_eq!(lines.len(), chunks.len() + 1, "a character leaked a line break");
+        for (line, expected) in lines[1..].iter().zip(&chunks) {
+            assert!(!line.contains('\t'), "a character leaked a tab");
+            assert_eq!(tsv_cell(line).as_deref(), Some(expected.as_str()));
+        }
+    }
+    #[test]
+    fn markdown_has_no_padding_and_a_minimal_separator() {
+        let b = batch(
+            &["a", "b"],
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["x"])),
+            ],
+        );
+        let out = render(&b, 10, 1000, 500, true);
+        assert!(out.starts_with("|a (Int64)|b (Utf8)|\n|-|-|\n|1|\"x\"|\n"), "{out}");
+    }
+    #[test]
+    fn output_format_names() {
+        assert_eq!(OutputFormat::parse("tsv"), Ok(OutputFormat::Tsv));
+        assert_eq!(OutputFormat::parse("markdown"), Ok(OutputFormat::Markdown));
+        assert!(OutputFormat::parse("csv").is_err());
+    }
     #[test]
     fn batch_schema_mismatch_errors_and_multiple_batches_append() {
         let b = batch(&["a"], vec![Arc::new(Int64Array::from(vec![1, 2]))]);
-        let mut r = MarkdownRenderer::new(b.schema(), 3, 1000, 500).unwrap();
+        let mut r = AgentRenderer::new(b.schema(), 3, 1000, 500, OutputFormat::Markdown).unwrap();
         assert!(r.push_batch(&b).unwrap());
         assert!(!r.push_batch(&b).unwrap());
         assert_eq!(r.rows(), 3);
@@ -640,7 +913,7 @@ mod tests {
         let out = r.finish(false);
         assert!(out.contains("rows_shown=3") && !out.contains("total_rows="));
         let other = batch(&["b"], vec![Arc::new(Int64Array::from(vec![1]))]);
-        let mut r = MarkdownRenderer::new(b.schema(), 3, 1000, 500).unwrap();
+        let mut r = AgentRenderer::new(b.schema(), 3, 1000, 500, OutputFormat::Markdown).unwrap();
         assert!(r.push_batch(&other).is_err());
     }
 }

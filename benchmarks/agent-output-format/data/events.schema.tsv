@@ -1,0 +1,8 @@
+seq	Int64
+event_id	Utf8
+ts	Timestamp(µs)
+user_name	Utf8
+event_type	Utf8
+duration_ms	Int32
+success	Boolean
+country_code	Utf8

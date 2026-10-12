@@ -1,0 +1,4 @@
+id	Int64
+text	Utf8
+a|b	Int32
+{x}	Utf8

@@ -1,0 +1,60 @@
+{"id": 1, "customer": {"name": "Finn Khan", "vip": false}, "tags": ["d"], "scores": [9, 7, 4], "total": 335.7}
+{"id": 2, "customer": {"name": "Anna Silva", "vip": false}, "tags": ["d"], "scores": [2, 6, 9, 5], "total": 106.28}
+{"id": 3, "customer": {"name": "Elif Rossi", "vip": false}, "tags": ["d", "b"], "scores": [2, 6, 6], "total": 524.44}
+{"id": 4, "customer": {"name": "Dev Tanaka", "vip": false}, "tags": [], "scores": [3, 9, 5, 4], "total": 269.89}
+{"id": 5, "customer": {"name": "Dev Meier", "vip": false}, "tags": ["c"], "scores": [3, 5, 6], "total": 275.24}
+{"id": 6, "customer": {"name": "Finn Nguyen", "vip": false}, "tags": ["a"], "scores": [6, 7, 7], "total": 723.83}
+{"id": 7, "customer": {"name": "Hugo Tanaka", "vip": false}, "tags": ["d"], "scores": [3, 4, 2, 6], "total": 587.3}
+{"id": 8, "customer": {"name": "Hugo Silva", "vip": false}, "tags": ["b", "d", "a", "c"], "scores": [1], "total": 878.61}
+{"id": 9, "customer": {"name": "Finn Khan", "vip": false}, "tags": ["e", "c"], "scores": [9], "total": 32.8}
+{"id": 10, "customer": {"name": "Hugo Khan", "vip": false}, "tags": [], "scores": [5], "total": 450.34}
+{"id": 11, "customer": {"name": "Ben Khan", "vip": true}, "tags": ["c", "e", "b", "d"], "scores": [4, 4, 5], "total": 868.35}
+{"id": 12, "customer": {"name": "Gina Tanaka", "vip": false}, "tags": ["a", "c", "e", "b"], "scores": [6], "total": 623.76}
+{"id": 13, "customer": {"name": "Hugo Silva", "vip": false}, "tags": ["b", "d", "e", "a"], "scores": [5, 3, 2, 4], "total": 793.01}
+{"id": 14, "customer": {"name": "Hugo Tanaka", "vip": false}, "tags": ["a", "b"], "scores": [6, 9], "total": 620.68}
+{"id": 15, "customer": {"name": "Elif Rossi", "vip": true}, "tags": ["e"], "scores": [5], "total": 445.7}
+{"id": 16, "customer": {"name": "Gina Khan", "vip": false}, "tags": ["b"], "scores": [4], "total": 600.12}
+{"id": 17, "customer": {"name": "Finn Meier", "vip": false}, "tags": ["b"], "scores": [5], "total": 570.6}
+{"id": 18, "customer": {"name": "Ben Tanaka", "vip": false}, "tags": ["c", "e", "a"], "scores": [3, 5, 2, 3], "total": 730.87}
+{"id": 19, "customer": {"name": "Anna Khan", "vip": false}, "tags": ["d", "c", "a"], "scores": [9, 6, 6, 3], "total": 41.78}
+{"id": 20, "customer": {"name": "Dev Khan", "vip": true}, "tags": ["b", "d", "a", "e"], "scores": [8, 7, 4, 7], "total": 48.28}
+{"id": 21, "customer": {"name": "Elif Silva", "vip": true}, "tags": ["a", "b", "d"], "scores": [3, 8], "total": 711.42}
+{"id": 22, "customer": {"name": "Carla Silva", "vip": false}, "tags": ["a", "e", "c", "b"], "scores": [3, 8, 8], "total": 155.8}
+{"id": 23, "customer": {"name": "Ben Meier", "vip": false}, "tags": ["d", "c"], "scores": [5, 5, 5], "total": 897.46}
+{"id": 24, "customer": {"name": "Carla Khan", "vip": false}, "tags": ["d", "c", "a"], "scores": [7], "total": 334.08}
+{"id": 25, "customer": {"name": "Finn Silva", "vip": false}, "tags": ["e", "a", "d", "b"], "scores": [3, 9, 2, 9], "total": 451.78}
+{"id": 26, "customer": {"name": "Gina Tanaka", "vip": false}, "tags": [], "scores": [6, 5], "total": 800.19}
+{"id": 27, "customer": {"name": "Ben Tanaka", "vip": false}, "tags": ["b", "e", "d"], "scores": [4], "total": 760.34}
+{"id": 28, "customer": {"name": "Dev Meier", "vip": true}, "tags": ["e", "d"], "scores": [4], "total": 830.28}
+{"id": 29, "customer": {"name": "Anna Nguyen", "vip": false}, "tags": ["c"], "scores": [7, 2, 5, 8], "total": 211.94}
+{"id": 30, "customer": {"name": "Anna Silva", "vip": false}, "tags": [], "scores": [6], "total": 859.09}
+{"id": 31, "customer": {"name": "Ben Meier", "vip": false}, "tags": ["d", "c"], "scores": [4, 7, 8], "total": 70.66}
+{"id": 32, "customer": {"name": "Hugo Tanaka", "vip": false}, "tags": ["c", "a", "e", "b"], "scores": [1, 7], "total": 529.78}
+{"id": 33, "customer": {"name": "Hugo Tanaka", "vip": true}, "tags": ["c", "a", "e", "b"], "scores": [1, 4, 9], "total": 244.42}
+{"id": 34, "customer": {"name": "Ben Meier", "vip": true}, "tags": ["c"], "scores": [9], "total": 782.39}
+{"id": 35, "customer": {"name": "Carla Nguyen", "vip": true}, "tags": [], "scores": [2, 6, 1, 2], "total": 111.34}
+{"id": 36, "customer": {"name": "Gina Nguyen", "vip": false}, "tags": ["d", "e", "b", "c"], "scores": [2], "total": 849.64}
+{"id": 37, "customer": {"name": "Hugo Meier", "vip": false}, "tags": [], "scores": [6, 3, 2, 3], "total": 753.95}
+{"id": 38, "customer": {"name": "Carla Silva", "vip": true}, "tags": ["d", "e", "a"], "scores": [5], "total": 885.52}
+{"id": 39, "customer": {"name": "Anna Meier", "vip": true}, "tags": ["b"], "scores": [4, 4], "total": 204.43}
+{"id": 40, "customer": {"name": "Dev Tanaka", "vip": false}, "tags": ["d"], "scores": [3, 4, 4, 3], "total": 500.8}
+{"id": 41, "customer": {"name": "Gina Rossi", "vip": true}, "tags": ["b", "a"], "scores": [2, 9], "total": 496.06}
+{"id": 42, "customer": {"name": "Carla Nguyen", "vip": false}, "tags": ["b"], "scores": [5, 4], "total": 626.27}
+{"id": 43, "customer": {"name": "Anna Nguyen", "vip": false}, "tags": ["e", "b", "c"], "scores": [4, 9], "total": 465.33}
+{"id": 44, "customer": {"name": "Hugo Silva", "vip": false}, "tags": ["b", "e", "c", "a"], "scores": [6, 7], "total": 76.72}
+{"id": 45, "customer": {"name": "Elif Khan", "vip": true}, "tags": ["c", "d", "b"], "scores": [9, 6, 2], "total": 245.81}
+{"id": 46, "customer": {"name": "Dev Meier", "vip": false}, "tags": ["b", "c", "a", "e"], "scores": [6, 4], "total": 506.8}
+{"id": 47, "customer": {"name": "Carla Rossi", "vip": false}, "tags": ["b", "d"], "scores": [2], "total": 655.64}
+{"id": 48, "customer": {"name": "Hugo Meier", "vip": true}, "tags": ["d"], "scores": [7, 1, 4], "total": 522.87}
+{"id": 49, "customer": {"name": "Finn Khan", "vip": false}, "tags": ["c", "b", "d", "e"], "scores": [3, 5, 5], "total": 259.97}
+{"id": 50, "customer": {"name": "Hugo Tanaka", "vip": false}, "tags": ["b", "e"], "scores": [4], "total": 848.8}
+{"id": 51, "customer": {"name": "Elif Meier", "vip": false}, "tags": [], "scores": [2, 8, 1], "total": 790.71}
+{"id": 52, "customer": {"name": "Gina Meier", "vip": false}, "tags": ["b", "a"], "scores": [4, 7, 3], "total": 207.98}
+{"id": 53, "customer": {"name": "Finn Rossi", "vip": false}, "tags": [], "scores": [1, 4, 1, 7], "total": 494.07}
+{"id": 54, "customer": {"name": "Gina Khan", "vip": false}, "tags": ["c"], "scores": [2, 9, 1], "total": 99.01}
+{"id": 55, "customer": {"name": "Gina Tanaka", "vip": false}, "tags": ["b"], "scores": [8, 8, 2, 4], "total": 105.33}
+{"id": 56, "customer": {"name": "Gina Khan", "vip": false}, "tags": ["c", "e", "d", "a"], "scores": [7, 6], "total": 788.35}
+{"id": 57, "customer": {"name": "Anna Meier", "vip": true}, "tags": [], "scores": [1, 5, 3, 4], "total": 24.3}
+{"id": 58, "customer": {"name": "Dev Rossi", "vip": false}, "tags": ["d", "c", "b", "e"], "scores": [6, 4, 7, 2], "total": 246.84}
+{"id": 59, "customer": {"name": "Carla Rossi", "vip": false}, "tags": ["b", "e"], "scores": [1, 4, 5], "total": 115.25}
+{"id": 60, "customer": {"name": "Dev Rossi", "vip": false}, "tags": ["c", "a", "e", "b"], "scores": [8, 2], "total": 658.58}

@@ -36,7 +36,7 @@ Clipped previews have `complete=false`; they remain successful queries with
 exit code 0. These limits bound the returned preview and stop further fetching
 once full; they do not limit the warehouse's scan cost. See [Agent results](#agent-results) for completeness and cancellation.
 
-Success writes only Markdown to stdout, so it can be piped directly into an
+Success writes only the preview to stdout, so it can be piped directly into an
 agent. Query failures write JSON to stderr and exit 1; invalid configuration
 writes JSON to stderr and exits 2. Help uses the usual `--help` output and exits
 0. Ctrl-C interrupts the query, writes JSON to stderr and exits 130.
@@ -125,8 +125,8 @@ extra dependency.
 
 ## Agent results
 
-`query_agent` returns one compact string: a typed Markdown table on success,
-or JSON with `category`, `message` and `next_step` on database or transport
+`query_agent` returns one compact string: a typed TSV preview (or Markdown
+table) on success, or JSON with `category`, `message` and `next_step` on database or transport
 failure. It formats Arrow directly in Rust and needs no optional Python Arrow
 packages. Both `thrift` (default) and `sea` are supported.
 
@@ -140,13 +140,38 @@ async with DatabricksClient(host=..., warehouse_id=..., token=...) as client:
         max_bytes=10000,
         max_cell_chars=500,
         total_timeout_s=60.0,
+        output_format="tsv",  # or "markdown"
         # catalog=None, schema=None, params=None
     )
     print(result)
 ```
 
-Column headers include Arrow types. Strings are quoted, so SQL `NULL` differs
-from the string `"NULL"`; Markdown, HTML, pipes and line breaks are escaped.
+Column headers include Arrow types. Tell success from failure by parsing the
+result as JSON (`json.loads`): only an error is a JSON object.
+
+`output_format="tsv"` (the default) is the cheapest layout:
+
+```
+id:Int64<TAB>note:Utf8
+1<TAB>a\tb
+2<TAB>\N
+
+rows_shown=2; complete=true; total_rows=2
+```
+
+Backslash, tab, newline and carriage return inside a value are written as
+`\\`, `\t`, `\n` and `\r`; other control characters as `\uXXXX`. SQL `NULL` is
+`\N`, the string `\N` is `\\N`, and the empty string is an empty field, so each
+row is exactly one line with one tab between columns whatever the data holds.
+Nested values (lists, structs, maps) use Arrow's display text, escaped the same
+way. NULL inside a nested value prints as `NULL`, not `\N`. The footer is the last
+line: read it from the end rather than splitting at the first blank line, because a
+one-column result of empty strings has blank data lines too.
+
+`output_format="markdown"` is a pipe table without padding
+(`|id (Int64)|note (Utf8)|`, separator `|-|-|`). Strings are quoted, so SQL
+`NULL` differs from the string `"NULL"`; Markdown, HTML, pipes and line breaks
+are escaped. Both layouts share the footer and the byte budget.
 Clipped cells carry `…[truncated]`. The footer gives `rows_shown`, `complete`,
 and an exact `total_rows` only when the result is exhausted. Row, byte or cell
 clipping makes `complete=false`; an unexhausted result reports only a fetched
@@ -174,9 +199,9 @@ result paging. Use the cursor API when you need to consume a larger result.
 python examples/agent_mode.py --protocol sea --sql 'SELECT 1 AS answer'
 ```
 
-The example delegates to the installed CLI: Markdown goes to stdout and error
-JSON goes to stderr. Its exit codes are 0 for Markdown, 1 for a query error and
-2 for invalid configuration. A clipped Markdown preview is still a successful query; inspect
+The example delegates to the installed CLI: the preview goes to stdout and error
+JSON goes to stderr. Its exit codes are 0 for a preview, 1 for a query error and
+2 for invalid configuration. `--format markdown` selects the table. A clipped preview is still a successful query; inspect
 its completeness footer before using it as a complete dataset.
 
 ## SQL safety: t-strings and `LiteralString`

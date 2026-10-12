@@ -144,9 +144,8 @@ async def test_typed_ordered_rows(agent_server):
     ]
     client = install(blobs, [2, 2], delay=0.03, concurrency=4)
     text = await client.query_agent("SELECT id, label FROM t ORDER BY id")
-    assert text.startswith("|")
-    assert "id" in text and "Int64" in text and "Utf8" in text
-    assert [text.index(f"row\\_{i}") for i in range(4)] == sorted(text.index(f"row\\_{i}") for i in range(4))
+    assert text.startswith("id:Int64\tlabel:Utf8\n")
+    assert [text.index(f"row_{i}") for i in range(4)] == sorted(text.index(f"row_{i}") for i in range(4))
     assert "complete=true" in text and "rows_shown=4" in text
     assert len(calls["submit"]) == 1
 
@@ -167,12 +166,64 @@ async def test_unicode_null_and_markdown_are_distinct(agent_server):
     install, _, _, _ = agent_server
     values = [None, "NULL", "雪🙂|\\<b>*x*\nline"]
     client = install([ipc([("v", values, core.DataType.string())])], [3])
-    text = await client.query_agent("SELECT v FROM t")
+    text = await client.query_agent("SELECT v FROM t", output_format="markdown")
+    assert text.startswith("|v (Utf8)|\n|-|\n")
     assert "雪🙂" in text
     assert "\\|" in text and "&lt;b&gt;" in text
     assert "\\*x\\*" in text
-    assert "| NULL |" in text and '| "NULL" |' in text
+    assert "|NULL|" in text and '|"NULL"|' in text
     assert "complete=true" in text
+
+
+async def test_tsv_cells_with_tabs_newlines_and_markers_cannot_break_rows(agent_server):
+    import arro3.core as core
+
+    install, _, _, _ = agent_server
+    values = ["plain", "a\tb", "tab end\t", "x\ny\r\nz", "back\\slash", "\\N", "NULL", "", None, '雪\t🙂|,"q"']
+    ids = list(range(len(values)))
+    client = install([ipc([("id", ids, core.DataType.int64()), ("v", values, core.DataType.string())])], [len(values)])
+    text = await client.query_agent("SELECT id, v FROM t")
+    table, footer = text.split("\n\nrows_shown=")
+    assert f"rows_shown={len(values)}; complete=true" in "rows_shown=" + footer
+    lines = table.split("\n")
+    assert lines[0] == "id:Int64\tv:Utf8"
+    assert len(lines) == len(values) + 1
+    assert all(line.count("\t") == 1 for line in lines)
+
+    def decode(cell):
+        if cell == "\\N":
+            return None
+        return (
+            cell.replace("\\\\", "\0")
+            .replace("\\t", "\t")
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\0", "\\")
+        )
+
+    assert [decode(line.split("\t")[1]) for line in lines[1:]] == values
+    assert lines[2].split("\t")[1] == "a\\tb"
+    assert lines[6].split("\t")[1] == "\\\\N"
+
+
+async def test_markdown_and_tsv_share_the_footer(agent_server):
+    import arro3.core as core
+
+    install, _, _, _ = agent_server
+    client = install([ipc([("id", [1, 2], core.DataType.int64())])], [2])
+    tsv = await client.query_agent("SELECT id FROM t")
+    client = install([ipc([("id", [1, 2], core.DataType.int64())])], [2])
+    md = await client.query_agent("SELECT id FROM t", output_format="markdown")
+    assert tsv == "id:Int64\n1\n2\n\nrows_shown=2; complete=true; total_rows=2"
+    assert md == "|id (Int64)|\n|-|\n|1|\n|2|\n\nrows_shown=2; complete=true; total_rows=2"
+
+
+async def test_invalid_output_format_is_rejected_before_submission(agent_server):
+    install, calls, _, _ = agent_server
+    client = install([], [])
+    with pytest.raises(ValueError, match="output_format"):
+        await client.query_agent("SELECT 1", output_format="csv")
+    assert calls["submit"] == []
 
 
 async def test_duplicate_column_names_remain_in_position(agent_server):
@@ -324,8 +375,9 @@ async def test_nested_values_are_rendered_without_python_materialization(agent_s
     )
     client = install([ipc([("items", values, values.type)])], [3])
     text = await client.query_agent("SELECT items FROM t")
-    assert "List" in text and r"\[1, 2\]" in text and r"\[\]" in text
-    assert "NULL" in text and "complete=true" in text
+    assert text.splitlines()[0].startswith("items:List")
+    assert text.splitlines()[1:4] == ["[1, 2]", "\\N", "[]"]
+    assert "complete=true" in text
 
 
 async def test_catalog_schema_and_parameters_forwarded_without_sql_rewrite(agent_server):
@@ -365,7 +417,7 @@ async def test_empty_sea_manifest_preserves_column_metadata(mock_server):
     )
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
     text = await client.query_agent("SELECT 1 AS empty_column WHERE false")
-    assert r"empty\_column" in text
+    assert "empty_column" in text
     assert "rows_shown=0" in text and "complete=true" in text
 
 
@@ -408,7 +460,7 @@ async def test_boolean_float_and_null_scalar_values(agent_server):
     text = await client.query_agent("SELECT flag, amount FROM t")
     assert "Boolean" in text and "Float64" in text
     assert "true" in text and "false" in text
-    assert "1.25" in text and "-2.5" in text and "NULL" in text
+    assert "1.25" in text and "-2.5" in text and "\\N" in text
     assert "complete=true" in text
 
 

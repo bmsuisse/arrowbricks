@@ -7,7 +7,7 @@
 
 - **Zero required Python dependencies.** One precompiled wheel. No Rust toolchain or cloud SDK needed.
 - **Fast Rust core.** Concurrent chunk downloads, lazy Arrow decoding, and streaming NDJSON, with result order preserved.
-- **Agent mode, new in 6.0.** A CLI and Python API that return compact typed Markdown, explicit truncation, and actionable JSON errors. Formatting stays in Rust.
+- **Agent mode, new in 6.0.** A CLI and Python API that return compact typed TSV (or a Markdown table), explicit truncation, and actionable JSON errors. Formatting stays in Rust.
 
 Use Thrift by default or the Statement Execution API with `protocol="sea"`.
 Bring a token or your own token-refresh callable.
@@ -34,13 +34,16 @@ export DATABRICKS_TOKEN='your-access-token'
 arrowbricks -c 'SELECT 1 AS answer'
 ```
 
-```markdown
-| answer (Int32) |
-| --- |
-| 1 |
+```text
+answer:Int32
+1
 
 rows_shown=1; complete=true; total_rows=1
 ```
+
+Output is tab-separated by default (cheapest to read; tabs, newlines and
+backslashes in values are escaped, NULL is `\N`). `--format markdown` /
+`output_format="markdown"` gives a pipe table instead.
 
 Agent mode is the CLI default. SQL files and piped stdin work too:
 
@@ -61,7 +64,7 @@ from arrowbricks import DatabricksClient
 
 async with DatabricksClient(host=..., warehouse_id=..., token=...) as client:
     text = await client.query_agent("SELECT 1 AS answer", max_bytes=4000)
-    print(text)  # Markdown on success; JSON on query failure
+    print(text)  # TSV on success; JSON on query failure
 ```
 
 Give your agent the reusable [Arrowbricks skill](skills/arrowbricks/SKILL.md).

@@ -109,6 +109,7 @@ class Client:
         max_bytes: int = 10000,
         max_cell_chars: int = 500,
         total_timeout_s: float = 60.0,
+        output_format: str = "tsv",
         catalog: str | None = None,
         schema: str | None = None,
         parameters: list[dict[str, Any]] | None = None,
