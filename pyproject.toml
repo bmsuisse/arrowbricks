@@ -1,6 +1,6 @@
 [project]
 name = "arrowbricks"
-version = "6.0.1"
+version = "6.1.0"
 description = "Rust-powered Databricks SQL client and agent CLI with Arrow/NDJSON streaming, bounded Markdown previews, actionable JSON diagnostics, and zero required Python dependencies."
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,9 @@ arrowbricks = "arrowbricks.cli:main"
 # Row materialization converts our capsule table through arro3-core.
 # Arrow fetches and streaming do not need this optional dependency.
 arro3 = ["arro3-core>=0.8"]
+# Only for passing sqlglot expressions as SQL (`Cursor.execute(expr)`); they
+# are rendered in the Databricks dialect. Nothing imports sqlglot at runtime.
+sqlglot = ["sqlglot>=27"]
 
 [project.urls]
 Repository = "https://github.com/bmsuisse/arrowbricks"
@@ -74,6 +77,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
+    "sqlglot>=27",
     "ty>=0.0.65",
 ]
 

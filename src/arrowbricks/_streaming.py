@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Iterator
 from typing import Any, BinaryIO, TypeVar, cast
 
 from . import _core
+from ._sql import Sql, prepare_sql
 from .client import DatabricksClient
 
 __all__ = [
@@ -192,7 +193,7 @@ def _window_value(name: str, value: int | None) -> int | None:
 
 async def stream_query_json(
     client: DatabricksClient,
-    sql: str,
+    sql: Sql,
     *,
     params: list[dict[str, Any]] | None = None,
     row_limit: int | None = None,
@@ -236,12 +237,13 @@ async def stream_query_json(
     then yields each row individually."""
     if non_finite_floats not in ("null", "string"):
         raise ValueError(f"non_finite_floats must be 'null' or 'string', got {non_finite_floats!r}")
-    sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
+    text, params = prepare_sql(sql, params)
+    text = windowed_sql(text, row_limit=row_limit, offset=offset)
     core_client = client._core_client  # noqa: SLF001 -- same package, see client.py
 
     with rust_timeout_as_query_timeout():
         async for item in core_client.stream_ndjson_lines(
-            sql,
+            text,
             catalog=catalog,
             schema=schema,
             parameters=params,

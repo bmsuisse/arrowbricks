@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from arrowbricks import HEARTBEAT, connect
+from arrowbricks import HEARTBEAT, connect, unsafe_sql
 from arrowbricks.cursor import Cursor
 
 app = FastAPI()
@@ -60,7 +60,7 @@ async def _sse(sql: str) -> AsyncIterator[str]:
     deadline = loop.time() + _TOTAL_TIMEOUT_S
     cursor = conn.cursor()
 
-    async for item in cursor.execute_streamed(sql, total_timeout_s=_TOTAL_TIMEOUT_S):
+    async for item in cursor.execute_streamed(unsafe_sql(sql), total_timeout_s=_TOTAL_TIMEOUT_S):
         if item is HEARTBEAT:
             yield ": keep-alive\n\n"
             continue

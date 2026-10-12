@@ -21,6 +21,7 @@ from operator import index
 from typing import TYPE_CHECKING, Any
 
 from . import _core
+from ._sql import Sql, prepare_sql
 from ._streaming import HEARTBEAT, await_with_heartbeat, rust_timeout_as_query_timeout, windowed_sql
 from .client import DatabricksClient
 
@@ -109,7 +110,7 @@ class Cursor:
 
     def execute_streamed(
         self,
-        sql: str,
+        sql: Sql,
         parameters: list[dict[str, Any]] | None = None,
         *,
         row_limit: int | None = None,
@@ -132,7 +133,8 @@ class Cursor:
         back to a new external-links execution. If conversion fails after
         the statement succeeds, it raises an error without resubmitting SQL.
         Thrift ignores this option because it already supports direct results."""
-        sql = windowed_sql(sql, row_limit=row_limit, offset=offset)
+        text, parameters = prepare_sql(sql, parameters)
+        text = windowed_sql(text, row_limit=row_limit, offset=offset)
 
         async def _gen() -> AsyncIterator[Any]:
             _core._validate_timeout(total_timeout_s)
@@ -153,7 +155,7 @@ class Cursor:
             self._row_pos = 0
             core_client = self._client._core_client  # noqa: SLF001 -- same package, see client.py
             submit = core_client.execute(
-                sql, catalog=catalog, schema=schema, parameters=parameters, prefer_inline=prefer_inline
+                text, catalog=catalog, schema=schema, parameters=parameters, prefer_inline=prefer_inline
             )
             async for item in await_with_heartbeat(submit, total_timeout_s=total_timeout_s):
                 if item is HEARTBEAT:
@@ -170,7 +172,7 @@ class Cursor:
 
     async def execute(
         self,
-        sql: str,
+        sql: Sql,
         parameters: list[dict[str, Any]] | None = None,
         *,
         row_limit: int | None = None,
@@ -184,7 +186,10 @@ class Cursor:
         await, like a real DB-API cursor's execute(). `parameters`, if given,
         is Databricks' own named-parameter format --
         [{"name": ..., "value": ..., "type": ...}] bound against `:name`
-        markers in `sql`, not DB-API's `?`/`%s` placeholder style. See
+        markers in `sql`, not DB-API's `?`/`%s` placeholder style. On Python
+        3.14+ pass a t-string instead (`t"... WHERE id = {user_id}"`): each
+        interpolation is bound as a typed named parameter, and `{name:i}`
+        quotes an identifier -- see `_sql.py`. See
         `execute_streamed`'s own docstring for what `prefer_inline` does."""
         async for _ in self.execute_streamed(
             sql,

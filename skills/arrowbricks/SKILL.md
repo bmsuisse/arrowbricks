@@ -53,6 +53,9 @@ result = asyncio.run(preview("SELECT 1 AS answer"))
 ```
 
 `params` accepts named `{"name": ..., "value": ..., "type": ...}` objects.
+Never f-string values into SQL: on Python 3.14+ put them in a t-string
+(`t"... WHERE id = {user_id}"`, bound as parameters, `:i` for identifiers) or use `params`.
+`arrowbricks.unsafe_sql(text)` is only for SQL you vouch for.
 Defaults are 1000 rows, 10000 UTF-8 output bytes, 500 characters per cell and
 60 seconds. Row/cell limits are positive; bytes are at least 256; timeout is
 finite and non-negative. The deadline spans submission, fetching and rendering. Stopping
