@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::client::{ApiError, DbClient, Protocol};
 use crate::pipeline;
-use render::MarkdownRenderer;
+use render::AgentRenderer;
 pub use render::OutputFormat;
 
 #[derive(Clone, Copy)]
@@ -161,7 +161,7 @@ pub async fn query(
             while !finished {
                 let want = renderer
                     .as_ref()
-                    .map_or(128, |r: &MarkdownRenderer| {
+                    .map_or(128, |r: &AgentRenderer| {
                         options.max_rows.saturating_sub(r.rows()).min(128)
                     })
                     .min(options.max_rows);
@@ -170,7 +170,7 @@ pub async fn query(
                 let mut render_task = tokio::task::spawn_blocking(move || {
                     let mut renderer = match renderer {
                         Some(renderer) => renderer,
-                        None => MarkdownRenderer::new_with_interrupt(
+                        None => AgentRenderer::new_with_interrupt(
                             schema.unwrap_or_else(|| Arc::new(Schema::empty())),
                             options.max_rows,
                             options.max_bytes,

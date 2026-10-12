@@ -1,6 +1,6 @@
 use arrow_json::ReaderBuilder;
 use arrow_schema::{DataType, Field, Schema};
-use arrowbricks_core::agent::render::{MarkdownRenderer, OutputFormat};
+use arrowbricks_core::agent::render::{AgentRenderer, OutputFormat};
 use std::{fs::File, io::BufReader, str::FromStr, sync::Arc};
 // usage: render_nd <data.ndjson> <schema.tsv: name<TAB>ArrowType per line> <tsv|markdown>
 fn main() {
@@ -12,7 +12,7 @@ fn main() {
     let schema = Arc::new(Schema::new(fields));
     let reader = ReaderBuilder::new(schema.clone()).with_batch_size(4096).build(BufReader::new(File::open(&a[1]).unwrap())).unwrap();
     let format = if a[3] == "tsv" { OutputFormat::Tsv } else { OutputFormat::Markdown };
-    let mut r = MarkdownRenderer::new(schema, 100000, 50_000_000, 500, format).unwrap();
+    let mut r = AgentRenderer::new(schema, 100000, 50_000_000, 500, format).unwrap();
     for b in reader { r.push_batch(&b.unwrap()).unwrap(); }
     print!("{}", r.finish(true));
 }

@@ -35,7 +35,7 @@ impl OutputFormat {
     }
 }
 
-pub struct MarkdownRenderer {
+pub struct AgentRenderer {
     format: OutputFormat,
     schema: SchemaRef,
     output: String,
@@ -49,7 +49,7 @@ pub struct MarkdownRenderer {
     cells_truncated: bool,
     interrupt: Option<Interrupt>,
 }
-impl MarkdownRenderer {
+impl AgentRenderer {
     pub fn new(
         schema: SchemaRef,
         max_rows: usize,
@@ -475,7 +475,7 @@ mod tests {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
     }
     fn render(batch: &RecordBatch, rows: usize, bytes: usize, chars: usize, exhausted: bool) -> String {
-        let mut r = MarkdownRenderer::new(batch.schema(), rows, bytes, chars, OutputFormat::Markdown).unwrap();
+        let mut r = AgentRenderer::new(batch.schema(), rows, bytes, chars, OutputFormat::Markdown).unwrap();
         r.push_batch(batch).unwrap();
         r.finish(exhausted)
     }
@@ -518,7 +518,7 @@ mod tests {
         let b = batch(&["a"], vec![Arc::new(StringArray::from(vec!["long value"]))]);
         let flag = Arc::new(AtomicBool::new(false));
         assert!(
-            MarkdownRenderer::new_with_interrupt(
+            AgentRenderer::new_with_interrupt(
                 b.schema(),
                 10,
                 1000,
@@ -529,7 +529,7 @@ mod tests {
             )
             .is_err()
         );
-        let mut r = MarkdownRenderer::new(b.schema(), 10, 1000, 500, OutputFormat::Markdown).unwrap();
+        let mut r = AgentRenderer::new(b.schema(), 10, 1000, 500, OutputFormat::Markdown).unwrap();
         r.set_interrupt(Instant::now() + std::time::Duration::from_secs(10), flag.clone());
         flag.store(true, Ordering::Relaxed);
         assert!(r.push_batch(&b).unwrap_err().message.contains("cancelled"));
@@ -585,7 +585,7 @@ mod tests {
         let out = render(&b, 10, 2000, 500, true);
         assert!(out.contains("complete=true") && out.contains("\"NULL\""), "{out}");
         for (rows, bytes, chars) in [(0, 256, 1), (1, 255, 1), (1, 256, 0)] {
-            assert!(MarkdownRenderer::new(b.schema(), rows, bytes, chars, OutputFormat::Markdown).is_err());
+            assert!(AgentRenderer::new(b.schema(), rows, bytes, chars, OutputFormat::Markdown).is_err());
         }
     }
     #[test]
@@ -704,7 +704,7 @@ mod tests {
         }
     }
     fn render_tsv(batch: &RecordBatch, rows: usize, bytes: usize, chars: usize) -> String {
-        let mut r = MarkdownRenderer::new(batch.schema(), rows, bytes, chars, OutputFormat::Tsv).unwrap();
+        let mut r = AgentRenderer::new(batch.schema(), rows, bytes, chars, OutputFormat::Tsv).unwrap();
         r.push_batch(batch).unwrap();
         r.finish(true)
     }
@@ -873,7 +873,7 @@ mod tests {
         let all: Vec<char> = (0..=0x10ffff_u32).filter_map(char::from_u32).collect();
         let chunks: Vec<String> = all.chunks(512).map(|c| c.iter().collect()).collect();
         let b = batch(&["v"], vec![Arc::new(StringArray::from(chunks.clone()))]);
-        let mut r = MarkdownRenderer::new(b.schema(), chunks.len(), 64 << 20, 1 << 20, OutputFormat::Tsv).unwrap();
+        let mut r = AgentRenderer::new(b.schema(), chunks.len(), 64 << 20, 1 << 20, OutputFormat::Tsv).unwrap();
         r.push_batch(&b).unwrap();
         let out = r.finish(true);
         let table = out.split_once("\n\nrows_shown=").unwrap().0;
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn batch_schema_mismatch_errors_and_multiple_batches_append() {
         let b = batch(&["a"], vec![Arc::new(Int64Array::from(vec![1, 2]))]);
-        let mut r = MarkdownRenderer::new(b.schema(), 3, 1000, 500, OutputFormat::Markdown).unwrap();
+        let mut r = AgentRenderer::new(b.schema(), 3, 1000, 500, OutputFormat::Markdown).unwrap();
         assert!(r.push_batch(&b).unwrap());
         assert!(!r.push_batch(&b).unwrap());
         assert_eq!(r.rows(), 3);
@@ -913,7 +913,7 @@ mod tests {
         let out = r.finish(false);
         assert!(out.contains("rows_shown=3") && !out.contains("total_rows="));
         let other = batch(&["b"], vec![Arc::new(Int64Array::from(vec![1]))]);
-        let mut r = MarkdownRenderer::new(b.schema(), 3, 1000, 500, OutputFormat::Markdown).unwrap();
+        let mut r = AgentRenderer::new(b.schema(), 3, 1000, 500, OutputFormat::Markdown).unwrap();
         assert!(r.push_batch(&other).is_err());
     }
 }
