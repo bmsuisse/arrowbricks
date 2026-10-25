@@ -6,7 +6,7 @@
 <p align="center">Fast Databricks SQL for Python applications and AI agents.</p>
 
 - **Zero required Python dependencies.** One precompiled wheel. No Rust toolchain or cloud SDK needed.
-- **Fast Rust core.** Concurrent chunk downloads, lazy Arrow decoding, and streaming NDJSON, with result order preserved.
+- **Fast Rust core.** Concurrent chunk downloads, lazy Arrow decoding, and streaming NDJSON without materializing the full result, with result order preserved.
 - **Agent mode, new in 6.0.** A CLI and Python API that return compact typed TSV (or a Markdown table), explicit truncation, and actionable JSON errors. Formatting stays in Rust.
 
 Use Thrift by default or the Statement Execution API with `protocol="sea"`.
@@ -103,6 +103,14 @@ Arrow, avoiding intermediate Python rows or JSON. In a real warehouse test,
 a 100-row preview used **44% fewer bytes and 24% fewer tokens** than NDJSON.
 See [agent measurements and methodology](docs/research/agent-rendering.md) and
 [client benchmarks](docs/benchmarks.md) for workloads, comparisons, and limits.
+
+### Performance tips
+
+Numbers are measurements from one ~30 MB/s link to one warehouse, not guarantees.
+
+- **Select only the columns you need.** Selecting 3 columns instead of `SELECT *` was 1.5-6x faster and moved 1.9-15.8x fewer bytes across 5 tables.
+- **Keep `compress_results` at its default (`True`)** unless the link is very fast. Here it was 1.8-4.7x faster with 2-5.5x fewer bytes. Turning it off on a very fast link was not tested.
+- **Keep the Thrift default for small lookups.** It was about 0.15 s faster per tiny statement than `protocol="sea"` (a constant gap in these runs).
 
 ## Learn more
 

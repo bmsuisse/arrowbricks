@@ -15,6 +15,12 @@
 - Fix split cloud-fetch downloads accepting a short part offset by a long one
   (each part must now match its requested range) and overflowing on a
   `Content-Range` total near `u64::MAX`.
+- Docs only: reword the `stream_query_json` docstring and `docs/usage.md` so they
+  no longer imply the first row arrives early (it is available after the first
+  chunk is decoded, which on a bandwidth-limited link can be most of the total
+  download time), and add a README "Performance tips" section (column
+  projection, `compress_results`, Thrift for small lookups) with measurements
+  from one link.
 
 ## 6.2.0 — 2026-10-12
 
