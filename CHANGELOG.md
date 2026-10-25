@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Fix `upload_volume_file` copying the whole payload: `bytes` is now sent
+  zero-copy (peak memory no longer ~2x the file; 256 MiB local upload went
+  from +257 MiB peak RSS to +1 MiB), and `bytearray`/`memoryview`/numpy/pyarrow
+  buffers take one fast copy instead of PyO3's per-element extraction (about
+  9x faster for a 256 MiB `memoryview` in a debug build). Retries reuse the
+  same buffer instead of re-copying it. Non-buffer arguments raise `TypeError`.
+- Fix large volume uploads failing at `http_timeout`: the PUT deadline is now
+  `max(http_timeout, len(data) / 1 MiB/s)` (it is a total deadline covering the
+  body), so a slow-but-progressing upload of about 1 GB is no longer killed at
+  60 s. A stalled upload still fails, and timeouts are still not retried.
+- Fix split cloud-fetch downloads accepting a short part offset by a long one
+  (each part must now match its requested range) and overflowing on a
+  `Content-Range` total near `u64::MAX`.
+
 ## 6.2.0 — 2026-10-12
 
 Why TSV: with the shipped renderer on ten sample result sets, TSV used 28% fewer

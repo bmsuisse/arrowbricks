@@ -133,12 +133,21 @@ class DatabricksClient:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.aclose()
 
-    async def upload_volume_file(self, volume_path: str, data: bytes) -> None:
+    async def upload_volume_file(self, volume_path: str, data: bytes | bytearray | memoryview) -> None:
         """Uploads `data` to a Unity Catalog volume path via the Files API,
         overwriting anything already there. `volume_path` is caller-supplied
         in full (e.g. `/Volumes/my_catalog/my_schema/my_volume/some/file.parquet`)
         -- this package has no knowledge of any specific catalog/schema/volume.
-        Raises `RuntimeError` (message only) on failure."""
+
+        `data` may be `bytes` (shared with the upload, not copied -- the
+        cheapest and recommended form) or any contiguous byte buffer
+        (`bytearray`, `memoryview`, a numpy `uint8` array, a pyarrow `Buffer`),
+        which is copied once up front. Anything else raises `TypeError`.
+
+        The PUT's total deadline is `max(http_timeout, len(data) / 1 MiB/s)`,
+        so a slow-but-progressing large upload is not cut off at `http_timeout`
+        while a stalled one still fails. A timeout is not retried; transient
+        HTTP errors are. Raises `RuntimeError` (message only) on failure."""
         await self._core_client.upload_volume_file(volume_path, data)
 
     async def delete_volume_file(self, volume_path: str) -> None:
