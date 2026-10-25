@@ -17,6 +17,46 @@ async def test_upload_volume_file_puts_bytes_with_overwrite(mock_volume_files):
 
 
 @pytest.mark.asyncio
+async def test_upload_volume_file_accepts_any_contiguous_byte_buffer(mock_volume_files):
+    import array
+
+    payload = bytes(range(256)) * 1000
+    strided = bytearray(payload + payload)  # every 2nd byte -> non-contiguous view
+    inputs = {
+        "bytes": payload,
+        "bytearray": bytearray(payload),
+        "memoryview": memoryview(payload),
+        "memoryview_bytearray": memoryview(bytearray(payload)),
+        "array": array.array("B", payload),
+        "strided_memoryview": memoryview(strided)[::2],
+    }
+    expected = {name: payload for name in inputs}
+    expected["strided_memoryview"] = bytes(strided[::2])
+
+    server, put_route, _delete_route = mock_volume_files()
+    seen: list[bytes] = []
+
+    def _record(request):
+        seen.append(request.body)
+        return Response(status=204)
+
+    put_route.mock(side_effect=_record)
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+    for name, data in inputs.items():
+        seen.clear()
+        await client.upload_volume_file("/Volumes/cat/schema/vol/f.bin", data)
+        assert seen == [expected[name]], name
+
+
+@pytest.mark.asyncio
+async def test_upload_volume_file_rejects_non_buffer(mock_volume_files):
+    server, _put_route, _delete_route = mock_volume_files()
+    client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
+    with pytest.raises(TypeError):
+        await client.upload_volume_file("/Volumes/cat/schema/vol/f.bin", "text")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_delete_volume_file_treats_404_as_success(mock_volume_files):
     server, _put_route, delete_route = mock_volume_files()
     delete_route.mock(Response(status=404))

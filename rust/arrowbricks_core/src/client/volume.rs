@@ -2,11 +2,25 @@
 //! (`/api/2.0/fs/files{volume_path}`) -- unrelated to either SQL backend,
 //! just another authenticated HTTP operation this client exposes.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use reqwest::StatusCode;
 
 use super::DbClient;
 use super::error::ApiError;
+
+/// Slowest sustained upload rate the PUT deadline tolerates (1 MiB/s). The
+/// per-request deadline is a total one covering the body, so it scales with
+/// the payload: `max(http_timeout, len / MIN_UPLOAD_BYTES_PER_SEC)`. A slow
+/// but progressing link is not killed at `http_timeout`; a stuck one still
+/// fails once the scaled deadline passes.
+pub const MIN_UPLOAD_BYTES_PER_SEC: u64 = 1 << 20;
+
+/// Total deadline for one upload PUT of `len` bytes.
+pub fn upload_deadline(http_timeout: Duration, len: usize) -> Duration {
+    http_timeout.max(Duration::from_secs((len as u64).div_ceil(MIN_UPLOAD_BYTES_PER_SEC)))
+}
 
 impl DbClient {
     /// Uploads `data` to a Unity Catalog volume path via the Files API,
@@ -17,6 +31,7 @@ impl DbClient {
     /// cheap refcount clone, not a real copy.
     pub async fn upload_volume_file(&self, volume_path: &str, data: Bytes) -> Result<(), ApiError> {
         let url = format!("{}/api/2.0/fs/files{}", self.host, volume_path);
+        let timeout = upload_deadline(self.http_timeout, data.len());
         self.retry_call(|| async {
             let token = self.token_provider.get_token().await?;
             let resp = self
@@ -26,7 +41,7 @@ impl DbClient {
                 .bearer_auth(&token)
                 .header("Content-Type", "application/octet-stream")
                 .body(data.clone())
-                .timeout(self.http_timeout)
+                .timeout(timeout)
                 .send()
                 .await
                 // `overwrite=true` means retrying this exact PUT is safe --
@@ -65,5 +80,19 @@ impl DbClient {
             Err(ApiError::from_status(status, &text, true))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_deadline_scales_with_size_but_never_below_http_timeout() {
+        let base = Duration::from_secs(60);
+        assert_eq!(upload_deadline(base, 0), base);
+        assert_eq!(upload_deadline(base, 10 << 20), base);
+        assert_eq!(upload_deadline(base, 600 << 20), Duration::from_secs(600));
+        assert_eq!(upload_deadline(base, (600 << 20) + 1), Duration::from_secs(601));
     }
 }
