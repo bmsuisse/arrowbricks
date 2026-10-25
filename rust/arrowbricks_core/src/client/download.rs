@@ -248,7 +248,8 @@ impl DbClient {
                         if start >= total {
                             break;
                         }
-                        let end = (start + rest_size - 1).min(total - 1);
+                        // `total` is untrusted: saturate rather than overflow.
+                        let end = start.saturating_add(rest_size - 1).min(total - 1);
                         let this = self.clone();
                         let url = url.to_string();
                         let part_stats = stats.clone();
@@ -271,6 +272,20 @@ impl DbClient {
                                     resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
                                 })
                                 .await;
+                            // A part must be exactly the range asked for: the
+                            // final sum check alone would accept a short part
+                            // offset by a long one (wrong bytes, right total).
+                            let bytes = bytes.and_then(|b| {
+                                let expected = end - start + 1;
+                                if b.len() as u64 == expected {
+                                    Ok(b)
+                                } else {
+                                    Err(ApiError::permanent(format!(
+                                        "split download part bytes={start}-{end} returned {} bytes, expected {expected}",
+                                        b.len()
+                                    )))
+                                }
+                            });
                             if let Ok(b) = &bytes {
                                 part_stats.bytes_downloaded.fetch_add(b.len() as u64, Ordering::Relaxed);
                             }

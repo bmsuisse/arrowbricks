@@ -1737,6 +1737,86 @@ async fn thrift_split_download_fails_on_assembled_length_mismatch() {
 }
 
 #[tokio::test]
+async fn thrift_split_download_absurd_content_range_total_fails_without_aborting() {
+    let server = MockServer::start().await;
+    mount_single_link_statement(&server, "/_data/absurd-total", 60_000).await;
+
+    // The Content-Range total is untrusted: u64::MAX bytes must never size an
+    // allocation (an allocation failure aborts the whole process, not just
+    // the query), only turn into a normal error.
+    const ABSURD_TOTAL: u64 = u64::MAX;
+    Mock::given(method("GET"))
+        .and(path("/_data/absurd-total"))
+        .respond_with(move |req: &Request| {
+            let (start, _end) = parse_range(req).expect("client always sends Range on this path");
+            ResponseTemplate::new(206)
+                .insert_header(
+                    "Content-Range",
+                    format!("bytes {start}-{}/{ABSURD_TOTAL}", start + (1 << 20) - 1),
+                )
+                .set_body_raw(vec![0u8; 1 << 20], "application/octet-stream")
+        })
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let err = stream
+        .fetchall_arrow()
+        .await
+        .expect_err("an absurd declared total must fail loudly, not abort or succeed");
+    assert!(
+        err.message.contains("expected"),
+        "got a different error than expected: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn thrift_split_download_rejects_short_part_offset_by_long_part() {
+    let server = MockServer::start().await;
+    mount_single_link_statement(&server, "/_data/offset-parts", 60_000).await;
+
+    // 3 MiB file, three 1 MiB ranges. The middle part returns 10 bytes too
+    // few and the last 10 bytes too many, so the assembled length equals the
+    // declared total and only a per-part length check can catch it.
+    const MIB: u64 = 1 << 20;
+    const TOTAL: u64 = 3 * MIB;
+    Mock::given(method("GET"))
+        .and(path("/_data/offset-parts"))
+        .respond_with(move |req: &Request| {
+            let (start, end) = parse_range(req).expect("client always sends Range on this path");
+            let end = end.min(TOTAL - 1);
+            let len = match start {
+                MIB => MIB - 10,
+                s if s == 2 * MIB => MIB + 10,
+                _ => end - start + 1,
+            };
+            ResponseTemplate::new(206)
+                .insert_header("Content-Range", format!("bytes {start}-{end}/{TOTAL}"))
+                .set_body_raw(vec![0u8; len as usize], "application/octet-stream")
+        })
+        .mount(&server)
+        .await;
+
+    let client = thrift_client(&server);
+    let mut stream = execute_lazy_thrift(client, "SELECT * FROM t", None, None, None)
+        .await
+        .unwrap();
+    let err = stream
+        .fetchall_arrow()
+        .await
+        .expect_err("a wrong-length part must fail loudly even when the total adds up");
+    assert!(
+        err.message.contains("split download part"),
+        "got a different error than expected: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
 async fn thrift_concurrent_single_link_queries_stay_correct_under_split_contention() {
     let server = MockServer::start().await;
     let schema = test_schema();
