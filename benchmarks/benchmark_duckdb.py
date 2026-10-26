@@ -187,7 +187,6 @@ async def run_pipeline(name, server, blob, trials, live=None):
         if trial:  # first trial is warmup
             times.append(elapsed)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    import duckdb
 
     execute_s = statistics.median(p[0] for p in phases[1:]) if len(phases) > 1 else None
     fetch_s = statistics.median(p[1] for p in phases[1:]) if len(phases) > 1 else None
