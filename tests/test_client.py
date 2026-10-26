@@ -53,7 +53,7 @@ async def test_upload_volume_file_rejects_non_buffer(mock_volume_files):
     server, _put_route, _delete_route = mock_volume_files()
     client = DatabricksClient(server.host, WAREHOUSE_ID, token="test-token", protocol="sea")
     with pytest.raises(TypeError):
-        await client.upload_volume_file("/Volumes/cat/schema/vol/f.bin", "text")  # type: ignore[arg-type]
+        await client.upload_volume_file("/Volumes/cat/schema/vol/f.bin", "text")  # ty: ignore[invalid-argument-type]
 
 
 @pytest.mark.asyncio

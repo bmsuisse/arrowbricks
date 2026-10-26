@@ -7,6 +7,7 @@ reorder, Arrow/JSON/NDJSON decode)."""
 
 from __future__ import annotations
 
+import array
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -133,7 +134,7 @@ class DatabricksClient:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.aclose()
 
-    async def upload_volume_file(self, volume_path: str, data: bytes | bytearray | memoryview) -> None:
+    async def upload_volume_file(self, volume_path: str, data: bytes | bytearray | memoryview | array.array) -> None:
         """Uploads `data` to a Unity Catalog volume path via the Files API,
         overwriting anything already there. `volume_path` is caller-supplied
         in full (e.g. `/Volumes/my_catalog/my_schema/my_volume/some/file.parquet`)
