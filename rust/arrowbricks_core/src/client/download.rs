@@ -16,6 +16,21 @@ use super::MAX_SPLIT_PARTS;
 use super::error::{ApiError, join_error};
 use super::model::QueryStatsAccumulator;
 
+/// Parses `Content-Range: bytes <start>-<end>/<total>` (the only form a 206
+/// response to a single-range request may use). `*` totals and unsatisfied-range
+/// forms yield `None`.
+fn parse_content_range(headers: &reqwest::header::HeaderMap) -> Option<(u64, u64, u64)> {
+    let value = headers.get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
+    let rest = value.trim().strip_prefix("bytes")?.trim_start();
+    let (range, total) = rest.split_once('/')?;
+    let (start, end) = range.trim().split_once('-')?;
+    Some((
+        start.trim().parse().ok()?,
+        end.trim().parse().ok()?,
+        total.trim().parse().ok()?,
+    ))
+}
+
 /// Unwraps one downloaded chunk file's outer LZ4 Frame compression --
 /// server-side, this is a whole-file wrapper applied because we asked for
 /// `result_compression: "LZ4_FRAME"`, not Arrow-IPC's own (unrelated,
@@ -226,16 +241,27 @@ impl DbClient {
                     return Err(ApiError::from_status(status, &text, true));
                 }
                 let ranged = status == reqwest::StatusCode::PARTIAL_CONTENT;
-                let total: Option<u64> = resp
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.rsplit('/').next().and_then(|t| t.parse().ok()));
-                if ranged && total.is_none() {
-                    return Err(ApiError::permanent(
-                        "cloud-fetch link answered a Range request with 206 Partial Content but an \
-                         unparseable Content-Range header -- refusing to silently return a truncated file",
-                    ));
+                // A 206 must describe exactly the head we asked for: starting
+                // at 0 and ending at `part_size - 1` (or the last byte of a
+                // smaller file). Anything else would be spliced in as wrong
+                // bytes with the right length.
+                let mut total: Option<u64> = None;
+                let mut head_len: Option<u64> = None;
+                if ranged {
+                    let Some((first, last, size)) = parse_content_range(resp.headers()) else {
+                        return Err(ApiError::permanent(
+                            "cloud-fetch link answered a Range request with 206 Partial Content but an \
+                             unparseable Content-Range header -- refusing to silently return a truncated file",
+                        ));
+                    };
+                    if first != 0 || size == 0 || last != (part_size - 1).min(size - 1) {
+                        return Err(ApiError::permanent(format!(
+                            "cloud-fetch link answered bytes=0-{} with Content-Range bytes {first}-{last}/{size}",
+                            part_size - 1
+                        )));
+                    }
+                    total = Some(size);
+                    head_len = Some(last + 1);
                 }
 
                 let mut downloads = tokio::task::JoinSet::new();
@@ -268,6 +294,19 @@ impl DbClient {
                                     if !status.is_success() {
                                         let text = resp.text().await.unwrap_or_default();
                                         return Err(ApiError::from_status(status, &text, true));
+                                    }
+                                    // The probe proved the server honours ranges, so
+                                    // each part must be a 206 for exactly this range
+                                    // of the same file; a 200 or another interval is
+                                    // wrong data, not a transient failure.
+                                    let got = (status == reqwest::StatusCode::PARTIAL_CONTENT)
+                                        .then(|| parse_content_range(resp.headers()))
+                                        .flatten();
+                                    if got != Some((start, end, total)) {
+                                        return Err(ApiError::permanent(format!(
+                                            "split download part bytes={start}-{end}/{total} was answered with status {status} \
+                                             and Content-Range {got:?}"
+                                        )));
                                     }
                                     resp.bytes().await.map_err(|e| ApiError::from_reqwest(e, true))
                                 })
@@ -303,6 +342,15 @@ impl DbClient {
                         return Err(ApiError::from_reqwest(error, true));
                     }
                 };
+                if let Some(expected) = head_len
+                    && head.len() as u64 != expected
+                {
+                    downloads.shutdown().await;
+                    return Err(ApiError::permanent(format!(
+                        "split download probe returned {} bytes, expected {expected}",
+                        head.len()
+                    )));
+                }
                 Ok((total, head, downloads))
             })
             .await?;
@@ -461,6 +509,84 @@ mod tests {
             result.is_err(),
             "a file shorter than its declared size must be an error"
         );
+    }
+
+    /// Serves a 12-byte file `abcdefghijkl` that honours `Range`, except where
+    /// `fault` says to lie: the failure modes a length check alone cannot see.
+    async fn serve_range_file(fault: &'static str) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        if socket.read_u8().await.map(|b| request.push(b)).is_err() {
+                            return;
+                        }
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    let range = request.lines().find(|s| s.starts_with("range:")).unwrap();
+                    let (start, end) = range.split_once("bytes=").unwrap().1.split_once('-').unwrap();
+                    let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
+                    let body = &b"abcdefghijkl"[start..=end];
+                    let (status, content_range) = match (fault, start) {
+                        ("wrong_offset", s) if s > 0 => {
+                            ("206 Partial Content", format!("bytes {}-{}/12", s - 1, end - 1))
+                        }
+                        ("probe_wrong_offset", 0) => ("206 Partial Content", format!("bytes 1-{}/12", end + 1)),
+                        ("part_ignores_range", s) if s > 0 => ("200 OK", String::new()),
+                        _ => ("206 Partial Content", format!("bytes {start}-{end}/12")),
+                    };
+                    let range_header = if content_range.is_empty() {
+                        String::new()
+                    } else {
+                        format!("Content-Range: {content_range}\r\n")
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{range_header}Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                });
+            }
+        });
+        address
+    }
+
+    /// Right length from the wrong place passes a byte-count check; only the
+    /// status and `Content-Range` of every part can catch it.
+    #[tokio::test]
+    async fn split_download_rejects_parts_that_are_not_the_requested_range() {
+        for fault in ["wrong_offset", "probe_wrong_offset", "part_ignores_range"] {
+            let address = serve_range_file(fault).await;
+            let client = Arc::new(
+                DbClient::new(&format!("http://{address}"), "wh", "token")
+                    .with_retry_attempts(1)
+                    .with_retry_max_wait_s(0.0),
+            );
+            let stats = Arc::new(QueryStatsAccumulator::default());
+            let result = client
+                .fetch_link_bytes_split(&format!("http://{address}/blob"), false, 4, 3, &stats)
+                .await;
+            assert!(
+                result.is_err(),
+                "{fault}: must not assemble wrong bytes, got {result:?}"
+            );
+        }
+        let address = serve_range_file("none").await;
+        let client = Arc::new(DbClient::new(&format!("http://{address}"), "wh", "token"));
+        let stats = Arc::new(QueryStatsAccumulator::default());
+        let bytes = client
+            .fetch_link_bytes_split(&format!("http://{address}/blob"), false, 4, 3, &stats)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"abcdefghijkl");
     }
 
     #[tokio::test]

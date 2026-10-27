@@ -142,12 +142,26 @@ fn upload_body(data: &Bound<'_, PyAny>) -> PyResult<bytes::Bytes> {
     // bytearray/memoryview/numpy/pyarrow are mutable or not owned by us: take
     // one contiguous copy now so later caller mutation cannot change the
     // upload mid-flight.
-    let buffer = pyo3::buffer::PyBuffer::<u8>::get(data).map_err(|_| {
+    let py = data.py();
+    if let Ok(buffer) = pyo3::buffer::PyBuffer::<u8>::get(data) {
+        return Ok(bytes::Bytes::from(buffer.to_vec(py)?));
+    }
+    // PyArrow buffers (and `array('b')`) export the signed-byte format `b`,
+    // which `PyBuffer<u8>` refuses; the raw bits are the same bytes.
+    if let Ok(buffer) = pyo3::buffer::PyBuffer::<i8>::get(data) {
+        let signed = buffer.to_vec(py)?;
+        return Ok(bytes::Bytes::from(
+            signed.into_iter().map(|b| b as u8).collect::<Vec<u8>>(),
+        ));
+    }
+    // Last resort keeps the pre-6.3 behaviour: any sequence of ints in 0..=255
+    // (a `list[int]`, a numpy int64 array, ...). Slow, but it used to work.
+    data.extract::<Vec<u8>>().map(bytes::Bytes::from).map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
-            "upload_volume_file data must be bytes or a contiguous byte buffer (bytearray, memoryview, numpy uint8, ...)",
+            "upload_volume_file data must be bytes, a byte buffer (bytearray, memoryview, numpy, pyarrow, ...) \
+             or a sequence of ints in 0..=255",
         )
-    })?;
-    Ok(bytes::Bytes::from(buffer.to_vec(data.py())?))
+    })
 }
 
 /// Wraps a `PyErr` raised by the caller's own `token_provider` callable (its

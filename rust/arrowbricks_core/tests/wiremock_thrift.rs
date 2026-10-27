@@ -1702,18 +1702,18 @@ async fn thrift_split_download_fails_on_assembled_length_mismatch() {
     let server = MockServer::start().await;
     mount_single_link_statement(&server, "/_data/short-parts", 60_000).await;
 
-    // Every part -- including the probe -- honestly declares a 5MiB total
-    // via Content-Range, but actually returns far fewer bytes than its own
-    // declared range covers (a misbehaving server). The declared total
-    // guarantees more than one part gets requested; every part coming up
-    // short must be caught by the final length check, not silently
-    // accepted as a truncated-but-otherwise-fine result.
+    // Every part -- including the probe -- honestly declares the range it was
+    // asked for of a 5MiB total via Content-Range, but actually returns far
+    // fewer bytes than that range covers (a misbehaving server). The declared
+    // total guarantees more than one part gets requested; every part coming
+    // up short must be caught by the length checks, not silently accepted as
+    // a truncated-but-otherwise-fine result.
     const DECLARED_TOTAL: u64 = 5 * (1 << 20);
     Mock::given(method("GET"))
         .and(path("/_data/short-parts"))
         .respond_with(move |req: &Request| {
-            let (start, _end) = parse_range(req).expect("client always sends Range on this path");
-            let end = (start + 9).min(DECLARED_TOTAL - 1);
+            let (start, end) = parse_range(req).expect("client always sends Range on this path");
+            let end = end.min(DECLARED_TOTAL - 1);
             ResponseTemplate::new(206)
                 .insert_header("Content-Range", format!("bytes {start}-{end}/{DECLARED_TOTAL}"))
                 .set_body_raw(vec![0u8; 10], "application/octet-stream")
@@ -1748,12 +1748,9 @@ async fn thrift_split_download_absurd_content_range_total_fails_without_aborting
     Mock::given(method("GET"))
         .and(path("/_data/absurd-total"))
         .respond_with(move |req: &Request| {
-            let (start, _end) = parse_range(req).expect("client always sends Range on this path");
+            let (start, end) = parse_range(req).expect("client always sends Range on this path");
             ResponseTemplate::new(206)
-                .insert_header(
-                    "Content-Range",
-                    format!("bytes {start}-{}/{ABSURD_TOTAL}", start + (1 << 20) - 1),
-                )
+                .insert_header("Content-Range", format!("bytes {start}-{end}/{ABSURD_TOTAL}"))
                 .set_body_raw(vec![0u8; 1 << 20], "application/octet-stream")
         })
         .mount(&server)
