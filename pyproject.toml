@@ -105,3 +105,4 @@ select = ["E", "F", "I", "UP", "S", "B"]
 "tests/arro3_free/*" = ["S101", "S106"]
 # One-off benchmark harness: terse scripts, seeded (non-crypto) randomness, asserts as checks.
 "benchmarks/agent-output-format/*" = ["B905", "E501", "E731", "E741", "S101", "S311"]
+"benchmarks/benchmark_duckdb.py" = ["E501", "S608"]
