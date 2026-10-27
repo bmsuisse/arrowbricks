@@ -218,6 +218,10 @@ if __name__ == "__main__":
     if args.trials < 2:
         parser.error("--trials must be >= 2 (the first trial is a discarded warmup)")
     if args.live_env:
+        if not args.table:
+            parser.error("--live-env requires --table")
+        if args.pipeline == "replayable":
+            parser.error("--pipeline replayable replays cached IPC bytes and is not available in live mode")
         live = {"env": args.live_env, "table": args.table, "where": args.where, "limit": args.limit, "protocol": args.protocol}
         out = asyncio.run(run_pipeline(args.pipeline, None, None, args.trials, live))
         out.update(table=args.table, where=args.where, limit=args.limit, protocol=args.protocol or "default")
