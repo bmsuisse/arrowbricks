@@ -207,13 +207,17 @@ async def stream_query_json(
     mid-download), then each result row as a ready-to-send JSON string --
     one per SSE frame, say.
 
-    Unlike cursor.py's fetch methods, this registers and emits each Databricks
-    chunk AS IT ARRIVES rather than buffering the full result first, via
-    `._core.Client.stream_ndjson_lines` -- the first row reaches the caller
-    after ~one chunk's fetch/decode/reorder/encode time, not the whole
-    statement's; chunk order is restored there too (chunks can complete out
-    of order over the network). Decode and NDJSON encoding both happen in
-    Rust -- this function only forwards already-formatted lines.
+    Unlike cursor.py's fetch methods, this does not buffer the full result
+    first: it emits rows via `._core.Client.stream_ndjson_lines` as chunks
+    are decoded, in order (chunks can complete out of order over the
+    network; order is restored there). The first row is available once the
+    first chunk has been downloaded and decoded. For a result spread over
+    many chunks on a bandwidth-limited link that can be most of the total
+    download time (measured on one ~30 MB/s link: the first row arrived at
+    84-97% of the stream total), so do not count on early rows for large
+    results. What streaming does give you: heartbeats while waiting, bounded
+    memory, and no full materialization. Decode and NDJSON encoding both
+    happen in Rust -- this function only forwards already-formatted lines.
 
     `non_finite_floats` -- `"null"` (default) or `"string"`. A NaN/Infinity/
     -Infinity float column comes back from Databricks like any other value,

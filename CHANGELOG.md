@@ -1,5 +1,34 @@
 # Changelog
 
+## 6.3.0 — 2026-10-27
+
+- Fix `upload_volume_file` copying the whole payload: `bytes` is now sent
+  zero-copy (peak memory no longer ~2x the file; 256 MiB local upload went
+  from +257 MiB peak RSS to +1 MiB), and `bytearray`/`memoryview`/`array.array`/
+  numpy/pyarrow buffers take one fast copy instead of PyO3's per-element
+  extraction (about 9x faster for a 256 MiB `memoryview` in a debug build).
+  Signed-byte buffers (pyarrow `Buffer`, `array('b')`) are accepted. A plain
+  sequence of ints in 0..=255 (`list[int]`, `tuple`) still works as before,
+  just slowly; anything else raises `TypeError`. Retries reuse the same buffer
+  instead of re-copying it.
+- Fix large volume uploads failing at `http_timeout`: the PUT deadline is now
+  `max(http_timeout, len(data) / 1 MiB/s)` (it is a total deadline covering the
+  body), so a slow-but-progressing upload of about 1 GB is no longer killed at
+  60 s. `http_timeout` is therefore a floor for uploads, not a ceiling: a
+  stalled 1 GiB upload takes about 17 minutes to fail. Timeouts are still not
+  retried.
+- Fix split cloud-fetch downloads accepting wrong bytes: the probe and every
+  part must now be a `206` whose `Content-Range` is exactly the requested
+  range of the same file (a part of the right length from the wrong offset, or
+  a `200` answer to a tail range, used to be spliced in silently), and a
+  `Content-Range` total near `u64::MAX` no longer overflows.
+- Docs only: reword the `stream_query_json` docstring and `docs/usage.md` so they
+  no longer imply the first row arrives early (it is available after the first
+  chunk is decoded, which on a bandwidth-limited link can be most of the total
+  download time), and add a README "Performance tips" section (column
+  projection, `compress_results`, Thrift for small lookups) with measurements
+  from one link.
+
 ## 6.2.0 — 2026-10-12
 
 Why TSV: with the shipped renderer on ten sample result sets, TSV used 28% fewer

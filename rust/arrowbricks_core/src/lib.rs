@@ -130,6 +130,40 @@ fn read_ipc_stream(data: Bound<'_, PyBytes>) -> PyResult<PyTable> {
     PyTable::try_new(batches, schema)
 }
 
+/// Turns the Python `data` argument of `upload_volume_file` into `Bytes`
+/// without the per-element `Vec<u8>` extraction (20x slower) and, for the
+/// common `bytes` case, without any copy.
+fn upload_body(data: &Bound<'_, PyAny>) -> PyResult<bytes::Bytes> {
+    if let Ok(b) = data.cast::<PyBytes>() {
+        // Immutable, so the Python object can own the memory for the whole
+        // upload (and every retry) with no copy.
+        return Ok(bytes::Bytes::from_owner(pyo3::pybacked::PyBackedBytes::from(b.clone())));
+    }
+    // bytearray/memoryview/numpy/pyarrow are mutable or not owned by us: take
+    // one contiguous copy now so later caller mutation cannot change the
+    // upload mid-flight.
+    let py = data.py();
+    if let Ok(buffer) = pyo3::buffer::PyBuffer::<u8>::get(data) {
+        return Ok(bytes::Bytes::from(buffer.to_vec(py)?));
+    }
+    // PyArrow buffers (and `array('b')`) export the signed-byte format `b`,
+    // which `PyBuffer<u8>` refuses; the raw bits are the same bytes.
+    if let Ok(buffer) = pyo3::buffer::PyBuffer::<i8>::get(data) {
+        let signed = buffer.to_vec(py)?;
+        return Ok(bytes::Bytes::from(
+            signed.into_iter().map(|b| b as u8).collect::<Vec<u8>>(),
+        ));
+    }
+    // Last resort keeps the pre-6.3 behaviour: any sequence of ints in 0..=255
+    // (a `list[int]`, a numpy int64 array, ...). Slow, but it used to work.
+    data.extract::<Vec<u8>>().map(bytes::Bytes::from).map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "upload_volume_file data must be bytes, a byte buffer (bytearray, memoryview, numpy, pyarrow, ...) \
+             or a sequence of ints in 0..=255",
+        )
+    })
+}
+
 /// Wraps a `PyErr` raised by the caller's own `token_provider` callable (its
 /// call itself, awaiting its coroutine, or extracting a non-`str` return
 /// value) into an `ApiError`. This function's *only* caller is
@@ -869,16 +903,18 @@ impl PyDbClient {
     }
 
     /// Uploads `data` to a Unity Catalog volume path via the Files API,
-    /// overwriting anything already there.
+    /// overwriting anything already there. `bytes` is borrowed zero-copy;
+    /// `bytearray` and other contiguous byte buffers (memoryview, numpy
+    /// `uint8`, pyarrow `Buffer`) are copied once, off the per-element path.
     #[pyo3(signature = (volume_path, data))]
     fn upload_volume_file<'py>(
         &self,
         py: Python<'py>,
         volume_path: String,
-        data: Vec<u8>,
+        data: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.inner.clone();
-        let data = bytes::Bytes::from(data);
+        let data = upload_body(data)?;
         future_into_py_in_call(py, async move {
             client
                 .upload_volume_file(&volume_path, data)
