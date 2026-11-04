@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="assets/logo.svg" width="72" height="72" alt="arrowbricks logo">
+  <img src="assets/logo.svg" height="72" alt="arrowbricks">
 </p>
-
-<h1 align="center">arrowbricks</h1>
 <p align="center">Fast Databricks SQL for Python applications and AI agents.</p>
 
 - **Zero required Python dependencies.** One precompiled wheel. No Rust toolchain or cloud SDK needed.
