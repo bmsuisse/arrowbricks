@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" height="72" alt="arrowbricks">
+  <img src="assets/logo.svg" height="120" alt="arrowbricks">
 </p>
 <p align="center">Fast Databricks SQL for Python applications and AI agents.</p>
 
