@@ -923,6 +923,18 @@ impl PyDbClient {
         })
     }
 
+    /// Downloads the file at `volume_path` and returns its contents as `bytes`.
+    fn download_volume_file<'py>(&self, py: Python<'py>, volume_path: String) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.inner.clone();
+        future_into_py_in_call(py, async move {
+            let data = client
+                .download_volume_file(&volume_path)
+                .await
+                .map_err(api_error_to_pyerr)?;
+            Ok(Python::attach(|py| pyo3::types::PyBytes::new(py, &data).unbind()))
+        })
+    }
+
     /// Deletes a file at `volume_path` (see `upload_volume_file`). A 404 is
     /// treated as success -- the file is already gone, fine for idempotent
     /// staging cleanup.

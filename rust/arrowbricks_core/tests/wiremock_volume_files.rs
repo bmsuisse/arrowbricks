@@ -30,6 +30,43 @@ async fn upload_volume_file_sends_overwrite_and_content_type() {
 }
 
 #[tokio::test]
+async fn download_volume_file_returns_exact_body() {
+    let server = MockServer::start().await;
+    let body = vec![0u8, 255, 1, 254, b'%', b'P', b'D', b'F'];
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/2\.0/fs/files/Volumes/cat/schema/vol/file\.pdf$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let got = client
+        .download_volume_file("/Volumes/cat/schema/vol/file.pdf")
+        .await
+        .unwrap();
+    assert_eq!(got.as_ref(), body.as_slice());
+}
+
+#[tokio::test]
+async fn download_volume_file_404_is_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(DbClient::new(&server.uri(), WAREHOUSE_ID, "fake-token"));
+    let err = client
+        .download_volume_file("/Volumes/cat/schema/vol/missing.pdf")
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("404") || err.message.contains("not found"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn delete_volume_file_succeeds_on_204() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
