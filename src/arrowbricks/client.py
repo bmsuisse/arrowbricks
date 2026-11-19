@@ -157,6 +157,11 @@ class DatabricksClient:
         failure."""
         await self._core_client.upload_volume_file(volume_path, data)
 
+    async def download_volume_file(self, volume_path: str) -> bytes:
+        """Downloads the file at `volume_path` (see upload_volume_file) and
+        returns its contents. Raises on a missing file (404)."""
+        return await self._core_client.download_volume_file(volume_path)
+
     async def delete_volume_file(self, volume_path: str) -> None:
         """Deletes a file at `volume_path` (see upload_volume_file). A 404 is
         treated as success -- the file is already gone, which is fine for

@@ -57,6 +57,34 @@ impl DbClient {
         .await
     }
 
+    /// Downloads a Unity Catalog volume file in one GET on the pooled
+    /// connection. Single request on purpose: for typical files the server's
+    /// time-to-first-byte dominates, so range-splitting only adds round trips.
+    /// A non-2xx (incl. 404) is an error, unlike delete.
+    pub async fn download_volume_file(&self, volume_path: &str) -> Result<Bytes, ApiError> {
+        let url = format!("{}/api/2.0/fs/files{}", self.host, volume_path);
+        self.retry_call(|| async {
+            let token = self.token_provider.get_token().await?;
+            // No total request timeout: headers get `http_timeout`, the body a
+            // deadline scaled to Content-Length (same 1 MiB/s floor as upload).
+            let resp = tokio::time::timeout(self.http_timeout, self.http.get(&url).bearer_auth(&token).send())
+                .await
+                .map_err(|_| ApiError::permanent("volume download timed out waiting for response headers"))?
+                .map_err(|e| ApiError::from_reqwest(e, true))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(ApiError::from_status(status, &text, true));
+            }
+            let deadline = upload_deadline(self.http_timeout, resp.content_length().unwrap_or(0) as usize);
+            tokio::time::timeout(deadline, resp.bytes())
+                .await
+                .map_err(|_| ApiError::permanent("volume download timed out reading body"))?
+                .map_err(|e| ApiError::from_reqwest(e, true))
+        })
+        .await
+    }
+
     /// Deletes a file at `volume_path` (see `upload_volume_file`). A 404 is
     /// treated as success -- the file is already gone, which is fine for
     /// idempotent staging cleanup.

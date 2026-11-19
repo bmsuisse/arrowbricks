@@ -1,4 +1,12 @@
 # Changelog
+## 6.4.0 2026-11-19
+New `DatabricksClient.download_volume_file(volume_path) -> bytes`: read a Unity
+Catalog volume file via the Files API. One GET on the pooled connection (no
+`Accept-Encoding`: PDFs/parquet are already compressed); headers wait up to
+`http_timeout`, the body gets `max(http_timeout, Content-Length / 1 MiB/s)`.
+404 and other non-2xx raise. Measured on an 83 KB PDF: ~280 ms warm, almost all
+Databricks-side wait; 32 concurrent reads (`asyncio.gather`) finish in ~400 ms
+total (13 ms/file).
 
 ## 6.3.0 — 2026-10-27
 
